@@ -1,0 +1,20 @@
+# --- data & outputs: keep the folders, ignore their contents ---
+/GAS/*
+/results/*
+!/GAS/.gitkeep
+!/results/.gitkeep
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# --- os / editor ---
+Thumbs.db
+.DS_Store
+.vscode/
+
+# --- transient run logs ---
+result.txt
+*_header.txt
