@@ -1,0 +1,15 @@
+# GC-IMS Peak-Finding Pipeline — dependencies
+# Version: ver.01 — by Albert Sheng
+#
+# Install:  python -m pip install -r requirements.txt
+# Note: tkinter (file-picker) ships with standard CPython on Windows — no pip needed.
+#
+# Per-script needs:
+#   test_readGAS.py : stdlib only (numpy optional)
+#   readGAS.py      : numpy (required), matplotlib (optional, for heatmap)
+#   peaks.py        : numpy, scipy, scikit-image, matplotlib
+
+numpy>=1.26
+scipy>=1.11
+scikit-image>=0.22
+matplotlib>=3.8
