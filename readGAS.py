@@ -165,9 +165,9 @@ def read_mea(path):
 def print_summary(path, data, header, axes):
     print("=" * 68)
     print(f"檔案：{path}")
-    print(f"機型：{header.get('Machine type', '?')}   "
-          f"樣品：{header.get('Sample', '?')}   "
-          f"程式：{header.get('Class', '?')}")
+    print(f"機型：{_ascii(header.get('Machine type', '?'))}   "
+          f"樣品：{_ascii(header.get('Sample', '?'))}   "
+          f"程式：{_ascii(header.get('Class', '?'))}")
     print(f"表頭大小：{axes['header_size']:,} bytes")
     print(f"資料矩陣：shape=({axes['n_rt']}, {axes['n_dt']})  "
           f"(保留時間 × 漂移時間)  dtype=int16")
@@ -379,3 +379,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
