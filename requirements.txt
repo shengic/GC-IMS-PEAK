@@ -5,11 +5,14 @@
 # Note: tkinter (file-picker) ships with standard CPython on Windows — no pip needed.
 #
 # Per-script needs:
-#   test_readGAS.py : stdlib only (numpy optional)
-#   readGAS.py      : numpy (required), matplotlib (optional, for heatmap)
-#   peaks.py        : numpy, scipy, scikit-image, matplotlib
+#   test_readGAS.py      : stdlib only (numpy optional)
+#   readGAS.py           : numpy (required), matplotlib (optional, for heatmap)
+#   peaks.py             : numpy, scipy, scikit-image, matplotlib
+#   peak_with_number.py  : numpy, matplotlib (reuses peaks.load_surface)
+#   main.py (desktop UI) : pillow (image display), tkinter (stdlib on Windows)
 
 numpy>=1.26
 scipy>=1.11
 scikit-image>=0.22
 matplotlib>=3.8
+pillow>=10.0

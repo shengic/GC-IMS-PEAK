@@ -1,11 +1,26 @@
 # GC-IMS Tk UI Specification
 
-Version: 1.3 (Complete Implementation with Bidirectional Peak Selection)
+Version: **v2** (Numbered overlay + footer cleanup)
 
-**Status**: ✅ **COMPLETE & TESTED** — All features implemented, 54 unit tests passing, ready for production.
+**Status**: ✅ **COMPLETE & TESTED** — 54 unit tests passing.
 
 This document defines the user interface behavior for the GC-IMS peak-finding desktop app.
 It is a design/specification document with concrete implementation guidance for a Tk/PIL-based desktop application.
+
+> ### What's new in v2 (read this first)
+> Two earlier designs described below have been **superseded** — where the older
+> sections conflict with this note, this note wins:
+> - **Peak identification on the overlay** is no longer done by drawing a yellow
+>   highlight circle on the Tk canvas when a table row is clicked. Instead, every
+>   peak is rendered with its **peak-id number** baked into a numbered overlay
+>   image by the new **`peak_with_number.py`** helper (matplotlib data
+>   coordinates → perfect alignment). See **§20. Peak Numbering on the Overlay**.
+> - The footer **progress bar and the green version line were removed**; the
+>   status bar is now a single line and the **Exit** button moved to the
+>   footer's far right. See **§21. UI Change Log → v2**.
+>
+> The historical §5.3.1, §10, and §16 (yellow-circle highlighting / bidirectional
+> click-select) are kept for reference only and are **not** in the shipped v2 UI.
 
 ## Quick Summary of Features
 
@@ -17,15 +32,17 @@ It is a design/specification document with concrete implementation guidance for 
 | Heatmap display + responsive canvas sizing | ✅ | v1.2 |
 | Overlay display (both visible side-by-side) | ✅ | v1.2 |
 | Peak table (sortable, centered, even widths) | ✅ | v1.2 |
-| **Peak highlighting: table→overlay** | ✅ | v1.2 |
-| **Peak selection: overlay→table (bidirectional)** | ✅ | v1.3 |
-| **Image zoom viewer (double-click, pan/zoom)** | ✅ | v1.2 |
-| **Larger, more readable footer/status area** | ✅ | v1.2 |
+| Matrix dimensions + peak count in table header | ✅ | v2 |
+| **Numbered overlay (peak_with_number.py)** | ✅ | **v2** |
+| Image zoom viewer (click, pan/zoom) | ✅ | v1.2 |
+| Single-line status bar; Exit button in footer | ✅ | v2 |
 | Export heatmap/overlay/CSV | ✅ | v1.0 |
 | Error handling & recovery | ✅ | v1.0 |
 | State machine (button enable/disable) | ✅ | v1.1 |
-| Coordinate axis naming (x [ms], y [s]) | ✅ | v1.1 |
-| Progress bar with detailed status | ✅ | v1.2 |
+| Coordinate axis naming | ✅ | v1.1 |
+| ~~Peak highlighting: click table→yellow circle~~ (removed) | ⛔ | v1.2–v1.3 |
+| ~~Bidirectional overlay→table click-select~~ (removed) | ⛔ | v1.3 |
+| ~~Progress bar~~ (removed) | ⛔ | v1.2 |
 
 ## 1. Purpose
 
@@ -1181,6 +1198,139 @@ The UI design leaves room for:
 - **Parameter presets**: Save/load detection parameter configs (JSON)
 - **Batch processing**: Queue multiple `.mea` files; detect all in series
 - **Export reports**: Generate PDF summary with heatmap + peaks + metrics
+
+---
+
+## 20. Peak Numbering on the Overlay (v2)
+
+*(Consolidated from the former `PEAK_HIGHLIGHTING.md`.)*
+
+### 20.1 Overview
+
+Each detected peak is shown on the overlay as a **red circle with its peak-id
+number** beside it, so a table row maps to a spot on the overlay at a glance. The
+numbers appear in both the main overlay canvas and the zoom/pan popup. They are
+produced by a dedicated helper, **`peak_with_number.py`**. `peaks.py` is **not
+modified**.
+
+> **History / why the old approach was dropped.** v1.2–v1.3 drew a yellow
+> highlight circle on the Tk **canvas** when a table row was clicked, mapping
+> `rt_index/dt_index → pixel`. That was **removed** in v2: the overlay PNG is a
+> matplotlib figure with axes, labels, and a colorbar and uses `origin="lower"`,
+> so mapping matrix indices against the whole image was both **y-flipped** and
+> **offset by the axes margins** — labels did not line up with the circles.
+> Drawing the numbers in matplotlib **data coordinates** is exact and needs no
+> UI math.
+
+### 20.2 Why a separate script
+
+The red circles in `results/<name>_overlay.png` are placed by `peaks.py` in
+matplotlib **data coordinates** (`ax.scatter(drift_ms, retention_s)`). To put a
+number exactly on each circle, the numbers must be drawn in the *same* coordinate
+system. Rather than change `peaks.py`, `peak_with_number.py` re-renders its own
+overlay and adds numbers with `ax.annotate(...)` at each peak's
+`(drift_ms, retention_s)` — same data space as the circles, so alignment is
+always correct.
+
+### 20.3 `peak_with_number.py`
+
+**Inputs** (reuses artifacts already on disk — does *not* re-run detection):
+- intensity surface from `results/<name>.npz` (via `peaks.load_surface`)
+- peak list from `results/<name>_peaks.json`
+
+**Output:** `results/<name>_overlay_numbered.png`
+
+```python
+ax.imshow(intensity, origin="lower",
+          extent=[drift_ms[0], drift_ms[-1], retention_s[0], retention_s[-1]], ...)
+ax.scatter([p["drift_ms"] for p in peaks],
+           [p["retention_s"] for p in peaks],
+           s=28, facecolors="none", edgecolors="red")
+for p in peaks:
+    ax.annotate(str(p["peak_id"]),
+                xy=(p["drift_ms"], p["retention_s"]),
+                xytext=(3, 3), textcoords="offset points",
+                color="white", fontsize=7, fontweight="bold",
+                path_effects=[withStroke(linewidth=2.0, foreground="black")])
+```
+
+White text with a thin black outline reads on any colormap.
+
+**CLI:**
+```bash
+python peak_with_number.py "path/to/<name>.mea"     # or the .npz
+# options: --peaks-json PATH  --out PATH  --figsize WxH  --dpi N  --cmap NAME
+```
+
+### 20.4 Integration in `main.py`
+
+```
+Detect Peaks
+   ├── peaks.py            → _overlay.png (shown right away)
+   ├── populate_peak_table → table filled, header shows dims + count
+   └── generate_numbered_overlay
+          └── peak_with_number.py → _overlay_numbered.png
+                 └── poll_numbered_overlay → swap into canvas + popup
+```
+
+1. **Detect Peaks** runs `peaks.py`; the plain `_overlay.png` loads immediately.
+2. `populate_peak_table()` calls `generate_numbered_overlay()`, which launches
+   `peak_with_number.py` in a background thread (subprocess + queue).
+3. `poll_numbered_overlay()` waits for completion, then
+   `load_overlay(<name>_overlay_numbered.png)` swaps the numbered image into the
+   main canvas and updates `overlay_img_path`.
+4. The zoom popup reads `overlay_img_path`, so it shows the numbered overlay too.
+
+If the renderer fails, the UI falls back silently to the plain overlay.
+
+**Notes / limitations**
+- Rendering takes a few seconds (loads the `.npz`, draws a full-res figure); the
+  plain overlay shows meanwhile.
+- In the small main canvas the numbers can look dense with many peaks — open the
+  **zoom popup** to read them clearly.
+- `peaks.py` and `readGAS.py` remain unchanged and independently runnable.
+
+---
+
+## 21. UI Change Log
+
+*(Consolidated from the former `UI_IMPROVEMENTS.md`.)*
+
+### v2 — Numbered overlay & footer cleanup
+- **Numbered overlay**: new `peak_with_number.py` renders red circles **plus**
+  peak-id numbers in matplotlib data coordinates; `main.py` generates it in the
+  background after detection and swaps it into the main canvas and zoom popup
+  (see §20). Replaces the removed canvas-based yellow-circle highlighting.
+- **Peak table header** now shows the matrix dimensions and total peak count,
+  e.g. `(8,571 × 4,500 = 38,569,500 points)  Detected Peaks:  105`.
+- **Footer cleanup**: removed the animated **progress bar** and the green
+  `v1.0 by Albert Sheng | …` version line; the **status bar is now a single line**
+  (no wrap); the **Exit** button moved from the top toolbar to the footer's far
+  right.
+- **Peak-id column** narrowed; the blank Tk tree column hidden
+  (`show="headings"`).
+- **Encoding/path fixes**: all peaks-JSON reads use `encoding="utf-8"` (CJK-safe
+  source paths); the `.npz` for matrix dimensions is located by stripping the
+  `_heatmap` suffix. These fixed the previously missing header dimensions and the
+  peaks loading from CSV (which lacked `rt_index`/`dt_index`).
+- `load_peaks_from_csv()` now also reads optional `rt_index`/`dt_index` when
+  present.
+
+### v1.3 — Bidirectional peak selection *(removed in v2)*
+- Single-click a red circle on the overlay to select its table row; clicking a
+  table row drew a yellow highlight circle. Removed in v2 in favor of the
+  numbered overlay (§20).
+
+### v1.2 — Display & interaction polish
+- Responsive image canvases (420×350) with separate photo references so the
+  heatmap stays visible when the overlay loads.
+- Click an image to open a **zoom/pan popup** (`ImageViewerDialog`).
+- Peak table centered, even column widths, taller rows.
+- Larger, more readable footer/status area.
+
+### v1.1 — State machine & naming
+- Explicit `UIState` enum driving button enable/disable.
+- Consistent coordinate axis naming in labels and table headers.
 
 
 
