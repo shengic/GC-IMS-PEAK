@@ -1,6 +1,12 @@
 """
 readGAS.py  —  G.A.S. FlavourSpec® .mea 解析 + 繪製 2D 熱圖
-Version: ver.01 — by Albert Sheng
+Version: ver.02 — by Albert Sheng
+
+變更記錄：
+  ver.02 — 修復 plot_heatmap() 在真實尺寸矩陣（如 20413x3150）上 fig.savefig()
+           時 OOM 崩潰的問題：新增 _downsample_for_display()，畫圖前先降到接近
+           輸出解析度再交給 imshow()。已用真實資料驗證（見 workflow 文件 draft.11）。
+  ver.01 — 初版。
 
 依據 test_readGAS.py 對實檔 (260210_103116_FM_1.mea) 的探測結果寫成。
 **不需 gc-ims-tools / h5py**：檔案已確認是「ASCII 表頭 + 原始 int16-LE 資料區」（未壓縮），
@@ -255,6 +261,27 @@ def export_npz(data, axes, path):
 # --------------------------------------------------------------------------- #
 # 繪圖
 # --------------------------------------------------------------------------- #
+def _downsample_for_display(img, figsize, dpi, margin=1.5):
+    """把矩陣降到接近實際輸出像素數（留 margin 倍餘裕避免鋸齒）再拿去畫圖。
+
+    臭蟲背景：ax.imshow() 呼叫本身不會立即耗記憶體，但 fig.savefig() 光柵化時，
+    Agg 後端會處理『整個』傳入陣列，不會自動略過超出輸出解析度的多餘資料點。
+    對真實尺寸的 GC-IMS 矩陣（例如 20413×3150 ≈ 6400 萬點，遠超一張 8x9 吋
+    150dpi 圖片實際的 ~1200×1350 像素），savefig() 會在光柵化那一刻記憶體暴增
+    到系統上限被 OOM killer 砍掉（已用真實資料重現、定位到 savefig() 這一步，
+    不是臆測）。修法：畫圖前先降到略高於輸出解析度即可，不影響肉眼可辨的圖片品質。
+    座標軸範圍（extent）用原始陣列的頭尾值即可，降採樣不影響物理範圍，
+    只影響中間取樣密度，所以這裡只需要回傳降採樣後的矩陣本身。
+    """
+    target_h = max(1, int(figsize[1] * dpi * margin))
+    target_w = max(1, int(figsize[0] * dpi * margin))
+    step_r = max(1, img.shape[0] // target_h)
+    step_c = max(1, img.shape[1] // target_w)
+    if step_r == 1 and step_c == 1:
+        return img   # 資料量本來就不大，不需要降採樣
+    return img[::step_r, ::step_c]
+
+
 def plot_heatmap(data, axes, header, cmap="viridis", clip=(1.0, 99.5),
                  rt_unit="s", log_scale=False, save=None, show=True,
                  figsize=(8, 9), dpi=150):
@@ -278,6 +305,19 @@ def plot_heatmap(data, axes, header, cmap="viridis", clip=(1.0, 99.5),
         rt = axes["retention_s"]
         rt_label = "Retention time [s]"
 
+    # RIP 正規化橫軸（本次使用者決策：熱圖橫軸統一顯示 drift_relative 而非
+    # 原始 drift_ms）。以 RT=0 這列的 RIP 位置作為 x=1 的基準。此為顯示層
+    # 決策，不改資料本身；drift_ms 仍存進 .npz 供下游模組使用。
+    import rip as _rip
+    try:
+        rip_index, _ = _rip.find_rip(data)
+        drift_norm = drift / drift[rip_index]
+        drift_label = "Drift relative to RIP (RIP at 1.0)"
+    except Exception as _e:
+        log(f"[warn] RIP 定位失敗（{_e}），退回原始 drift_ms 座標")
+        drift_norm = drift
+        drift_label = "Drift time [ms]"
+
     img = data.astype(np.float32)
     intensity_label = "Intensity (int16, raw)"
     if log_scale:
@@ -289,20 +329,30 @@ def plot_heatmap(data, axes, header, cmap="viridis", clip=(1.0, 99.5),
     sub = img[::max(1, img.shape[0] // 1000), ::max(1, img.shape[1] // 1000)]
     vmin, vmax = np.percentile(sub, clip)
 
+    # 畫圖前降到接近輸出解析度，避免 savefig() 光柵化整個原始矩陣爆記憶體
+    img_ds = _downsample_for_display(img, figsize, dpi)
+    if img_ds.shape != img.shape:
+        log(f"顯示前降採樣：{img.shape} -> {img_ds.shape}（避免 savefig 爆記憶體）")
+
     # constrained_layout 會在視窗縮放時自動重排，避免固定版面卡死
     fig, ax = plt.subplots(figsize=figsize, constrained_layout=True)
     im = ax.imshow(
-        img,
+        img_ds,
         aspect="auto",      # 隨視窗大小自由縮放（非鎖死長寬比）
         origin="lower",
-        extent=[drift[0], drift[-1], rt[0], rt[-1]],
+        extent=[drift_norm[0], drift_norm[-1], rt[0], rt[-1]],
         cmap=cmap,
         vmin=vmin,
         vmax=vmax,
         interpolation="nearest",
     )
-    ax.set_xlabel("Drift time [ms]")
+    ax.set_xlabel(drift_label)
     ax.set_ylabel(rt_label)
+    # 每 0.5 一格 major tick，避免自動選擇只在整數上打刻度（範圍多為 0-3）
+    from matplotlib.ticker import MultipleLocator, FormatStrFormatter
+    ax.xaxis.set_major_locator(MultipleLocator(0.5))
+    ax.xaxis.set_minor_locator(MultipleLocator(0.1))
+    ax.xaxis.set_major_formatter(FormatStrFormatter("%.1f"))
     sample = _ascii(header.get("Sample", ""))
     machine = _ascii(header.get("Machine type", ""))
     ax.set_title(f"GC-IMS  {sample}  ({machine})")

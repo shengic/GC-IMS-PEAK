@@ -19,17 +19,17 @@ class TestCoordinateLabels:
     def test_coord_label_mapping(self):
         """Coordinate labels should map correctly."""
         assert COORD_LABELS["peak_id"] == "#"
-        assert COORD_LABELS["drift_ms"] == "Drift Time [ms]"
+        # Drift labels shortened to make room for drift_relative column
+        assert "ms" in COORD_LABELS["drift_ms"]
+        assert "RIP" in COORD_LABELS["drift_relative"]
         assert COORD_LABELS["retention_s"] == "Retention Time [s]"
         assert COORD_LABELS["intensity"] == "Intensity"
 
     def test_ui_uses_correct_labels(self):
         """UI should display descriptive coordinate labels, not raw names."""
-        # Verify that full names are used for display
-        drift_label = COORD_LABELS["drift_ms"]
-        retention_label = COORD_LABELS["retention_s"]
-        assert drift_label == "Drift Time [ms]"
-        assert retention_label == "Retention Time [s]"
+        assert COORD_LABELS["drift_ms"] != "drift_ms"       # not raw key
+        assert COORD_LABELS["retention_s"] == "Retention Time [s]"
+        assert COORD_LABELS["drift_relative"] != "drift_relative"
 
 
 class TestPeakTableColumns:
@@ -37,21 +37,85 @@ class TestPeakTableColumns:
 
     def test_peak_table_columns_defined(self):
         """Required columns should be defined."""
-        assert "peak_id" in PEAK_TABLE_COLUMNS
-        assert "drift_ms" in PEAK_TABLE_COLUMNS
-        assert "retention_s" in PEAK_TABLE_COLUMNS
-        assert "intensity" in PEAK_TABLE_COLUMNS
+        for col in ("peak_id", "drift_ms", "drift_relative", "retention_s",
+                    "intensity", "on", "gc_ims", "gc", "ims", "trigger"):
+            assert col in PEAK_TABLE_COLUMNS
 
     def test_peak_table_column_order(self):
-        """Columns should appear in logical order: ID, X, Y, Intensity."""
-        assert PEAK_TABLE_COLUMNS[0] == "peak_id"
-        assert PEAK_TABLE_COLUMNS[1] == "drift_ms"
-        assert PEAK_TABLE_COLUMNS[2] == "retention_s"
-        assert PEAK_TABLE_COLUMNS[3] == "intensity"
+        """Column order (Batch 2, workflow §第八階段 draft.12):
+             # | drift_ms | drift_relative | retention_s | intensity | On | GC×IMS | GC | IMS | ▶
+        """
+        expected = ("peak_id", "drift_ms", "drift_relative", "retention_s",
+                    "intensity", "on", "gc_ims", "gc", "ims", "trigger")
+        assert PEAK_TABLE_COLUMNS == expected
 
-    def test_peak_table_columns_not_empty(self):
-        """Peak table should have at least 4 columns."""
-        assert len(PEAK_TABLE_COLUMNS) >= 4
+    def test_peak_table_columns_length(self):
+        """Peak table has 10 columns after Batch 2."""
+        assert len(PEAK_TABLE_COLUMNS) == 10
+
+
+class TestCellValueLogic:
+    """Test _cell_value display logic (Batch 2)."""
+
+    @staticmethod
+    def _mock_app():
+        """Minimal object with _cell_value method for testing."""
+        from main import GCIMSApp
+        # We only need the _cell_value method, not full Tk setup.
+        # Create a minimal shim: bind the unbound method to a bare object.
+        class _Shim:
+            pass
+        shim = _Shim()
+        shim._cell_value = GCIMSApp._cell_value.__get__(shim, _Shim)
+        return shim
+
+    def test_on_column_shows_checkbox_glyph(self):
+        from main import CHECK_ON, CHECK_OFF
+        app = self._mock_app()
+        assert app._cell_value("on", {"active": True}) == CHECK_ON
+        assert app._cell_value("on", {"active": False}) == CHECK_OFF
+        # default is active
+        assert app._cell_value("on", {}) == CHECK_ON
+
+    def test_gc_ims_empty_shows_dash(self):
+        app = self._mock_app()
+        assert app._cell_value("gc_ims", {}) == "—"
+        assert app._cell_value("gc_ims", {"matches": {"combined_matches": []}}) == "—"
+
+    def test_gc_ims_shows_top_compound_name(self):
+        app = self._mock_app()
+        peak = {"matches": {"combined_matches": [{"Name": "Diacetyl", "CAS": "C1"}]}}
+        assert app._cell_value("gc_ims", peak) == "Diacetyl"
+
+    def test_gc_column_counts_gc_only(self):
+        app = self._mock_app()
+        # No matches → "—" (not run)
+        assert app._cell_value("gc", {}) == "—"
+        # 3 gc hits, 1 in combined → 2 gc-only
+        peak = {"matches": {
+            "gc_matches": [{"CAS": "A"}, {"CAS": "B"}, {"CAS": "C"}],
+            "combined_matches": [{"CAS": "A"}],
+        }}
+        assert app._cell_value("gc", peak) == "2"
+
+    def test_ims_dash_when_k0_unavailable(self):
+        app = self._mock_app()
+        peak = {"k0_mode": "unavailable",
+                "matches": {"ims_matches": [{"CAS": "X"}], "combined_matches": []}}
+        assert app._cell_value("ims", peak) == "—"
+
+    def test_ims_zero_vs_dash_distinction(self):
+        """Workflow §第八階段: '—' when unavailable vs '0' when zero real hits."""
+        app = self._mock_app()
+        peak = {"k0_mode": "standard_based",
+                "matches": {"ims_matches": [], "combined_matches": []}}
+        assert app._cell_value("ims", peak) == "0"
+
+    def test_trigger_dims_when_inactive(self):
+        from main import TRIGGER_ACTIVE, TRIGGER_DIM
+        app = self._mock_app()
+        assert app._cell_value("trigger", {"active": True}) == TRIGGER_ACTIVE
+        assert app._cell_value("trigger", {"active": False}) == TRIGGER_DIM
 
 
 class TestPeakDataValidation:

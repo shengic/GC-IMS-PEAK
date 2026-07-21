@@ -1,8 +1,16 @@
 """
 peaks.py  —  GC-IMS 峰偵測（第一層：偵測 / 測量；measure-only v1）
-Version: ver.01 — by Albert Sheng
+Version: ver.03 — by Albert Sheng
 
-依工作流文件 §3：以 **持續同調 / 突出度 (persistent homology / prominence)** 為主幹，
+變更記錄：
+  ver.03 — 串接 rip.py（Identify Workflow 第一階段）：載入強度面後立即算 rip_index
+           / rip_intensity（fail-fast），偵測完成後為每個峰補 drift_relative 欄位，
+           並寫進 stats。R004 從此可用。
+  ver.02 — 修復 write_overlay() 在真實尺寸矩陣上 fig.savefig() 時 OOM 崩潰的問題，
+           同 readGAS.py ver.02 的修法（新增 _downsample_for_display()）。
+  ver.01 — 初版。
+
+依工作流文件 §3：以 **持續同調 / 突出度 (persistent homology / prominence)** 為主幹,
 作用在原始 int16 強度面上（原始資料模式，非影像模式，故不需 colormap 反演）。
 
 本版實作 workflow 步驟 [3]+[4]：
@@ -16,7 +24,8 @@ Version: ver.01 — by Albert Sheng
 
 輸出（results/，與輸入同檔名 base）：
   - <name>_peaks.csv   ← 精簡：peak_id, retention_s, drift_ms, intensity
-  - <name>_peaks.json  ← 完整：上述 + 突出度/平坦度/邊界/飽和/索引 + 偵測參數與來源
+  - <name>_peaks.json  ← 完整：上述 + 突出度/平坦度/邊界/飽和/索引/drift_relative
+                          + 偵測參數與來源，stats 內含 rip_index / rip_intensity
   - <name>_overlay.png ← 熱圖疊上偵測到的峰（佐證圖）
 
 依賴：numpy, scipy, scikit-image, matplotlib
@@ -36,6 +45,7 @@ import os
 
 import numpy as np
 
+import rip
 from gas_utils import PROJECT_DIR, resolve_input_path
 
 RESULTS_DIR = os.path.join(PROJECT_DIR, "results")
@@ -266,8 +276,32 @@ def write_json(peaks, path, params, stats, meta, shape):
     print(f"  JSON → {path}")
 
 
+def _downsample_for_display(img, figsize, dpi, margin=1.5):
+    """把矩陣降到接近實際輸出像素數（留 margin 倍餘裕避免鋸齒）再拿去畫圖。
+
+    與 readGAS.py 的同名函式邏輯完全一致（兩處各自獨立維護一份，避免
+    引入跨檔案 import 依賴；若未來要重構，這兩份應合併成共用工具函式）。
+    臭蟲背景：fig.savefig() 光柵化整個未降採樣的矩陣時，記憶體會暴增到
+    系統上限被 OOM killer 砍掉，已用真實資料重現、定位到 savefig() 這一步。
+    """
+    target_h = max(1, int(figsize[1] * dpi * margin))
+    target_w = max(1, int(figsize[0] * dpi * margin))
+    step_r = max(1, img.shape[0] // target_h)
+    step_c = max(1, img.shape[1] // target_w)
+    if step_r == 1 and step_c == 1:
+        return img
+    return img[::step_r, ::step_c]
+
+
 def write_overlay(intensity, drift_ms, retention_s, peaks, path,
-                  cmap="viridis", mark_n=0, figsize=(8, 9), dpi=150, show=False):
+                  cmap="viridis", mark_n=0, figsize=(8, 9), dpi=150, show=False,
+                  rip_index=None):
+    """Render overlay heatmap with peak circles.
+
+    橫軸使用 drift_relative（本次使用者決策，見 readGAS.plot_heatmap 註解）。
+    rip_index 未提供時就地呼叫 rip.find_rip() 算；scatter 紅圈用 peak 內建的
+    drift_relative 欄位（由 rip.attach_drift_relative 補上）。
+    """
     import matplotlib
     if not show:
         matplotlib.use("Agg")
@@ -277,17 +311,30 @@ def write_overlay(intensity, drift_ms, retention_s, peaks, path,
                     ::max(1, intensity.shape[1] // 1000)]
     vmin, vmax = np.percentile(sub, [1.0, 99.5])
 
+    if rip_index is None:
+        rip_index, _ = rip.find_rip(intensity)
+    drift_norm = drift_ms / drift_ms[rip_index]
+    drift_label = "Drift relative to RIP (RIP at 1.0)"
+
+    # 畫圖前降到接近輸出解析度，避免 savefig() 光柵化整個原始矩陣爆記憶體
+    img_ds = _downsample_for_display(intensity, figsize, dpi)
+
     # constrained_layout：視窗縮放時自動重排
     fig, ax = plt.subplots(figsize=figsize, constrained_layout=True)
-    ax.imshow(intensity, aspect="auto", origin="lower",
-              extent=[drift_ms[0], drift_ms[-1], retention_s[0], retention_s[-1]],
+    ax.imshow(img_ds, aspect="auto", origin="lower",
+              extent=[drift_norm[0], drift_norm[-1], retention_s[0], retention_s[-1]],
               cmap=cmap, vmin=vmin, vmax=vmax, interpolation="nearest")
     shown = peaks[:mark_n] if mark_n and mark_n > 0 else peaks
-    xs = [p["drift_ms"] for p in shown]
+    xs = [p.get("drift_relative", p["drift_ms"] / drift_ms[rip_index]) for p in shown]
     ys = [p["retention_s"] for p in shown]
     ax.scatter(xs, ys, s=28, facecolors="none", edgecolors="red", linewidths=0.8)
-    ax.set_xlabel("Drift time [ms]")
+    ax.set_xlabel(drift_label)
     ax.set_ylabel("Retention time [s]")
+    # 每 0.5 一格 major tick（跟 readGAS.plot_heatmap 一致）
+    from matplotlib.ticker import MultipleLocator, FormatStrFormatter
+    ax.xaxis.set_major_locator(MultipleLocator(0.5))
+    ax.xaxis.set_minor_locator(MultipleLocator(0.1))
+    ax.xaxis.set_major_formatter(FormatStrFormatter("%.1f"))
     ax.set_title(f"Detected {len(shown)} peaks (red = detected)")
     fig.savefig(path, dpi=dpi)
     print(f"  PNG  -> {path}  (marked {len(shown)} peaks)")
@@ -341,6 +388,11 @@ def main():
     intensity, drift_ms, retention_s, meta = load_surface(path)
     print(f"強度面 shape={intensity.shape} dtype={intensity.dtype}")
 
+    # 第一階段：RIP 正規化（先做，fail-fast；且必須逐檔案獨立算，
+    # 見 GC-IMS_Identify_Workflow.md §第一階段 point 6）
+    rip_index, rip_intensity = rip.find_rip(intensity)
+    print(f"RIP：dt_index={rip_index}  drift={drift_ms[rip_index]:.4f} ms  I={rip_intensity}")
+
     params = {"sigma": args.sigma, "floor_pct": args.floor_pct,
               "prom_frac": args.prom_frac, "min_prominence": args.min_prominence,
               "min_distance": args.min_distance, "top_n": args.top_n}
@@ -350,6 +402,9 @@ def main():
         prom_frac=args.prom_frac, min_prominence=args.min_prominence,
         min_distance=args.min_distance, top_n=args.top_n)
     attach_coords(peaks, drift_ms, retention_s)
+    rip.attach_drift_relative(peaks, rip_index)
+    stats["rip_index"] = rip_index
+    stats["rip_intensity"] = rip_intensity
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
     base = os.path.splitext(os.path.basename(path))[0]
@@ -359,7 +414,8 @@ def main():
     write_json(peaks, out + "_peaks.json", params, stats, meta, intensity.shape)
     write_overlay(intensity, drift_ms, retention_s, peaks, out + "_overlay.png",
                   cmap=args.cmap, mark_n=args.mark_n,
-                  figsize=figsize, dpi=args.dpi, show=args.show)
+                  figsize=figsize, dpi=args.dpi, show=args.show,
+                  rip_index=rip_index)
     print(f"完成：共偵測 {len(peaks)} 個峰。請開 {base}_overlay.png 與 VOCal 圖目視比對。")
 
 

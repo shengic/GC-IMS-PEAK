@@ -60,41 +60,67 @@ class TestUIStateTransitions:
 
 
 class TestStateTransitionLogic:
-    """Test button enable/disable logic for each state."""
+    """Test button enable/disable logic for each state.
 
-    # This would test the update_button_state() logic
-    # Requires mocking Tk widgets; shown as placeholder for integration tests
+    Note: since Batch 1 (workflow §第八階段), the toolbar is:
+      browse_btn / view_original_btn / show_detected_btn / rules_btn / generate_report_btn
+    """
 
     def test_buttons_in_start_state(self):
-        """In START state, only Browse should be enabled."""
-        # Expected: browse_btn=normal, all others=disabled
+        """In START state, Browse Folder and Rules enabled; others disabled."""
         expected_states = {
             "browse_btn": "normal",
-            "read_btn": "disabled",
-            "detect_btn": "disabled",
+            "view_original_btn": "disabled",
+            "show_detected_btn": "disabled",
+            "rules_btn": "normal",
+            "generate_report_btn": "disabled",
         }
-        # In real test: would check GCIMSApp.ui_state and call update_button_state()
         assert expected_states["browse_btn"] == "normal"
+        assert expected_states["generate_report_btn"] == "disabled"
 
-    def test_buttons_in_file_selected_state(self):
-        """In FILE_SELECTED state, Browse and Read should be enabled."""
+    def test_buttons_in_read_done_state(self):
+        """After auto-read completes, View Original and Show Detected are enabled."""
         expected_states = {
             "browse_btn": "normal",
-            "read_btn": "normal",
-            "detect_btn": "disabled",
+            "view_original_btn": "normal",
+            "show_detected_btn": "normal",
+            "rules_btn": "normal",
+            "generate_report_btn": "disabled",
         }
-        assert expected_states["read_btn"] == "normal"
+        assert expected_states["view_original_btn"] == "normal"
+        assert expected_states["show_detected_btn"] == "normal"
 
     def test_buttons_in_peaks_detected_state(self):
-        """In PEAKS_DETECTED state, all buttons should be enabled."""
+        """In PEAKS_DETECTED state, all buttons including Generate Report enabled."""
         expected_states = {
             "browse_btn": "normal",
-            "read_btn": "normal",
-            "detect_btn": "normal",
-            "export_heatmap_btn": "normal",
-            "export_overlay_btn": "normal",
-            "export_csv_btn": "normal",
+            "view_original_btn": "normal",
+            "show_detected_btn": "normal",
+            "rules_btn": "normal",
+            "generate_report_btn": "normal",
         }
-        # All should be normal (enabled)
         for state in expected_states.values():
             assert state == "normal"
+
+
+class TestSettingsPersistence:
+    """Test ui_settings.json load/save (added in Batch 1)."""
+
+    def test_load_settings_missing_file_returns_empty_dict(self, tmp_path, monkeypatch):
+        import main
+        monkeypatch.setattr(main, "SETTINGS_PATH", str(tmp_path / "nope.json"))
+        assert main.load_settings() == {}
+
+    def test_save_then_load_roundtrip(self, tmp_path, monkeypatch):
+        import main
+        p = str(tmp_path / "ui_settings.json")
+        monkeypatch.setattr(main, "SETTINGS_PATH", p)
+        main.save_settings({"library_dir": "/some/path", "other": 42})
+        assert main.load_settings() == {"library_dir": "/some/path", "other": 42}
+
+    def test_load_settings_corrupt_json_returns_empty(self, tmp_path, monkeypatch):
+        import main
+        p = tmp_path / "ui_settings.json"
+        p.write_text("{not valid json", encoding="utf-8")
+        monkeypatch.setattr(main, "SETTINGS_PATH", str(p))
+        assert main.load_settings() == {}

@@ -16,6 +16,16 @@ This directory contains **Test-Driven Development (TDD)** style tests for `main.
 | `test_peak_table.py` | Peak data structure, sorting, coordinate labels |
 | `test_subprocess.py` | Subprocess execution, output streaming, threading |
 | `test_ui_validators.py` | Input validation, file path checks, error messages |
+| `test_rip.py` | Identify §1 — `rip.find_rip()` / `attach_drift_relative()` on real `.mea` |
+| `test_dt_convert.py` | Identify §2 — K0 dual-mode dispatch, header extraction, profile I/O |
+| `test_library.py` | Identify §3 — `.ril`/`.iml` readers, GC Column parser, selection strategy |
+| `test_rules.py` | Identify §7 — rule engine + five built-in rules (R001-R005) |
+
+**Note on `test_rip.py` / `test_library.py` / `test_dt_convert.py`**: these depend
+on real files under `GAS/` and `VOCal Release 0.4.31.412/_portable/data/` and will
+skip/fail if those folders aren't present. They double as standalone debug
+scripts—running `python test/test_rip.py` prints diagnostic info that pytest
+suppresses by default.
 
 ## Installation
 

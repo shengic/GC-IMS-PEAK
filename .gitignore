@@ -1,8 +1,11 @@
 # --- data & outputs: keep the folders, ignore their contents ---
 /GAS/*
 /results/*
+/library_data/*
 !/GAS/.gitkeep
 !/results/.gitkeep
+!/library_data/.gitkeep
+!/library_data/README.md
 
 # --- python ---
 __pycache__/
@@ -14,7 +17,14 @@ __pycache__/
 Thumbs.db
 .DS_Store
 .vscode/
+.claude/
 
 # --- transient run logs ---
 result.txt
 *_header.txt
+
+# --- user-specific UI state ---
+ui_settings.json
+
+# --- legacy vendor bundle (kept locally as reference, not tracked) ---
+/VOCal Release 0.4.31.412/

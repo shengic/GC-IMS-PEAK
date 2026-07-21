@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """
 peak_with_number.py — Render a GC-IMS overlay with peak circles AND peak-id numbers.
+Version: ver.02 — by Albert Sheng
+
+Changelog:
+  ver.02 — Fixed the OOM crash in write_overlay_numbered(): now downsamples the
+           intensity matrix before passing to ax.imshow(), matching the fix
+           already applied to readGAS.py / peaks.py ver.02. Reuses
+           peaks._downsample_for_display() since this module already hard-depends
+           on peaks for load_surface / RESULTS_DIR.
+  ver.01 — 初版。
 
 This is a *display-only* helper for main.py. It does NOT run peak detection;
 it reuses the intensity surface (from the .npz produced by readGAS.py) and the
@@ -58,12 +67,28 @@ def write_overlay_numbered(intensity, drift_ms, retention_s, peaks, path,
                     ::max(1, intensity.shape[1] // 1000)]
     vmin, vmax = np.percentile(sub, [1.0, 99.5])
 
+    # Horizontal axis normalized to RIP (matches readGAS.plot_heatmap and
+    # peaks.write_overlay per user's display decision). Scatter/annotate use
+    # each peak's own drift_relative when available; fall back to computed value.
+    import rip as _rip
+    rip_index, _ = _rip.find_rip(intensity)
+    drift_norm = drift_ms / drift_ms[rip_index]
+    drift_label = "Drift relative to RIP (RIP at 1.0)"
+
+    # Downsample before imshow — see peaks.py._downsample_for_display for the
+    # OOM background. Scatter/annotate below still use data coords so
+    # peak positions are unaffected.
+    img_ds = _peaks._downsample_for_display(intensity, figsize, dpi)
+
     fig, ax = plt.subplots(figsize=figsize, constrained_layout=True)
-    ax.imshow(intensity, aspect="auto", origin="lower",
-              extent=[drift_ms[0], drift_ms[-1], retention_s[0], retention_s[-1]],
+    ax.imshow(img_ds, aspect="auto", origin="lower",
+              extent=[drift_norm[0], drift_norm[-1], retention_s[0], retention_s[-1]],
               cmap=cmap, vmin=vmin, vmax=vmax, interpolation="nearest")
 
-    xs = [p["drift_ms"] for p in peaks]
+    def _peak_x(p):
+        return p.get("drift_relative", p["drift_ms"] / drift_ms[rip_index])
+
+    xs = [_peak_x(p) for p in peaks]
     ys = [p["retention_s"] for p in peaks]
     ax.scatter(xs, ys, s=28, facecolors="none", edgecolors="red", linewidths=0.8)
 
@@ -72,14 +97,18 @@ def write_overlay_numbered(intensity, drift_ms, retention_s, peaks, path,
     for p in peaks:
         ax.annotate(
             str(p.get("peak_id", "")),
-            xy=(p["drift_ms"], p["retention_s"]),
+            xy=(_peak_x(p), p["retention_s"]),
             xytext=(3, 3), textcoords="offset points",
             color="white", fontsize=7, fontweight="bold",
             ha="left", va="bottom", path_effects=outline,
         )
 
-    ax.set_xlabel("Drift time [ms]")
+    ax.set_xlabel(drift_label)
     ax.set_ylabel("Retention time [s]")
+    from matplotlib.ticker import MultipleLocator, FormatStrFormatter
+    ax.xaxis.set_major_locator(MultipleLocator(0.5))
+    ax.xaxis.set_minor_locator(MultipleLocator(0.1))
+    ax.xaxis.set_major_formatter(FormatStrFormatter("%.1f"))
     ax.set_title(f"Detected {len(peaks)} peaks (red = detected, numbered)")
     fig.savefig(path, dpi=dpi)
     plt.close(fig)
