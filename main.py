@@ -1,11 +1,28 @@
 """
 main.py  —  GC-IMS Desktop UI (Tk)
-Version: 1.1 — by Albert Sheng
+Version: 2.1 — by Albert Sheng
 
 A desktop application for browsing, reading, and analyzing GC-IMS .mea files.
 Workflow: browse folder → select .mea (auto-read) → show detected peaks → inspect.
 
 Changelog:
+  2.1 (Identify Workflow Batches 3, 4, 6)
+      - Batch 6: peak circles and numbers are native Canvas objects drawn over a
+        circle-free _bg.png, placed via the recorded plot-area geometry. This
+        also fixed a long-standing offset — the old code mapped peaks onto the
+        whole PNG, ignoring matplotlib's margins.
+      - Batch 4: Rules panel is live. Toggling a rule or editing a parameter
+        re-runs the whole candidate funnel from _maxima.npz in ~4 ms instead of
+        re-detecting for ~83 s. R004/R006 shown locked ("always on").
+      - Batch 3: toggle_peak() shared by circle clicks and the On checkbox.
+        A peak rejected by a rule and one deselected by hand look identical
+        (stippled number, grey row); a manual pick overrides the rule and is
+        marked with a dashed ring. State persists to _peaks_state.json keyed by
+        (rt_index, dt_index), not peak_id, which is reassigned when the
+        mandatory-rule baseline moves.
+      - Selecting a .mea offers to reuse an existing .npz rather than re-reading
+        it; the display background can be rebuilt from the .npz alone.
+      - Window is sized from the actual screen instead of a fixed 1700x950.
   1.1 (Identify Workflow Batch 1)
       - Toolbar redesigned per workflow §第八階段:
           Browse Folder | View Original Heatmap | Show Detected Peaks | Rules | Generate Report
@@ -19,6 +36,7 @@ Usage:
     python main.py
 """
 
+import datetime
 import json
 import os
 import queue
@@ -29,7 +47,7 @@ from enum import Enum
 from pathlib import Path
 from tkinter import (
     filedialog, messagebox, ttk, Canvas, Frame, Label, Tk, Text, END,
-    Toplevel, Menu,
+    Toplevel, Menu, BooleanVar, StringVar, TclError,
 )
 from tkinter.ttk import Treeview, PanedWindow
 
@@ -37,6 +55,12 @@ import numpy as np
 from PIL import Image, ImageTk
 
 import library
+import peaks as peaks_mod
+import rip as rip_mod
+import rules
+
+RULES_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "rules_config.json")
 
 
 # ============================================================================== #
@@ -133,6 +157,14 @@ class AppState:
         self.peaks_json_path = None
         self.peaks_csv_path = None
         self.peaks = []
+        self.detection_meta = None  # {"params":..., "stats":...} for Rules panel
+        # Batch 6: circles are native Canvas objects, not baked-in pixels
+        self.bg_img_path = None       # circle-free heatmap used as canvas backdrop
+        self.canvas_geometry = None   # where the plot area sits inside bg_img
+        self.peak_items = {}          # peak_id -> {"oval": id, "text": id}
+        self.peak_state = {}          # peak_key -> user_active (sidecar)
+        self.maxima = None            # _maxima.npz contents (live rule re-selection)
+        self.rules_config = None      # live, panel-editable copy
         self.selected_peak_row = None
         self.heatmap_photo_ref = None
         self.overlay_photo_ref = None
@@ -145,14 +177,10 @@ class AppState:
         self.settings = load_settings()
         self.library_dir = self.settings.get("library_dir")   # None → resolve chain
 
-        # In-place zoom/pan state for main_canvas
-        self.main_canvas_original = None    # PIL.Image at native resolution
-        self.main_canvas_zoom = 1.0
-        self.main_canvas_pan_x = 0
-        self.main_canvas_pan_y = 0
-        self.main_canvas_kind = None        # "heatmap" | "overlay" | None
-        self._pan_last_x = None
-        self._pan_last_y = None
+        # NOTE: the in-place zoom/pan fields used to be declared here too, but
+        # nothing ever read them — the canvas code uses the identically named
+        # attributes on GCIMSApp. Two sets of the same names is how they came
+        # to be initialised in neither place; they now live on GCIMSApp only.
 
     def reset_after_file_selection(self):
         """Clear heatmap/peaks/overlay when user selects a new file."""
@@ -163,6 +191,13 @@ class AppState:
         self.peaks_json_path = None
         self.peaks_csv_path = None
         self.peaks = []
+        self.detection_meta = None
+        self.bg_img_path = None
+        self.numbered_overlay_path = None
+        self.canvas_geometry = None
+        self.peak_items = {}
+        self.peak_state = {}          # peak_key -> user_active (sidecar)
+        self.maxima = None
         self.selected_peak_row = None
         self.heatmap_photo_ref = None
         self.overlay_photo_ref = None
@@ -218,6 +253,100 @@ def load_peaks_from_json(json_path):
         return None, f"JSON schema error: {e}"
     except Exception as e:
         return None, f"Unexpected error: {e}"
+
+
+def load_detection_meta(json_path):
+    """Load detection_params + stats from a _peaks.json; return (meta, error_msg).
+
+    Separate from load_peaks_from_json() so the peak-loading contract (and its
+    tests) stay untouched. Feeds the Rules panel's selection funnel — without
+    it the panel could only show which rules are configured, not their effect.
+    """
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {"params": data.get("detection_params", {}),
+                "stats": data.get("stats", {})}, None
+    except Exception as e:
+        return None, f"Could not read detection metadata: {e}"
+
+
+# --------------------------------------------------------------------------- #
+# Per-peak selection state (workflow §第八階段 point 5)
+# --------------------------------------------------------------------------- #
+def peak_key(peak):
+    """Durable identity for a peak: its position in the matrix.
+
+    Deliberately NOT peak_id. peak_id is a prominence rank within the baseline
+    set, so it is reassigned whenever the baseline moves (editing
+    R004.half_width or R006.boundary, or re-detecting). A selection saved
+    against peak_id would silently reattach to a different peak; the
+    (rt_index, dt_index) coordinate never moves for a given .mea.
+    """
+    return f"{peak.get('rt_index')},{peak.get('dt_index')}"
+
+
+def load_peak_state(state_path):
+    """Read _peaks_state.json → {peak_key: bool}. Missing file → {}."""
+    try:
+        with open(state_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {str(k): bool(v) for k, v in (data.get("user_active") or {}).items()}
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        print(f"peak state unreadable ({e}); starting from rule defaults")
+        return {}
+
+
+def save_peak_state(state_path, peaks):
+    """Persist only explicit user choices (user_active is not None).
+
+    Peaks the user never touched are omitted, so re-running detection with
+    different rules does not resurrect stale opinions about peaks the user
+    never actually looked at.
+    
+    """
+    payload = {str(peak_key(p)): bool(p["user_active"])
+               for p in peaks if p.get("user_active") is not None}
+    with open(state_path, "w", encoding="utf-8") as f:
+        json.dump({"user_active": payload}, f, ensure_ascii=False, indent=2)
+
+
+def effective_active(peak):
+    """Rule verdict, overridden by an explicit user choice when present.
+
+    Option (a) from the design discussion: the user is the final arbiter, so a
+    manual pick beats a rule. is_rule_override() flags the case worth marking
+    visually — the user rescued a peak the rules rejected.
+    """
+    user = peak.get("user_active")
+    if user is None:
+        return bool(peak.get("rule_active", True))
+    return bool(user)
+
+
+def is_rule_override(peak):
+    """True when the user kept a peak the rules rejected (drawn with a ring)."""
+    return peak.get("user_active") is True and not peak.get("rule_active", True)
+
+
+def outputs_are_fresh(source_path, *outputs):
+    """True when every output exists and is newer than the source .mea.
+
+    Same mtime test the workflow specifies for batch_convert (§第九階段): all
+    of them must be present and current, so a half-finished run (say .npz
+    written but the PNG missing) counts as stale and is redone rather than
+    silently reused.
+    """
+    try:
+        src_mtime = os.path.getmtime(source_path)
+    except OSError:
+        return False
+    for out in outputs:
+        if not os.path.exists(out) or os.path.getmtime(out) < src_mtime:
+            return False
+    return True
 
 
 def load_peaks_from_csv(csv_path):
@@ -420,10 +549,34 @@ class GCIMSApp:
         self.root = root
         self.state = AppState()
         self.ui_state = UIState.START
-        self.root.title("GC-IMS Peak Detection — v1.1 by Albert Sheng")
-        # Wider default to accommodate three-pane layout (files | main image | peak table)
-        self.root.geometry("1700x950")
-        self.root.minsize(1400, 800)
+        self.root.title("GC-IMS Peak Detection — v2.1 by Albert Sheng")
+        # Fit the actual screen instead of a fixed 1700x950: on a smaller
+        # display that pushed part of the three-pane layout off-screen, and the
+        # 1400x800 minsize then made it impossible to shrink back into view.
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        # Fallback geometry leaves room for a taskbar; "zoomed" below supersedes
+        # it on platforms that support maximising (Windows, most X11 WMs).
+        self.root.geometry(f"{screen_w}x{max(400, screen_h - 60)}+0+0")
+        self.root.minsize(min(1100, screen_w - 80), min(700, screen_h - 80))
+        try:
+            self.root.state("zoomed")
+        except TclError:
+            pass
+
+        # Canvas view state. Must exist before setup_ui(), because binding
+        # <Configure> makes Tk fire a resize as soon as the canvas is mapped —
+        # i.e. before any image has been loaded to create these lazily.
+        self.main_canvas_original = None    # PIL.Image at native resolution
+        self.main_canvas_zoom = 1.0
+        self.main_canvas_pan_x = 0
+        self.main_canvas_pan_y = 0
+        self.main_canvas_kind = None        # "heatmap" | "overlay" | "bg" | None
+        self._pan_last_x = None
+        self._pan_last_y = None
+        self._press_x = 0
+        self._press_y = 0
+        self._rules_after_id = None
 
         self.setup_ui()
         self.update_button_state()
@@ -530,8 +683,10 @@ class GCIMSApp:
         self.main_canvas.pack(fill="both", expand=True)
         # In-place interaction (replaces old click-to-popup ImageViewerDialog):
         #   left-drag = pan, wheel = zoom toward cursor
+        #   a press+release that barely moved = toggle that peak (Batch 3)
         self.main_canvas.bind("<ButtonPress-1>", self.on_main_pan_start)
         self.main_canvas.bind("<B1-Motion>", self.on_main_pan_drag)
+        self.main_canvas.bind("<ButtonRelease-1>", self.on_main_canvas_click_release)
         self.main_canvas.bind("<MouseWheel>", self.on_main_wheel)
         self.main_canvas.bind("<Button-4>", lambda e: self.on_main_wheel(e, delta=120))
         self.main_canvas.bind("<Button-5>", lambda e: self.on_main_wheel(e, delta=-120))
@@ -689,10 +844,111 @@ class GCIMSApp:
         # Auto-read（workflow：取消 Read File 獨立按鈕，13 秒隱性等待可接受）
         self._start_read()
 
+    def _ask_use_cached_npz(self, mea, npz):
+        """Ask whether to reuse an existing .npz instead of re-reading the .mea.
+
+        Deliberately a question rather than an automatic decision: reusing
+        silently would hide a stale cache, and re-reading silently would burn
+        ~13 s on every file selection. The .mea itself is never touched either
+        way — only the derived .npz is rewritten when the answer is No.
+        """
+        npz_mtime = os.path.getmtime(npz)
+        when = datetime.datetime.fromtimestamp(npz_mtime).strftime("%Y-%m-%d %H:%M")
+        size_mb = os.path.getsize(npz) / 1e6
+        try:
+            stale = npz_mtime < os.path.getmtime(mea)
+        except OSError:
+            stale = False   # .mea unreachable (removed drive, stale list) — the
+                            # .npz is then the only copy, so don't scare the user
+        warning = ("\n\n⚠ The .mea is NEWER than this .npz, so the cache may not "
+                   "match the current file." if stale else "")
+        return messagebox.askyesno(
+            "Use the existing .npz?",
+            f"A previously converted matrix already exists for this file:\n\n"
+            f"    {Path(npz).name}\n"
+            f"    {size_mb:.0f} MB, saved {when}{warning}\n\n"
+            f"Yes  —  read the .npz (instant)\n"
+            f"No   —  re-read {Path(mea).name} (~13 s) and overwrite the .npz\n\n"
+            f"The original .mea is not modified either way.",
+            icon="warning" if stale else "question",
+        )
+
+    def _finish_npz_load(self, base):
+        """Display the background rebuilt from / kept alongside the .npz."""
+        bg = f"results/{base}_bg.png"
+        self.load_heatmap(bg)
+        self.state.heatmap_path = bg
+        self.state.bg_img_path = bg
+        # Geometry belongs to the image, not to the peak list — load it here so
+        # it is right even when the peaks turn out to be stale below.
+        self._load_canvas_geometry(base)
+        self.ui_state = UIState.READ_DONE
+        self.status_label.config(text=f"✓ Loaded from existing .npz: {base}")
+        self.update_button_state()
+        self._load_existing_peaks(base)
+
+    def _render_bg_from_npz(self, base, npz):
+        """Rebuild the display background from the .npz — no .mea needed.
+
+        Used when the .npz survived but its images did not. peaks.py --bg-only
+        skips detection entirely, so this costs a render rather than the ~83 s
+        the full pipeline would take.
+        """
+        self.ui_state = UIState.READING
+        self.update_button_state()
+        self.status_label.config(text=f"Rebuilding heatmap from {base}.npz...")
+        self._progress_start()
+
+        q = queue.Queue()
+        cmd = [sys.executable, str(Path(__file__).with_name("peaks.py")),
+               npz, "--bg-only"]
+        threading.Thread(target=run_subprocess, args=(cmd, q), daemon=True).start()
+        self._poll_bg_render(q, base)
+
+    def _poll_bg_render(self, q, base):
+        try:
+            msg_type, msg = q.get_nowait()
+            if msg_type == "stdout":
+                self.status_label.config(text=msg[:80])
+                self.root.after(100, lambda: self._poll_bg_render(q, base))
+            elif msg_type == "done":
+                self._progress_stop()
+                if os.path.exists(f"results/{base}_bg.png"):
+                    self._finish_npz_load(base)
+                else:
+                    messagebox.showerror(
+                        "Rebuild failed",
+                        "Could not rebuild the heatmap from the .npz.\n"
+                        "Select the file again and choose No to re-read the .mea.")
+                    self.ui_state = UIState.ERROR
+                    self.update_button_state()
+            elif msg_type == "error":
+                self._progress_stop()
+                messagebox.showerror("Rebuild failed", str(msg))
+                self.ui_state = UIState.ERROR
+                self.update_button_state()
+        except queue.Empty:
+            self.root.after(100, lambda: self._poll_bg_render(q, base))
+
     def _start_read(self):
-        """Kick off readGAS.py subprocess (formerly on_read_file button handler)."""
+        """Show the heatmap for the selected .mea, reusing the .npz if wanted."""
         if not self.state.selected_mea_file:
             return
+
+        # The .npz holds the same matrix losslessly and is what every later
+        # stage reads, so an existing one can stand in for the .mea entirely —
+        # including redrawing the display background, which is why only the
+        # .npz needs to be present for the shortcut to be offered.
+        mea = self.state.selected_mea_file
+        base = Path(mea).stem
+        npz = f"results/{base}.npz"
+        if os.path.exists(npz) and self._ask_use_cached_npz(mea, npz):
+            if os.path.exists(f"results/{base}_bg.png"):
+                self._finish_npz_load(base)
+            else:
+                self._render_bg_from_npz(base, npz)
+            return
+
         self.ui_state = UIState.READING
         self.update_button_state()
         self.status_label.config(
@@ -777,10 +1033,16 @@ class GCIMSApp:
             messagebox.showwarning("No file", "Please select a file first.")
             return
 
-        # If we already have an overlay for this file, just swap the view
-        if self.state.overlay_img_path and os.path.exists(self.state.overlay_img_path):
-            self._render_main_from_path(self.state.overlay_img_path, kind="overlay")
-            self.status_label.config(text="Showing detected-peaks heatmap")
+        # Already detected for this file → just swap the view (circles are
+        # Canvas objects, so this costs nothing beyond one image blit).
+        # Requires peaks, not just the backdrop: a .npz reload can leave the
+        # background present with a stale/absent peak list, and short-circuiting
+        # on the image alone would show an empty canvas and never detect.
+        if (self.state.peaks and self.state.bg_img_path
+                and os.path.exists(self.state.bg_img_path)):
+            self._show_peak_canvas()
+            self.status_label.config(
+                text=f"Showing {len(self.state.peaks)} detected peaks")
             return
 
         self.ui_state = UIState.DETECTING
@@ -810,9 +1072,16 @@ class GCIMSApp:
                 json_path = f"results/{base}_peaks.json"
                 csv_path = f"results/{base}_peaks.csv"
 
-                if os.path.exists(overlay):
-                    self.load_overlay(overlay)
-                    self.state.overlay_path = overlay
+                # _overlay.png keeps its baked-in circles for CLI/report use;
+                # the interactive canvas uses the circle-free _bg.png so the
+                # circles can be individual Canvas objects (Batch 6).
+                self.state.overlay_path = overlay if os.path.exists(overlay) else None
+                bg = f"results/{base}_bg.png"
+                self.state.bg_img_path = bg if os.path.exists(bg) else None
+                self._load_canvas_geometry(base)
+                self._load_maxima(base)
+                self.state.peak_state = load_peak_state(
+                    f"results/{base}_peaks_state.json")
 
                 peaks, err = load_peaks_from_json(json_path)
                 if err and os.path.exists(csv_path):
@@ -850,6 +1119,9 @@ class GCIMSApp:
                     self.ui_state = UIState.PEAKS_DETECTED
                     self.status_label.config(text=f"✓ Detected {len(peaks)} peaks")
 
+                # Funnel stats for the Rules panel (harmless no-op on the error path)
+                self.state.detection_meta, _ = load_detection_meta(json_path)
+                self._show_peak_canvas()
                 self.update_button_state()
             elif msg_type == "error":
                 self._progress_stop()
@@ -909,6 +1181,241 @@ class GCIMSApp:
             self.main_canvas_pan_x, self.main_canvas_pan_y,
             image=self.state.overlay_photo_ref, anchor="nw",
         )
+        # Circles live above the backdrop and must follow every zoom/pan
+        self._draw_peak_circles()
+
+    # ------------------------------------------------------------------------- #
+    # Batch 6: peak circles as native Canvas objects
+    # ------------------------------------------------------------------------- #
+    def _load_existing_peaks(self, base):
+        """Load a previous detection instead of spending ~83 s redoing it.
+
+        Only the display artefacts are reused; nothing here recomputes, so a
+        stale set is never silently accepted — outputs_are_fresh() requires all
+        of them to be newer than the .mea.
+        """
+        mea = self.state.selected_mea_file
+        json_path = f"results/{base}_peaks.json"
+        bg = f"results/{base}_bg.png"
+        maxima = f"results/{base}_maxima.npz"
+        if not outputs_are_fresh(mea, json_path, bg, maxima):
+            return False
+
+        peaks, err = load_peaks_from_json(json_path)
+        if err:
+            return False
+        self.state.overlay_path = f"results/{base}_overlay.png"
+        self.state.bg_img_path = bg
+        self._load_canvas_geometry(base)
+        self._load_maxima(base)
+        self.state.peak_state = load_peak_state(f"results/{base}_peaks_state.json")
+        self.state.detection_meta, _ = load_detection_meta(json_path)
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                self.state.matrix_shape = tuple(json.load(f).get("matrix_shape", []))
+        except Exception:
+            pass
+        self.state.peaks_json_path = json_path
+        self.state.peaks_csv_path = f"results/{base}_peaks.csv"
+        self.populate_peak_table(peaks)
+        self.ui_state = UIState.PEAKS_DETECTED
+        self.update_button_state()
+        self.status_label.config(
+            text=f"✓ Loaded {len(peaks)} peaks from a previous run — "
+                 f"click Show Detected Peak Heatmap to view")
+        return True
+
+    def _load_canvas_geometry(self, base):
+        """Where the plot area sits inside _bg.png, for placing circles.
+
+        _bg.json wins over _peaks.json: it is written by whoever renders the
+        PNG, so it always describes the image actually on screen. _peaks.json
+        may carry geometry from an older render (or none, if the background was
+        rebuilt from the .npz without re-detecting).
+        """
+        self.state.canvas_geometry = None
+        for path, key in ((f"results/{base}_bg.json", None),
+                          (f"results/{base}_peaks.json", "canvas_geometry")):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                geom = data if key is None else data.get(key)
+            except Exception:
+                continue
+            if geom:
+                self.state.canvas_geometry = geom
+                return
+
+    def _load_maxima(self, base):
+        """Load the raw-maxima cache so the Rules panel can re-select live.
+
+        Without it a rule that moves the prominence gate (R004) would need a
+        full ~83 s re-detection; with it the whole funnel is recomputed in
+        memory in milliseconds.
+        """
+        self.state.maxima = None
+        try:
+            self.state.maxima = peaks_mod.load_maxima_npz(f"results/{base}_maxima.npz")
+        except Exception as e:
+            print(f"maxima cache unavailable: {e}")
+
+    def _show_peak_canvas(self):
+        """Render the circle-free backdrop and draw peak circles on top."""
+        path = self.state.bg_img_path or self.state.overlay_path
+        if not path or not os.path.exists(path):
+            return
+        kind = "bg" if path == self.state.bg_img_path else "overlay"
+        self._render_main_from_path(path, kind=kind)
+        self.state.overlay_image_size = self.main_canvas_original.size
+
+    def _peak_to_image_xy(self, peak):
+        """Peak data coords -> pixel coords inside the background PNG.
+
+        Uses the plot-area bbox recorded by peaks.write_overlay(). The old
+        highlight_peak_on_overlay() assumed the data area filled the whole PNG
+        and so drew circles offset by the matplotlib margins; this does not.
+        Returns None when geometry or the peak's coords are unavailable.
+        """
+        g = self.state.canvas_geometry
+        if not g:
+            return None
+        dr = peak.get("drift_relative")
+        rt = peak.get("retention_s")
+        if dr is None or rt is None:
+            return None
+        pw, ph = g["png_size"]
+        x0, y0, bw, bh = g["axes_bbox"]
+        xmin, xmax = g["xlim"]
+        ymin, ymax = g["ylim"]
+        if xmax == xmin or ymax == ymin:
+            return None
+        fx = x0 + (dr - xmin) / (xmax - xmin) * bw
+        fy = y0 + (rt - ymin) / (ymax - ymin) * bh   # figure fraction, from bottom
+        return fx * pw, (1.0 - fy) * ph              # canvas y runs downward
+
+    def _draw_peak_circles(self):
+        """(Re)draw one oval + number per peak on top of the background image.
+
+        Every baseline peak is drawn, whatever its state — a peak rejected by a
+        rule looks exactly like one the user deselected by hand (stippled red),
+        because both mean the same thing: not selected. Peaks removed by the
+        mandatory rules (R004/R006) are absent from state.peaks entirely; they
+        were never candidates, so there is nothing to show.
+        """
+        canvas = self.main_canvas
+        canvas.delete("peakcircle")
+        self.state.peak_items = {}
+        if not self.state.canvas_geometry or self.main_canvas_kind != "bg":
+            return
+        z = self.main_canvas_zoom
+        r = 7   # fixed screen radius: keeps circles clickable at any zoom
+        for peak in self.state.peaks:
+            xy = self._peak_to_image_xy(peak)
+            if xy is None:
+                continue
+            x = self.main_canvas_pan_x + xy[0] * z
+            y = self.main_canvas_pan_y + xy[1] * z
+            pid = peak.get("peak_id", "?")
+            active = effective_active(peak)
+            # Tk canvas has no alpha channel. -stipple works on text, but
+            # -outlinestipple is silently ignored on Windows, so the circle
+            # cannot be dithered — it changes colour instead (verified by the
+            # user: stippled numbers dimmed, stippled outlines did not).
+            stipple = "" if active else "gray50"
+            outline = "red" if active else "gray60"
+            tags = ("peakcircle", f"peak{pid}")
+            oval = canvas.create_oval(
+                x - r, y - r, x + r, y + r, outline=outline, width=2, fill="",
+                tags=tags)
+            text = canvas.create_text(
+                x + r + 1, y - r - 1, text=str(pid), fill="red", anchor="sw",
+                font=("TkDefaultFont", 8), stipple=stipple, tags=tags)
+            items = {"oval": oval, "text": text}
+            if is_rule_override(peak):
+                # Rules rejected this peak but the user kept it — mark it so the
+                # override is visible later, not silently indistinguishable.
+                items["ring"] = canvas.create_oval(
+                    x - r - 3, y - r - 3, x + r + 3, y + r + 3,
+                    outline="red", width=1, dash=(2, 2), fill="", tags=tags)
+            self.state.peak_items[pid] = items
+
+    def toggle_peak(self, peak_id):
+        """Flip one peak's selection. The single entry point for every surface.
+
+        Circle click and the table's On checkbox both land here, which is what
+        keeps them in sync — there is no second copy of the state to drift.
+        """
+        peak = self._peak_by_id(peak_id)
+        if peak is None:
+            return
+        peak["user_active"] = not effective_active(peak)
+        self._refresh_peak_visuals(peak)
+        self.update_peaks_header()      # keeps "Current selected peaks" live
+        self._persist_peak_state()
+        state = "selected" if effective_active(peak) else "deselected"
+        extra = " (kept against the rules)" if is_rule_override(peak) else ""
+        self.status_label.config(text=f"Peak #{peak_id} {state}{extra}")
+
+    def _refresh_peak_visuals(self, peak):
+        """Repaint one peak's circle, number and table row after a toggle."""
+        self._draw_peak_circles()
+        for item_id in self.peak_tree.get_children():
+            values = self.peak_tree.item(item_id, "values")
+            if values and str(values[0]) == str(peak.get("peak_id")):
+                self._refresh_row(item_id, peak)
+                break
+
+    def _persist_peak_state(self):
+        """Write the sidecar so selections survive a restart."""
+        if not self.state.selected_mea_file:
+            return
+        base = Path(self.state.selected_mea_file).stem
+        try:
+            save_peak_state(f"results/{base}_peaks_state.json", self.state.peaks)
+        except Exception as e:
+            print(f"could not save peak state: {e}")
+
+    def _apply_saved_peak_state(self, peaks):
+        """Re-attach saved user choices to a freshly computed peak list."""
+        saved = self.state.peak_state or {}
+        for p in peaks:
+            p["user_active"] = saved.get(peak_key(p))
+        return peaks
+
+    def on_main_canvas_click_release(self, event):
+        """Treat a near-stationary press+release as a peak toggle, not a pan.
+
+        Left-drag pans the canvas, so distance is what separates the two. The
+        circles are hollow (fill=""), which in Tk means only the 2px outline is
+        clickable, so hit-testing is done on distance to the peak centre
+        instead of on canvas item identity — the inside of the circle counts.
+        """
+        if self._pan_last_x is None:
+            return
+        moved = abs(event.x - self._press_x) + abs(event.y - self._press_y)
+        self._pan_last_x = self._pan_last_y = None
+        if moved > 3:
+            return
+        peak = self._peak_at_canvas_xy(event.x, event.y)
+        if peak is not None:
+            self.toggle_peak(peak.get("peak_id"))
+
+    def _peak_at_canvas_xy(self, cx, cy, threshold=12):
+        """Nearest peak to a canvas point, or None if nothing is close enough."""
+        if self.main_canvas_kind != "bg":
+            return None
+        z = self.main_canvas_zoom
+        best, best_d = None, threshold
+        for peak in self.state.peaks:
+            xy = self._peak_to_image_xy(peak)
+            if xy is None:
+                continue
+            dx = self.main_canvas_pan_x + xy[0] * z - cx
+            dy = self.main_canvas_pan_y + xy[1] * z - cy
+            d = (dx * dx + dy * dy) ** 0.5
+            if d < best_d:
+                best, best_d = peak, d
+        return best
 
     def on_main_canvas_resize(self, event):
         """When the pane sash moves, refit the image without changing zoom origin."""
@@ -923,6 +1430,9 @@ class GCIMSApp:
     def on_main_pan_start(self, event):
         self._pan_last_x = event.x
         self._pan_last_y = event.y
+        # Remembered so release can tell a click from a drag
+        self._press_x = event.x
+        self._press_y = event.y
 
     def on_main_pan_drag(self, event):
         if self._pan_last_x is None:
@@ -963,20 +1473,26 @@ class GCIMSApp:
         self.peak_tree.delete(*self.peak_tree.get_children())
         # Ensure every peak has an "active" flag (default True)
         for p in peaks:
-            p.setdefault("active", True)
+            p.setdefault("rule_active", p.get("active", True))
+            p.setdefault("user_active", None)
+        self._apply_saved_peak_state(peaks)
         self.state.peaks = peaks
+        self.peak_tree.tag_configure("inactive", foreground="gray60")
+        self.peak_tree.tag_configure("override", foreground="firebrick")
         for peak in peaks:
             values = tuple(self._cell_value(col, peak) for col in PEAK_TABLE_COLUMNS)
-            self.peak_tree.insert("", "end", values=values)
+            self.peak_tree.insert("", "end", values=values,
+                                  tags=self._row_tags(peak))
 
         # Update header with matrix dimensions
         self.update_peaks_header()
         self.sort_column = None
         self.sort_reverse = False
 
-        # Render a numbered overlay (circles + peak-id numbers) via peak_with_number.py
-        # and swap it in when ready. Perfectly aligned since it's drawn in data coords.
-        self.generate_numbered_overlay()
+        # _overlay_numbered.png is a static export for the Batch 8 report, not
+        # something the canvas shows any more (circles and numbers are Canvas
+        # objects now). Generating it on every table refresh spent a subprocess
+        # on a file nothing reads — it moves behind an explicit button instead.
 
     # ------------------------------------------------------------------------- #
     # Peak-table cell rendering & click dispatch (Batch 2)
@@ -984,7 +1500,7 @@ class GCIMSApp:
     def _cell_value(self, col, peak):
         """Return display string for one cell of the peak table."""
         if col == "on":
-            return CHECK_ON if peak.get("active", True) else CHECK_OFF
+            return CHECK_ON if effective_active(peak) else CHECK_OFF
 
         m = peak.get("matches") or {}
         if col == "gc_ims":
@@ -1007,7 +1523,7 @@ class GCIMSApp:
             combined_cas = {c.get("CAS") for c in (m.get("combined_matches") or [])}
             return str(sum(1 for h in ims_hits if h.get("CAS") not in combined_cas))
         if col == "trigger":
-            return TRIGGER_ACTIVE if peak.get("active", True) else TRIGGER_DIM
+            return TRIGGER_ACTIVE if effective_active(peak) else TRIGGER_DIM
 
         # Default: raw peak field
         return peak.get(col)
@@ -1019,9 +1535,16 @@ class GCIMSApp:
         return None
 
     def _refresh_row(self, item_id, peak):
-        """Rebuild the values of one row (used after On toggle etc)."""
+        """Rebuild one row's values and its grey/normal styling."""
         values = tuple(self._cell_value(col, peak) for col in PEAK_TABLE_COLUMNS)
-        self.peak_tree.item(item_id, values=values)
+        self.peak_tree.item(item_id, values=values, tags=self._row_tags(peak))
+
+    @staticmethod
+    def _row_tags(peak):
+        """Row styling mirrors the circle: deselected for any reason = grey."""
+        if not effective_active(peak):
+            return ("inactive",)
+        return ("override",) if is_rule_override(peak) else ()
 
     def on_peak_tree_click(self, event):
         """Detect click column; dispatch On-toggle / ▶-trigger; else fall through.
@@ -1054,11 +1577,11 @@ class GCIMSApp:
             return
 
         if col_name == "on":
-            peak["active"] = not peak.get("active", True)
-            self._refresh_row(row_id, peak)
-            # Batch 3 will sync back to overlay circle + tag styling here.
+            # Same entry point the circle click uses, which is what keeps the
+            # two surfaces in sync (workflow §第八階段 point 3).
+            self.toggle_peak(peak_id)
         elif col_name == "trigger":
-            if not peak.get("active", True):
+            if not effective_active(peak):
                 # Workflow §第八階段: ▶ disabled when inactive
                 return
             self._open_compound_match_panel(peak)
@@ -1093,10 +1616,13 @@ class GCIMSApp:
                 base = Path(self.state.selected_mea_file).stem
                 numbered = f"results/{base}_overlay_numbered.png"
                 if os.path.exists(numbered):
-                    self.load_overlay(numbered)
-                    self.state.overlay_path = numbered
+                    # Kept as a static artifact for the Batch 8 report only —
+                    # swapping it into the canvas would bury the native circles
+                    # under baked-in pixels (workflow §第八階段 架構修正).
+                    self.state.numbered_overlay_path = numbered
                     self.status_label.config(
-                        text=f"✓ Detected {len(self.state.peaks)} peaks (numbered overlay ready)")
+                        text=f"✓ Detected {len(self.state.peaks)} peaks "
+                             f"(numbered overlay saved for report)")
             elif msg_type == "error":
                 # Fall back silently to the plain overlay already displayed.
                 pass
@@ -1150,10 +1676,13 @@ class GCIMSApp:
                 total_points = n_rt * n_dt
                 header_text = f"({n_rt:,} × {n_dt:,} = {total_points:,} points)  Detected Peaks:"
 
-        # Add peak count on right
+        # Add peak count on right, plus how many are currently selected —
+        # the two differ as soon as a rule rejects a peak or the user
+        # deselects one, and only the selected ones reach the report.
         if self.state.peaks:
             peak_count = len(self.state.peaks)
-            header_text += f"  {peak_count}"
+            selected = sum(1 for p in self.state.peaks if effective_active(p))
+            header_text += f"  {peak_count}    Current selected peaks: {selected}"
 
         self.peaks_header_label.config(text=header_text)
 
@@ -1192,35 +1721,28 @@ class GCIMSApp:
                 pass
             self.state.highlight_id = None
 
-        if not self.state.matrix_shape or not self.state.overlay_image_size:
+        # Uses the recorded plot-area bbox. The previous version mapped
+        # dt_index/n_dt onto the whole PNG, ignoring the matplotlib margins
+        # (~8.5% on the left alone), so the yellow ring never sat on its peak.
+        xy = self._peak_to_image_xy(peak)
+        if xy is None:
             return
-        n_rt, n_dt = self.state.matrix_shape
-        iw, ih = self.state.overlay_image_size
+        x_px = self.main_canvas_pan_x + xy[0] * self.main_canvas_zoom
+        y_px = self.main_canvas_pan_y + xy[1] * self.main_canvas_zoom
 
-        rt_index = peak.get("rt_index", 0)
-        dt_index = peak.get("dt_index", 0)
+        radius = 12
+        self.state.highlight_id = self.main_canvas.create_oval(
+            x_px - radius, y_px - radius,
+            x_px + radius, y_px + radius,
+            outline="yellow", width=3, fill=""
+        )
+        self.main_canvas.tag_raise(self.state.highlight_id)
 
-        if n_dt > 0 and n_rt > 0:
-            # Position in image pixels (0..iw, 0..ih), then apply current zoom + pan
-            x_img = (dt_index / n_dt) * iw
-            y_img = (rt_index / n_rt) * ih
-            x_px = self.main_canvas_pan_x + int(x_img * self.main_canvas_zoom)
-            y_px = self.main_canvas_pan_y + int(y_img * self.main_canvas_zoom)
-
-            radius = 12
-            self.state.highlight_id = self.main_canvas.create_oval(
-                x_px - radius, y_px - radius,
-                x_px + radius, y_px + radius,
-                outline="yellow", width=3, fill=""
-            )
-            self.main_canvas.tag_raise(self.state.highlight_id)
-
-            # Update status
-            peak_id = peak.get("peak_id", "?")
-            self.status_label.config(
-                text=f"✓ Peak #{peak_id} highlighted @ (x={peak.get('drift_ms', 0):.2f}ms, "
-                     f"y={peak.get('retention_s', 0):.2f}s)"
-            )
+        peak_id = peak.get("peak_id", "?")
+        self.status_label.config(
+            text=f"✓ Peak #{peak_id} highlighted @ (x={peak.get('drift_ms', 0):.2f}ms, "
+                 f"y={peak.get('retention_s', 0):.2f}s)"
+        )
 
     # (on_main_canvas_click removed — main_canvas now handles zoom/pan in-place.
     # ImageViewerDialog is still available for popups if we ever wire it back in.)
@@ -1288,16 +1810,257 @@ class GCIMSApp:
         self._render_main_from_path(self.state.heatmap_img_path, kind="heatmap")
         self.status_label.config(text="Showing original heatmap")
 
-    def on_open_rules(self):
-        """Open Rules management panel (workflow §第七階段).
+    # ------------------------------------------------------------------------- #
+    # Rules panel (workflow §第七階段) — live re-selection
+    # ------------------------------------------------------------------------- #
+    def _recompute_selection(self, config):
+        """Re-run the full candidate funnel in memory for `config`.
 
-        Batch 4 placeholder — panel not yet implemented.
+        Returns (peaks, stats). Requires the _maxima.npz cache: R004 changes
+        which candidates exist *before* max_prominence is taken, so the
+        prominence gate has to be recomputed, not just re-filtered.
         """
-        messagebox.showinfo(
-            "Rules panel — not yet implemented",
-            "The Rules management panel is planned for UI Batch 4 of the Identify\n"
-            "Workflow rollout. For now, edit rules_config.json manually if needed."
+        m = self.state.maxima
+        if m is None:
+            return None, None
+        params = (self.state.detection_meta or {}).get("params", {})
+        half_width, exclude_before, boundary = peaks_mod.pre_gate_params(config)
+        rip_index = int(m["rip_index"])
+        floor = float(m["floor"])
+
+        peaks, stats = peaks_mod.select_from_maxima(
+            m["pix"], m["val_smooth"], m["prom"], m["val_raw"], m["flatness"],
+            tuple(int(v) for v in m["shape"]), floor,
+            prom_frac=params.get("prom_frac", 0.02),
+            min_prominence=params.get("min_prominence", 0.0),
+            min_distance=params.get("min_distance", 3),
+            top_n=params.get("top_n", 0),
+            rip_index=rip_index, rip_half_width=half_width,
+            exclude_before_rip=exclude_before, rip_boundary=boundary, verbose=False,
         )
+        peaks_mod.attach_coords(peaks, m["drift_ms"], m["retention_s"])
+        rip_mod.attach_drift_relative(peaks, rip_index)
+        for p in peaks:
+            p.pop("_val_smooth", None)
+
+        # mark_rules, not apply_rules: rejected peaks stay on screen as
+        # stippled circles / grey rows rather than vanishing, so the user can
+        # see what a rule did (and override it — see effective_active()).
+        report = rules.mark_rules(
+            peaks, config, context={"floor": floor, "rip_index": rip_index})
+        self._apply_saved_peak_state(peaks)
+        stats["n_before_rules"] = len(peaks)
+        stats["n_after_rules"] = report["n_out"]
+        stats["n_selected"] = sum(1 for p in peaks if effective_active(p))
+        stats["rules_report"] = report
+        return peaks, stats
+
+    def on_open_rules(self):
+        """Rules panel: toggle a rule, see the circles change immediately."""
+        if self.state.rules_config is None:
+            self.state.rules_config = rules.load_config(RULES_CONFIG)
+
+        win = Toplevel(self.root)
+        win.title("Rules — live peak selection")
+        # Top-right, not Tk's default +0+0 — there it covered the heatmap,
+        # which is exactly what the user needs to watch while toggling rules.
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        panel_w = min(480, screen_w - 60)
+        panel_h = min(600, screen_h - 100)
+        win.geometry(f"{panel_w}x{panel_h}+{max(0, screen_w - panel_w - 20)}+40")
+        win.transient(self.root)
+        outer = Frame(win, padx=12, pady=10)
+        outer.pack(fill="both", expand=True)
+
+        # Merge saved config over the registry so every rule gets a row
+        defaults = {e["rule_number"]: e for e in rules.default_config()}
+        saved = {e.get("rule_number"): e for e in self.state.rules_config}
+        widgets = {}   # rule_number -> {"on": BooleanVar, "params": {name: StringVar}}
+
+        Label(outer, text="Rules", font=("TkDefaultFont", 11, "bold"),
+              anchor="w").pack(fill="x")
+        rules_frame = Frame(outer)
+        rules_frame.pack(fill="x", pady=(4, 10))
+
+        for row, rule in enumerate(rules.list_rules()):
+            rn = rule["rule_number"]
+            entry = saved.get(rn) or defaults.get(rn) or {"enabled": False, "params": {}}
+            # R004 / R006 define the numbering baseline, so they cannot be
+            # switched off — the checkbox is locked on rather than hidden, so
+            # it stays visible that they are running.
+            locked = rule.get("mandatory", False)
+            on_var = BooleanVar(value=True if locked else bool(entry.get("enabled")))
+            chk = ttk.Checkbutton(rules_frame, variable=on_var,
+                                  text=f"{rn}  {rule['name']}"
+                                       + ("   (always on)" if locked else ""),
+                                  command=lambda: self._on_rules_changed(widgets))
+            if locked:
+                chk.state(["disabled"])
+            chk.grid(row=row, column=0, sticky="w", pady=2)
+
+            pvars = {}
+            pframe = Frame(rules_frame)
+            pframe.grid(row=row, column=1, sticky="w", padx=(16, 0))
+            for name, value in (entry.get("params") or {}).items():
+                Label(pframe, text=f"{name} =").pack(side="left")
+                sv = StringVar(value=str(value))
+                ent = ttk.Entry(pframe, textvariable=sv, width=8)
+                ent.pack(side="left", padx=(2, 10))
+                ent.bind("<KeyRelease>",
+                         lambda e: self._on_rules_changed(widgets, debounce=True))
+                pvars[name] = (sv, ent)
+            widgets[rn] = {"on": on_var, "params": pvars, "type": rule["type"]}
+
+        rules_frame.columnconfigure(1, weight=1)
+
+        Label(outer, text="Selection funnel", font=("TkDefaultFont", 11, "bold"),
+              anchor="w").pack(fill="x")
+        self._rules_funnel = Text(outer, height=8, wrap="none",
+                                  font=("Consolas", 9), relief="solid", borderwidth=1)
+        self._rules_funnel.pack(fill="both", expand=True, pady=(4, 8))
+
+        self._rules_note = Label(outer, text="", anchor="w", justify="left",
+                                 wraplength=panel_w - 40, fg="gray25")
+        self._rules_note.pack(fill="x", pady=(0, 8))
+
+        btns = Frame(outer)
+        btns.pack(fill="x")
+        ttk.Button(btns, text="Save to rules_config.json",
+                   command=lambda: self._save_rules(widgets)).pack(side="left")
+        ttk.Button(btns, text="Close", command=win.destroy).pack(side="right")
+
+        self._rules_win = win
+        self._on_rules_changed(widgets)
+
+    def _collect_rules_config(self, widgets):
+        """Read the panel widgets back into a rules_config list."""
+        config, bad = [], []
+        for rn, w in widgets.items():
+            params = {}
+            for name, (sv, _ent) in w["params"].items():
+                raw = sv.get().strip()
+                try:
+                    params[name] = int(raw) if raw.lstrip("-").isdigit() else float(raw)
+                except ValueError:
+                    bad.append(f"{rn}.{name}")
+                    params[name] = 0
+            config.append({"rule_number": rn, "enabled": bool(w["on"].get()),
+                           "params": params})
+        # Safety net: the mandatory checkboxes are locked on, but enforce it
+        # here too so a future rule marked mandatory can never slip through
+        # just because its panel row was built before the flag existed.
+        return rules._enforce_mandatory(config), bad
+
+    def _on_rules_changed(self, widgets, debounce=False):
+        """Recompute the selection and push it to table + canvas + funnel."""
+        if debounce:
+            if getattr(self, "_rules_after_id", None):
+                self.root.after_cancel(self._rules_after_id)
+            self._rules_after_id = self.root.after(
+                350, lambda: self._on_rules_changed(widgets))
+            return
+        self._rules_after_id = None
+
+        config, bad = self._collect_rules_config(widgets)
+        self.state.rules_config = config
+
+        notes = []
+        if bad:
+            notes.append(f"⚠ Not a number, treated as 0: {', '.join(bad)}")
+
+        peaks, stats = self._recompute_selection(config)
+        if peaks is None:
+            self._rules_funnel_set("(no _maxima.npz cache for this file — run "
+                                   "Show Detected Peak Heatmap once to build it)")
+            notes.append("Rules cannot be applied live without the maxima cache.")
+            self._rules_note.config(text="\n".join(notes))
+            return
+
+        self.populate_peak_table(peaks)
+        self.update_peaks_header()
+        if self.main_canvas_kind == "bg":
+            # Already on the peak canvas — redraw circles only, so the user's
+            # current zoom/pan survives repeated rule tweaks
+            self._render_main_canvas()
+        else:
+            self._show_peak_canvas()        # switch over so the change is visible
+        self._rules_funnel_set(self._format_funnel(stats))
+
+        if any(p.get("flatness") is None for p in peaks) and \
+                any(e["rule_number"] == "R003" and e["enabled"] for e in config):
+            notes.append("⚠ R003 is inert for peaks that appeared after the last "
+                         "full detection — flatness is only measured during "
+                         "detection, so those peaks pass unchecked.")
+        if stats.get("rules_report", {}).get("rip_missing_warning"):
+            notes.append("⚠ R004 enabled but peaks lack drift_relative.")
+        # Prose lives here, not in the funnel box: that box is wrap="none" so
+        # its columns stay aligned, which would clip sentences at this width.
+        notes.append("Peaks failing an optional rule are not removed — they stay "
+                     "as stippled circles / grey rows, and clicking one keeps it "
+                     "anyway (dashed ring).")
+        notes.append("Changes are live but not saved until you press Save.")
+        self._rules_note.config(text="\n".join(notes))
+        self.status_label.config(text=f"Rules applied → {len(peaks)} peaks")
+
+    def _rules_funnel_set(self, text):
+        self._rules_funnel.config(state="normal")
+        self._rules_funnel.delete("1.0", END)
+        self._rules_funnel.insert(END, text)
+        self._rules_funnel.config(state="disabled")
+
+    def _save_rules(self, widgets):
+        config, bad = self._collect_rules_config(widgets)
+        if bad:
+            # Saving a typo as 0 silently would quietly change what the next
+            # full detection does — refuse instead.
+            messagebox.showerror(
+                "Not saved",
+                "These values are not numbers:\n  " + "\n  ".join(bad) +
+                "\n\nFix them and save again.")
+            return
+        try:
+            rules.save_config(RULES_CONFIG, config)
+            self.state.rules_config = config
+            messagebox.showinfo("Saved", f"Written to {RULES_CONFIG}\n\n"
+                                         "The next full detection will use it.")
+        except Exception as e:
+            messagebox.showerror("Save failed", str(e))
+
+    @staticmethod
+    def _format_funnel(stats):
+        """Render the candidate funnel produced by peaks.select_from_maxima()."""
+        if not stats:
+            return "(no detection loaded)"
+
+        def n(key):
+            v = stats.get(key)
+            return f"{v:,}" if isinstance(v, int) else "—"
+
+        def row(label, key):
+            """One funnel line: label left, count right-aligned in a fixed column."""
+            return f"{label:<34}{n(key):>10}"
+
+        hw = stats.get("rip_half_width") or 0
+        cut = stats.get("drift_cut_dt_index")
+        # Both mandatory rules cut the drift axis, so name whichever applied
+        cut_label = f"  − RIP cut (R004 ±{hw} + R006)" if cut \
+                    else f"  − R004 RIP band (±{hw})"
+
+        lines = [row("raw local maxima (above floor)", "n_raw_maxima"),
+                 row(cut_label, "n_rip_excluded")]
+        if cut:
+            lines.append(f"       keep dt_index > {cut:g}")
+        lines += [
+            row(f"  → prominence ≥ {stats.get('prom_threshold', '—')}",
+                "n_after_prom"),
+            f"       max_prominence = {stats.get('max_prominence', '—')}",
+            row("  → min_distance dedup", "n_after_distance"),
+            row("  → top_n", "n_final"),
+            row("  → optional rules pass", "n_after_rules"),
+            row("  → selected (rules + your picks)", "n_selected"),
+        ]
+        return "\n".join(lines)
 
     def on_generate_report(self):
         """Generate Report placeholder (workflow §第十一階段).

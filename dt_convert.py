@@ -1,6 +1,6 @@
 """
 dt_convert.py  —  GC-IMS Identify Workflow 第二階段：K0 換算
-Version: ver.01 — by Albert Sheng
+Version: 2.1 — by Albert Sheng
 
 依 GC-IMS_Identify_Workflow.md §第二階段（draft.13 定案）：
   - 雙模式設計，明確標記 provenance：

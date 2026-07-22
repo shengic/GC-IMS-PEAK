@@ -1296,6 +1296,67 @@ If the renderer fails, the UI falls back silently to the plain overlay.
 
 *(Consolidated from the former `UI_IMPROVEMENTS.md`.)*
 
+### v2.1 — Native circle layer, live Rules panel, per-peak selection
+
+Implements Identify-Workflow batches **6, 4 and 3**. This supersedes the v2
+numbered-overlay approach described in §20: circles and numbers are now Canvas
+objects, not pixels baked into a PNG.
+
+**Canvas (Batch 6)**
+- The backdrop is `<name>_bg.png`, a **circle-free** heatmap written by
+  `peaks.py`. Circles and peak numbers are `create_oval` / `create_text` items,
+  one addressable pair per `peak_id`, redrawn on every zoom/pan.
+- Placement uses `<name>_bg.json` (`png_size`, `axes_bbox`, `xlim`, `ylim`),
+  recorded by whoever renders the PNG. **This fixed a long-standing offset**:
+  the previous code mapped `dt_index / n_dt` onto the whole image, ignoring
+  matplotlib's margins (8.5 % on the left alone), so markers never sat on their
+  peaks.
+- `peak_with_number.py` is no longer generated automatically after every table
+  refresh — it is a static export for the Batch 8 report, and the canvas does
+  not display it. An explicit button will trigger it later.
+
+**Rules panel (Batch 4)**
+- Real checkboxes and parameter fields. Any change re-runs the entire candidate
+  funnel from `<name>_maxima.npz` in ~4 ms, instead of a ~83 s re-detection,
+  then repaints the circles and the table.
+- `R004` / `R006` are shown **locked** (`always on`): they define the numbering
+  baseline. Enforcement lives in `rules.load_config()` / `save_config()`, so
+  hand-editing `rules_config.json` cannot switch them off either.
+- A funnel readout shows raw maxima → drift cut → prominence gate → dedup →
+  top-N → optional rules → currently selected.
+- Saving refuses non-numeric parameters rather than silently storing `0`.
+- Opens at the top-right at 480×600 so it does not cover the heatmap.
+
+**Per-peak selection (Batch 3)**
+- `toggle_peak(peak_id)` is the single entry point; the circle click and the
+  table's **On** checkbox both call it, so the two cannot drift apart.
+- One visual state for "not selected", whatever the cause: a peak rejected by an
+  optional rule looks exactly like one deselected by hand. Rejected peaks are
+  **not removed** from the canvas or the table.
+- A manual pick overrides a rule (the user is the arbiter); such a peak is drawn
+  with a dashed ring so the override stays visible.
+- Circle colour, not stipple, marks the state: Tk accepts `-outlinestipple` on
+  Windows but ignores it, so the outline switches red ↔ `gray60` while the
+  number uses `-stipple` (which does work on text).
+- A click is distinguished from a pan by press/release distance (≤ 3 px), and
+  hit-testing uses distance to the peak centre so the inside of the hollow
+  circle counts.
+- State persists to `<name>_peaks_state.json`, keyed by `(rt_index, dt_index)`.
+  **Not** `peak_id`: that is a prominence rank within the baseline set and is
+  reassigned whenever `R004.half_width` or `R006.boundary` changes, so a
+  selection saved against it would silently reattach to a different peak.
+
+**Read path and window**
+- Selecting a `.mea` that already has an `.npz` asks whether to reuse it
+  (instant) or re-read the `.mea` (~13 s, overwrites the `.npz`). The `.mea`
+  itself is never modified. If the display images are missing, the backdrop is
+  rebuilt from the `.npz` alone via `peaks.py --bg-only`.
+- The peak-table header gained **`Current selected peaks: N`** alongside the
+  total, since the two differ as soon as a rule or a manual pick applies.
+- The window is sized from `winfo_screenwidth/height()` and maximised, replacing
+  a fixed 1700×950 that overflowed smaller displays — and a 1400×800 `minsize`
+  that made it impossible to shrink back into view.
+
 ### v2 — Numbered overlay & footer cleanup
 - **Numbered overlay**: new `peak_with_number.py` renders red circles **plus**
   peak-id numbers in matplotlib data coordinates; `main.py` generates it in the

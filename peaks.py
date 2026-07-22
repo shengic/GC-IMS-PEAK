@@ -1,8 +1,13 @@
 """
 peaks.py  —  GC-IMS 峰偵測（第一層：偵測 / 測量；measure-only v1）
-Version: ver.03 — by Albert Sheng
+Version: 2.1 — by Albert Sheng
 
 變更記錄：
+  2.1  — 強制規則 R004/R006 移到突出度門檻**之前**（門檻是相對值，RIP 會把它
+         墊高數倍並誤殺真峰）；抽出 select_from_maxima() 供 UI 規則面板共用；
+         新增 <name>_maxima.npz 快取（25 萬筆原始極大，使規則可即時重算）；
+         新增 write_bg() 與 --bg-only（只從 .npz 重畫背景圖，不做找峰）；
+         規則改用 mark_rules()，被否決的峰保留在輸出中並標記 rule_active。
   ver.03 — 串接 rip.py（Identify Workflow 第一階段）：載入強度面後立即算 rip_index
            / rip_intensity（fail-fast），偵測完成後為每個峰補 drift_relative 欄位，
            並寫進 stats。R004 從此可用。
@@ -25,8 +30,13 @@ Version: ver.03 — by Albert Sheng
 輸出（results/，與輸入同檔名 base）：
   - <name>_peaks.csv   ← 精簡：peak_id, retention_s, drift_ms, intensity
   - <name>_peaks.json  ← 完整：上述 + 突出度/平坦度/邊界/飽和/索引/drift_relative
-                          + 偵測參數與來源，stats 內含 rip_index / rip_intensity
-  - <name>_overlay.png ← 熱圖疊上偵測到的峰（佐證圖）
+                          + rule_active/active + 偵測參數與規則設定，
+                          stats 內含 rip_index / rip_intensity 與候選漏斗各級數量
+  - <name>_maxima.npz  ← 全部原始局部極大的快取（~2.4 MB），讓 UI 能在記憶體重跑
+                          整條漏斗（含門檻重算）約 4 ms，不必重跑 83 秒的 union-find
+  - <name>_bg.png      ← 無圈熱圖，互動畫布的背景（圈是 Canvas 原生物件）
+  - <name>_bg.json     ← 資料區在 _bg.png 裡的 bbox 與軸範圍，UI 靠它擺放圓圈
+  - <name>_overlay.png ← 熱圖疊上通過規則的峰（靜態佐證圖，供 VOCal 目視比對）
 
 依賴：numpy, scipy, scikit-image, matplotlib
     pip install numpy scipy scikit-image matplotlib
@@ -46,9 +56,11 @@ import os
 import numpy as np
 
 import rip
+import rules
 from gas_utils import PROJECT_DIR, resolve_input_path
 
 RESULTS_DIR = os.path.join(PROJECT_DIR, "results")
+RULES_CONFIG = os.path.join(PROJECT_DIR, "rules_config.json")
 SATURATION = 32767  # int16 滿格
 
 
@@ -172,8 +184,161 @@ def flatness_score(img, r, c, value, floor, win=200):
 # --------------------------------------------------------------------------- #
 # 偵測主流程
 # --------------------------------------------------------------------------- #
+def pre_gate_params(rules_config):
+    """從 rules_config 抽出必須在突出度門檻之前生效的兩條規則的參數。
+
+    R004 / R006 是強制規則（rules.mandatory_rules()），定義了峰編號的基準集合，
+    所以不能等偵測完再篩——見 select_from_maxima() 的說明。CLI 與 UI 都呼叫這
+    個函式，確保兩邊從同一份 config 抽出同樣的值。
+
+    回傳 (rip_half_width, exclude_before_rip, rip_boundary)。
+    """
+    by_number = {e.get("rule_number"): e for e in rules_config}
+    r004 = by_number.get("R004") or {}
+    r006 = by_number.get("R006") or {}
+    half_width = (float(r004.get("params", {}).get("half_width", 0.02))
+                  if r004.get("enabled") else 0.0)
+    exclude_before = bool(r006.get("enabled"))
+    boundary = float(r006.get("params", {}).get("boundary", 1.0))
+    return half_width, exclude_before, boundary
+
+
+def select_from_maxima(pix, val_smooth, prom, val_raw, flatness, shape, floor,
+                       prom_frac=0.02, min_prominence=0.0, min_distance=3,
+                       top_n=0, rip_index=None, rip_half_width=0.0,
+                       exclude_before_rip=False, rip_boundary=1.0, verbose=True):
+    """原始局部極大 → 選出的峰清單。純選取，不做任何量測。
+
+    detect_peaks() 與 main.py 的規則面板共用這一份實作：面板要能在使用者切換
+    R004 / 改 half_width 時即時重算（含突出度門檻重算），而門檻是相對值，
+    必須跟 CLI 用同一套算法，否則面板顯示的結果會與實際重跑偵測的結果不一致。
+
+    參數皆為等長的一維 numpy 陣列（來自 <name>_maxima.npz）：
+      pix        —— r*W + c 的扁平索引
+      val_smooth —— 平滑後強度（flatness_score 用）
+      prom       —— 突出度
+      val_raw    —— 原始未平滑強度（回報值與飽和判定用）
+      flatness   —— 平坦度，未量測者為 NaN；None 表示整批都未量測
+
+    回傳 (peaks, stats)，peaks 尚未有 retention_s/drift_ms（由 attach_coords 補）。
+    """
+    H, W = int(shape[0]), int(shape[1])
+    pix = np.asarray(pix)
+    val_smooth = np.asarray(val_smooth, dtype=np.float64)
+    prom = np.asarray(prom, dtype=np.float64)
+    val_raw = np.asarray(val_raw)
+    flat_arr = None if flatness is None else np.asarray(flatness, dtype=np.float64)
+
+    n_raw_maxima = int(pix.size)
+    stats = {"floor": float(floor), "n_raw_maxima": n_raw_maxima,
+             "n_rip_excluded": 0, "rip_half_width": float(rip_half_width or 0.0),
+             "n_after_prom": 0, "n_after_distance": 0, "n_final": 0,
+             "max_prominence": 0.0, "prom_threshold": 0.0}
+    if n_raw_maxima == 0:
+        return [], stats
+
+    # 門檻前的漂移軸裁切。drift_relative = dt_index / rip_index，所以條件都能
+    # 直接換算成 dt_index 的範圍，不必先建 peak 字典（25 萬筆，太貴）。
+    #   R004  排除 |drift_relative − 1| ≤ half_width      → RIP 柱狀帶本身
+    #   R006  排除 drift_relative ≤ boundary (預設 1.0)   → 比 RIP 快，非分析物
+    # 兩者同時啟用時聯集為單邊切 drift_relative > 1 + half_width。
+    #
+    # 這兩刀必須落在 max_prominence 之前（見本函式 docstring）：門檻是相對值，
+    # 而被切掉的區域正是全圖最強訊號所在，留著會把門檻墊高數倍。
+    keep = np.ones(n_raw_maxima, dtype=bool)
+    if rip_index:
+        cols = pix % W
+        cut_hi = 0.0        # dt_index ≤ cut_hi 一律剔除
+        if exclude_before_rip:
+            cut_hi = max(cut_hi, rip_index * float(rip_boundary))
+        if rip_half_width and rip_half_width > 0:
+            lo = rip_index * (1.0 - rip_half_width)
+            hi = rip_index * (1.0 + rip_half_width)
+            keep &= ~((cols >= lo) & (cols <= hi))
+            cut_hi = max(cut_hi, hi) if exclude_before_rip else cut_hi
+        if cut_hi > 0:
+            keep &= cols > cut_hi
+        stats["n_rip_excluded"] = int(n_raw_maxima - int(keep.sum()))
+        stats["drift_cut_dt_index"] = round(float(cut_hi), 2)
+        if verbose and stats["n_rip_excluded"]:
+            print(f"  門檻前裁切：R004 half_width={rip_half_width}"
+                  f"{' + R006 boundary=' + str(rip_boundary) if exclude_before_rip else ''}"
+                  f" → dt_index > {cut_hi:.1f} 才保留，剔除 {stats['n_rip_excluded']}")
+    if not keep.any():
+        return [], stats
+
+    # 突出度門檻是相對值 → max_prominence 必須在 RIP 帶剔除之後才算
+    max_prom = float(prom[keep].max())
+    thresh = max(float(min_prominence), float(prom_frac) * max_prom)
+    keep &= prom >= thresh
+    stats["max_prominence"] = round(max_prom, 2)
+    stats["prom_threshold"] = round(thresh, 2)
+    stats["n_after_prom"] = int(keep.sum())
+    if verbose:
+        print(f"  突出度門檻 {thresh:.1f} (=max({min_prominence}, {prom_frac}×{max_prom:.0f})) "
+              f"→ 保留 {stats['n_after_prom']}")
+
+    order = np.flatnonzero(keep)
+    order = order[np.argsort(-prom[order], kind="stable")]   # 依突出度降冪
+
+    # 近距離去重（平滑後仍可能有貼很近的雙極大）：保留突出度高者
+    if min_distance and min_distance > 0:
+        occupied = np.zeros((H, W), dtype=bool)
+        md = int(min_distance)
+        chosen = []
+        for idx in order:
+            r, c = divmod(int(pix[idx]), W)
+            r0, r1 = max(0, r - md), min(H, r + md + 1)
+            c0, c1 = max(0, c - md), min(W, c + md + 1)
+            if occupied[r0:r1, c0:c1].any():
+                continue
+            occupied[r, c] = True
+            chosen.append(idx)
+        order = np.array(chosen, dtype=int)
+    stats["n_after_distance"] = int(order.size)
+    if verbose:
+        print(f"  min_distance={min_distance} 去重 → {order.size} 個峰")
+
+    if top_n and top_n > 0:
+        order = order[:int(top_n)]
+
+    peaks = []
+    for i, idx in enumerate(order, start=1):
+        r, c = divmod(int(pix[idx]), W)
+        raw_i = int(val_raw[idx])
+        flat = None
+        if flat_arr is not None and not np.isnan(flat_arr[idx]):
+            flat = round(float(flat_arr[idx]), 4)
+        peaks.append({
+            "peak_id": i,
+            "rt_index": int(r),
+            "dt_index": int(c),
+            "intensity": raw_i,                  # 回報原始（未平滑）強度
+            "prominence": round(float(prom[idx]), 2),
+            "flatness": flat,
+            "edge_dist": int(min(r, H - 1 - r, c, W - 1 - c)),
+            "saturated": bool(abs(raw_i) >= SATURATION),
+            "rank": i,
+            "_maxima_index": int(idx),           # 回指 _maxima.npz，供量測補值
+            "_val_smooth": float(val_smooth[idx]),
+        })
+    stats["n_final"] = len(peaks)
+    return peaks, stats
+
+
 def detect_peaks(intensity, sigma=1.0, floor_pct=85.0, prom_frac=0.02,
-                 min_prominence=0.0, min_distance=3, top_n=0, flat_win=200):
+                 min_prominence=0.0, min_distance=3, top_n=0, flat_win=200,
+                 rip_index=None, rip_half_width=0.0, exclude_before_rip=False,
+                 rip_boundary=1.0, return_maxima=False):
+    """rip_index / rip_half_width 給定時，在算 max_prominence 之前先把 RIP 柱狀帶
+    的候選極大剔除（即 R004 的偵測層前置版本）。
+
+    理由：突出度門檻是相對值（prom_frac × max_prominence），而 RIP 本身通常就是
+    全圖最大突出度（實測 A_1_3：RIP prom=5052，非 RIP 最大僅 1545），會把門檻墊高
+    2～3 倍，誤殺真實分析物峰。R004 若只接在偵測之後，圈雖然消失，被墊高的門檻
+    誤殺的峰救不回來——所以這一刀必須落在 max_prominence 之前。
+    rip_half_width=0（預設）時完全不啟用，行為與 ver.03 相同。
+    """
     from scipy.ndimage import gaussian_filter
 
     H, W = intensity.shape
@@ -187,57 +352,36 @@ def detect_peaks(intensity, sigma=1.0, floor_pct=85.0, prom_frac=0.02,
     raw = compute_prominence(work, floor)
     print(f"  union-find 找到 {len(raw)} 個局部極大（floor 之上）")
     if not raw:
-        return [], {"floor": floor, "n_raw_maxima": 0}
+        empty = {"floor": floor, "n_raw_maxima": 0}
+        return ([], empty, None) if return_maxima else ([], empty)
 
-    max_prom = max(p[2] for p in raw)
-    thresh = max(min_prominence, prom_frac * max_prom)
-    kept = [m for m in raw if m[2] >= thresh]
-    kept.sort(key=lambda m: m[2], reverse=True)     # 依突出度排序
-    print(f"  突出度門檻 {thresh:.1f} (=max({min_prominence}, {prom_frac}×{max_prom:.0f})) "
-          f"→ 保留 {len(kept)}")
+    # 拆成平行陣列：select_from_maxima() 與 _maxima.npz 快取共用同一份表示
+    pix = np.fromiter((m[0] for m in raw), dtype=np.int64, count=len(raw))
+    val_smooth = np.fromiter((m[1] for m in raw), dtype=np.float32, count=len(raw))
+    prom = np.fromiter((m[2] for m in raw), dtype=np.float32, count=len(raw))
+    rr, cc = np.divmod(pix, W)
+    val_raw = intensity[rr, cc].astype(np.int32)
+    flat_arr = np.full(len(raw), np.nan, dtype=np.float32)
 
-    # 近距離去重（平滑後仍可能有貼很近的雙極大）：保留突出度高者
-    selected = []
-    if min_distance and min_distance > 0:
-        occupied = np.zeros((H, W), dtype=bool)
-        md = int(min_distance)
-        for pix, val, pr in kept:
-            r, c = divmod(pix, W)
-            r0, r1 = max(0, r - md), min(H, r + md + 1)
-            c0, c1 = max(0, c - md), min(W, c + md + 1)
-            if occupied[r0:r1, c0:c1].any():
-                continue
-            occupied[r, c] = True
-            selected.append((pix, val, pr))
-    else:
-        selected = kept
-    print(f"  min_distance={min_distance} 去重 → {len(selected)} 個峰")
+    peaks, stats = select_from_maxima(
+        pix, val_smooth, prom, val_raw, flat_arr, (H, W), floor,
+        prom_frac=prom_frac, min_prominence=min_prominence,
+        min_distance=min_distance, top_n=top_n,
+        rip_index=rip_index, rip_half_width=rip_half_width,
+        exclude_before_rip=exclude_before_rip, rip_boundary=rip_boundary)
 
-    if top_n and top_n > 0:
-        selected = selected[:top_n]
+    # 平坦度只對選中的峰量測（每筆要做兩次 flood fill，不可能對 25 萬個都算）
+    for p in peaks:
+        flat, trunc = flatness_score(
+            work, p["rt_index"], p["dt_index"], p.pop("_val_smooth"), floor, win=flat_win)
+        p["flatness"] = round(flat, 4)
+        p["flatness_truncated"] = trunc
+        flat_arr[p["_maxima_index"]] = flat
 
-    # 量測每個峰的平坦度 / 邊界 / 飽和，組成紀錄
-    peaks = []
-    for i, (pix, val, pr) in enumerate(selected, start=1):
-        r, c = divmod(pix, W)
-        flat, trunc = flatness_score(work, r, c, val, floor, win=flat_win)
-        edge = int(min(r, H - 1 - r, c, W - 1 - c))
-        sat = bool(abs(int(intensity[r, c])) >= SATURATION)
-        peaks.append({
-            "peak_id": i,
-            "rt_index": int(r),
-            "dt_index": int(c),
-            "intensity": int(intensity[r, c]),   # 回報原始（未平滑）強度
-            "prominence": round(pr, 2),
-            "flatness": round(flat, 4),
-            "flatness_truncated": trunc,
-            "edge_dist": edge,
-            "saturated": sat,
-            "rank": i,
-        })
-    stats = {"floor": floor, "n_raw_maxima": len(raw),
-             "n_after_prom": len(kept), "n_final": len(peaks),
-             "max_prominence": round(max_prom, 2), "prom_threshold": round(thresh, 2)}
+    if return_maxima:
+        maxima = {"pix": pix, "val_smooth": val_smooth, "prom": prom,
+                  "val_raw": val_raw, "flatness": flat_arr}
+        return peaks, stats, maxima
     return peaks, stats
 
 
@@ -259,7 +403,7 @@ def write_csv(peaks, path):
     print(f"  CSV  → {path}  ({len(peaks)} 峰)")
 
 
-def write_json(peaks, path, params, stats, meta, shape):
+def write_json(peaks, path, params, stats, meta, shape, geom=None):
     doc = {
         "source": meta.get("source"),
         "machine": meta.get("machine"),
@@ -268,12 +412,65 @@ def write_json(peaks, path, params, stats, meta, shape):
         "matrix_shape": [int(shape[0]), int(shape[1])],
         "detection_params": params,
         "stats": stats,
+        "canvas_geometry": geom,   # 資料區在 _bg.png 裡的位置，UI 畫圈用
         "n_peaks": len(peaks),
         "peaks": peaks,
     }
     with open(path, "w", encoding="utf-8") as f:
         json.dump(doc, f, ensure_ascii=False, indent=2)
     print(f"  JSON → {path}")
+
+
+def write_bg(intensity, drift_ms, retention_s, out_base, rip_index=None,
+             cmap="viridis", figsize=(8, 9), dpi=150):
+    """Render the circle-free background image + its geometry sidecar.
+
+    Everything this needs (intensity + both axes) lives in the `.npz`, so the
+    display can be rebuilt without going back to the `.mea` — ~5 s instead of
+    the ~13 s a full re-read costs.
+
+    The geometry goes to `<base>_bg.json` rather than `_peaks.json` because
+    whoever writes the PNG must write the matching geometry: a bg-only render
+    produces no peaks file, and geometry that disagrees with the image it
+    describes would put every circle in the wrong place.
+    """
+    geom = write_overlay(intensity, drift_ms, retention_s, [], out_base + "_bg.png",
+                         cmap=cmap, figsize=figsize, dpi=dpi, show=False,
+                         rip_index=rip_index, draw_circles=False,
+                         title="GC-IMS heatmap")
+    with open(out_base + "_bg.json", "w", encoding="utf-8") as f:
+        json.dump(geom, f, ensure_ascii=False, indent=2)
+    print(f"  GEOM → {out_base}_bg.json")
+    return geom
+
+
+def write_maxima_npz(path, maxima, shape, floor, rip_index, drift_ms, retention_s):
+    """快取 compute_prominence() 的全部原始局部極大（未經任何篩選）。
+
+    存在的理由：突出度門檻是相對值，R004 的 half_width 一改就會改變
+    max_prominence，進而改變「有哪些峰存在」——若不快取，UI 的規則面板每切一次
+    R004 就得重跑 83 秒的 union-find。有了這份快取，main.py 可以在記憶體裡重跑
+    整條漏斗（含門檻重算），五條規則全部即時。
+
+    ~25 萬筆 × (int64 + 3×float32/int32) ≈ 4 MB，另含兩軸（自足，不必回頭讀 .npz）。
+    """
+    np.savez_compressed(
+        path,
+        pix=maxima["pix"], val_smooth=maxima["val_smooth"], prom=maxima["prom"],
+        val_raw=maxima["val_raw"], flatness=maxima["flatness"],
+        shape=np.array(shape, dtype=np.int64), floor=np.float64(floor),
+        rip_index=np.int64(rip_index), drift_ms=drift_ms, retention_s=retention_s,
+    )
+    size_mb = os.path.getsize(path) / 1e6
+    print(f"  MAXIMA → {path}  ({maxima['pix'].size:,} 筆, {size_mb:.1f} MB)")
+
+
+def load_maxima_npz(path):
+    """讀回 write_maxima_npz() 的快取，回傳 dict。找不到檔案時回傳 None。"""
+    if not os.path.exists(path):
+        return None
+    with np.load(path) as z:
+        return {k: z[k] for k in z.files}
 
 
 def _downsample_for_display(img, figsize, dpi, margin=1.5):
@@ -295,12 +492,19 @@ def _downsample_for_display(img, figsize, dpi, margin=1.5):
 
 def write_overlay(intensity, drift_ms, retention_s, peaks, path,
                   cmap="viridis", mark_n=0, figsize=(8, 9), dpi=150, show=False,
-                  rip_index=None):
+                  rip_index=None, draw_circles=True, title=None):
     """Render overlay heatmap with peak circles.
 
     橫軸使用 drift_relative（本次使用者決策，見 readGAS.plot_heatmap 註解）。
     rip_index 未提供時就地呼叫 rip.find_rip() 算；scatter 紅圈用 peak 內建的
     drift_relative 欄位（由 rip.attach_drift_relative 補上）。
+
+    draw_circles=False 時只畫熱圖不畫圈，供 main.py 的互動畫布當背景——圈在那邊
+    是 Canvas 原生物件（可個別 toggle），不能烤進像素裡。
+
+    回傳 geom dict：資料區在 PNG 裡的確切位置與座標範圍。沒有這個，UI 只能猜
+    matplotlib 的邊界，峰的圈就會對不準（既有 highlight_peak_on_overlay() 正是
+    因為假設資料區佔滿整張 PNG 而畫偏）。
     """
     import matplotlib
     if not show:
@@ -325,9 +529,10 @@ def write_overlay(intensity, drift_ms, retention_s, peaks, path,
               extent=[drift_norm[0], drift_norm[-1], retention_s[0], retention_s[-1]],
               cmap=cmap, vmin=vmin, vmax=vmax, interpolation="nearest")
     shown = peaks[:mark_n] if mark_n and mark_n > 0 else peaks
-    xs = [p.get("drift_relative", p["drift_ms"] / drift_ms[rip_index]) for p in shown]
-    ys = [p["retention_s"] for p in shown]
-    ax.scatter(xs, ys, s=28, facecolors="none", edgecolors="red", linewidths=0.8)
+    if draw_circles:
+        xs = [p.get("drift_relative", p["drift_ms"] / drift_ms[rip_index]) for p in shown]
+        ys = [p["retention_s"] for p in shown]
+        ax.scatter(xs, ys, s=28, facecolors="none", edgecolors="red", linewidths=0.8)
     ax.set_xlabel(drift_label)
     ax.set_ylabel("Retention time [s]")
     # 每 0.5 一格 major tick（跟 readGAS.plot_heatmap 一致）
@@ -335,13 +540,26 @@ def write_overlay(intensity, drift_ms, retention_s, peaks, path,
     ax.xaxis.set_major_locator(MultipleLocator(0.5))
     ax.xaxis.set_minor_locator(MultipleLocator(0.1))
     ax.xaxis.set_major_formatter(FormatStrFormatter("%.1f"))
-    ax.set_title(f"Detected {len(shown)} peaks (red = detected)")
+    ax.set_title(title if title is not None
+                 else f"Detected {len(shown)} peaks (red = detected)")
     fig.savefig(path, dpi=dpi)
-    print(f"  PNG  -> {path}  (marked {len(shown)} peaks)")
+
+    # constrained_layout 的軸位置要等 draw 之後才定案；savefig 已觸發一次 draw。
+    # bbox 為 figure fraction（y 由下往上），UI 換算成像素時要翻轉 y。
+    bbox = ax.get_position()
+    geom = {
+        "png_size": [int(round(figsize[0] * dpi)), int(round(figsize[1] * dpi))],
+        "axes_bbox": [round(bbox.x0, 6), round(bbox.y0, 6),
+                      round(bbox.width, 6), round(bbox.height, 6)],
+        "xlim": [float(v) for v in ax.get_xlim()],
+        "ylim": [float(v) for v in ax.get_ylim()],
+    }
+    print(f"  PNG  -> {path}  (marked {len(shown) if draw_circles else 0} peaks)")
     if show:
         plt.show()
     else:
         plt.close(fig)
+    return geom
 
 
 # --------------------------------------------------------------------------- #
@@ -362,6 +580,11 @@ def main():
                     help="兩峰最小像素間距，去重用 (預設 3)")
     ap.add_argument("--top-n", type=int, default=0,
                     help="只保留突出度前 N 個峰 (預設 0=全部)")
+    ap.add_argument("--bg-only", action="store_true",
+                    help="只從 .npz 重畫互動畫布的背景圖 (<名>_bg.png + _bg.json)，"
+                         "不做找峰。約 5 秒，用於 .npz 還在但圖檔被刪掉的情況")
+    ap.add_argument("--rules-config", default=None,
+                    help=f"rules_config.json 路徑 (預設 {RULES_CONFIG}；缺檔 → 內建預設)")
     ap.add_argument("--mark-n", type=int, default=0,
                     help="overlay 只標前 N 個峰 (預設 0=全部)")
     ap.add_argument("--cmap", default="viridis", help="overlay 配色 (預設 viridis)")
@@ -393,30 +616,74 @@ def main():
     rip_index, rip_intensity = rip.find_rip(intensity)
     print(f"RIP：dt_index={rip_index}  drift={drift_ms[rip_index]:.4f} ms  I={rip_intensity}")
 
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    base = os.path.splitext(os.path.basename(path))[0]
+    out = os.path.join(RESULTS_DIR, base)
+
+    if args.bg_only:
+        write_bg(intensity, drift_ms, retention_s, out, rip_index=rip_index,
+                 cmap=args.cmap, figsize=figsize, dpi=args.dpi)
+        print(f"完成：僅重畫背景圖，未執行找峰。")
+        return
+
+    # 第七階段：規則庫。R004（排除 RIP 帶）需在突出度門檻之前生效，故它的
+    # half_width 先抽出來餵給 detect_peaks；其餘規則在偵測後才套用。
+    rules_config = rules.load_config(args.rules_config or RULES_CONFIG)
+    rip_half_width, exclude_before_rip, rip_boundary = pre_gate_params(rules_config)
+
     params = {"sigma": args.sigma, "floor_pct": args.floor_pct,
               "prom_frac": args.prom_frac, "min_prominence": args.min_prominence,
-              "min_distance": args.min_distance, "top_n": args.top_n}
+              "min_distance": args.min_distance, "top_n": args.top_n,
+              "rules_config": rules_config}
     print("偵測中...")
-    peaks, stats = detect_peaks(
+    peaks, stats, maxima = detect_peaks(
         intensity, sigma=args.sigma, floor_pct=args.floor_pct,
         prom_frac=args.prom_frac, min_prominence=args.min_prominence,
-        min_distance=args.min_distance, top_n=args.top_n)
+        min_distance=args.min_distance, top_n=args.top_n,
+        rip_index=rip_index, rip_half_width=rip_half_width,
+        exclude_before_rip=exclude_before_rip, rip_boundary=rip_boundary,
+        return_maxima=True)
     attach_coords(peaks, drift_ms, retention_s)
     rip.attach_drift_relative(peaks, rip_index)
     stats["rip_index"] = rip_index
     stats["rip_intensity"] = rip_intensity
 
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    base = os.path.splitext(os.path.basename(path))[0]
-    out = os.path.join(RESULTS_DIR, base)
+    # 偵測後套用其餘規則。用 mark_rules 而非 apply_rules：被規則否決的峰仍要
+    # 留在輸出裡（UI 以「未選取」樣態顯示，見 workflow §第八階段），否則重開
+    # 程式後那些峰就不見了，使用者也無從得知規則做了什麼。
+    # peak_id 不重編號：編號基準線是強制規則套用後的集合，可選規則只標記。
+    rules_report = rules.mark_rules(
+        peaks, rules_config, context={"floor": stats["floor"], "rip_index": rip_index})
+    for p in peaks:
+        p["active"] = p["rule_active"]   # 初始狀態；使用者的手動決定存在側車檔
+    stats["n_before_rules"] = len(peaks)
+    stats["n_after_rules"] = rules_report["n_out"]
+    stats["rules_report"] = rules_report
+    print(f"規則庫：{len(peaks)} 個峰中有 {rules_report['n_out']} 個通過"
+          f"（啟用 {sum(1 for e in rules_config if e.get('enabled'))} 條規則）")
+    if rules_report.get("rip_missing_warning"):
+        print("  ⚠ R004 啟用但峰缺 drift_relative，該規則實際未生效")
+
+    # _overlay.png 是給 VOCal 目視比對與報告用的靜態圖，只畫通過規則的峰；
+    # 互動畫布會把未通過的也畫出來（半透明），那是 main.py 的事。
+    active_peaks = [p for p in peaks if p["active"]]
+
     print("輸出：")
     write_csv(peaks, out + "_peaks.csv")
-    write_json(peaks, out + "_peaks.json", params, stats, meta, intensity.shape)
-    write_overlay(intensity, drift_ms, retention_s, peaks, out + "_overlay.png",
+    write_maxima_npz(out + "_maxima.npz", maxima, intensity.shape, stats["floor"],
+                     rip_index, drift_ms, retention_s)
+    # 圈是 Canvas 原生物件（可個別 toggle），所以互動畫布要的是「沒有圈」的背景圖；
+    # _overlay.png 維持有圈，供 CLI 目視比對與第十一階段報告使用。
+    write_overlay(intensity, drift_ms, retention_s, active_peaks, out + "_overlay.png",
                   cmap=args.cmap, mark_n=args.mark_n,
                   figsize=figsize, dpi=args.dpi, show=args.show,
                   rip_index=rip_index)
-    print(f"完成：共偵測 {len(peaks)} 個峰。請開 {base}_overlay.png 與 VOCal 圖目視比對。")
+    geom = write_bg(intensity, drift_ms, retention_s, out, rip_index=rip_index,
+                    cmap=args.cmap, figsize=figsize, dpi=args.dpi)
+    write_json(peaks, out + "_peaks.json", params, stats, meta, intensity.shape,
+               geom=geom)
+    print(f"完成：基準 {len(peaks)} 個峰，其中 {len(active_peaks)} 個通過規則。"
+          f"請開 {base}_overlay.png 與 VOCal 圖目視比對。")
 
 
 if __name__ == "__main__":

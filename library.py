@@ -1,6 +1,6 @@
 """
 library.py  —  GC-IMS Identify Workflow 第三階段：.ril / .iml 資料庫讀取
-Version: ver.01 — by Albert Sheng
+Version: 2.1 — by Albert Sheng
 
 依 GC-IMS_Identify_Workflow.md §第三階段（draft.13 定案）：
   - .ril（21 欄，Tab-separated，CAS/NAME/Formula/RI/...）

@@ -49,12 +49,55 @@ def ids(peaks):
     return [p["peak_id"] for p in peaks]
 
 
+def test_mandatory_rules_cannot_be_disabled():
+    """R004 / R006 定義了峰編號的基準集合，使用者不可停用。
+
+    強制必須落在 load_config()/save_config() 這一層，不能只做在 UI 的
+    disabled checkbox 上——否則手動編輯 rules_config.json 就能繞過，
+    編號基準會在使用者不知情的情況下改變。
+    """
+    assert rules.mandatory_rules() == {"R004", "R006"}
+
+    # (a) 明確寫 enabled=false → 被改回 true
+    forced = rules._enforce_mandatory([
+        {"rule_number": "R004", "enabled": False, "params": {"half_width": 0.02}},
+        {"rule_number": "R006", "enabled": False, "params": {"boundary": 1.0}},
+    ])
+    assert all(e["enabled"] for e in forced)
+
+    # (b) 整條從檔案裡刪掉 → 用預設值補回來
+    forced = rules._enforce_mandatory(
+        [{"rule_number": "R001", "enabled": True, "params": {"threshold": 10}}])
+    present = {e["rule_number"]: e for e in forced}
+    assert set(present) >= {"R001", "R004", "R006"}
+    assert present["R004"]["enabled"] and present["R006"]["enabled"]
+
+    # (c) 參數不被強制——強制的是「規則會跑」，不是它的數值
+    forced = rules._enforce_mandatory(
+        [{"rule_number": "R004", "enabled": False, "params": {"half_width": 0.05}}])
+    assert forced[0]["params"]["half_width"] == 0.05
+
+
+def test_r006_excludes_faster_than_rip():
+    """R006：drift_relative ≤ boundary 的峰剔除（比 RIP 快 → 非分析物）。"""
+    cfg = [{"rule_number": "R006", "enabled": True, "params": {"boundary": 1.0}}]
+    peaks = [
+        dict(peak_id=1, drift_relative=0.5),    # 比 RIP 快，剔除
+        dict(peak_id=2, drift_relative=1.0),    # 恰在邊界上，剔除（條件是 >）
+        dict(peak_id=3, drift_relative=1.4),    # 保留
+        dict(peak_id=4),                        # 無 drift_relative → 保守放行
+    ]
+    kept, _rep = rules.apply_rules(peaks, cfg)
+    assert ids(kept) == [3, 4]
+
+
 def test_rules_smoke():
-    sep("[1] list_rules(): 五條內建規則都要在")
+    sep("[1] list_rules(): 六條內建規則都要在")
     rs = rules.list_rules()
     for r in rs:
         print(f"  {r['rule_number']}  {r['name']}  ({r['type']})")
-    assert {r["rule_number"] for r in rs} == {"R001", "R002", "R003", "R004", "R005"}
+    assert {r["rule_number"] for r in rs} == {"R001", "R002", "R003",
+                                              "R004", "R005", "R006"}
 
     # 型態核對
     types = {r["rule_number"]: r["type"] for r in rs}
@@ -63,6 +106,7 @@ def test_rules_smoke():
     assert types["R003"] == rules.RULE_TYPE_PER_PEAK
     assert types["R004"] == rules.RULE_TYPE_PER_PEAK
     assert types["R005"] == rules.RULE_TYPE_PER_PEAK_WITH_CONTEXT
+    assert types["R006"] == rules.RULE_TYPE_PER_PEAK
 
     sep("[2] R001 min_prominence 單獨啟用，threshold=50")
     cfg = [{"rule_number": "R001", "enabled": True, "params": {"threshold": 50}}]

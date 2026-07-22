@@ -1,6 +1,6 @@
 """
 identify.py  —  GC-IMS Identify Workflow 第六階段：整合輸出
-Version: ver.01 — by Albert Sheng
+Version: 2.1 — by Albert Sheng
 
 依 GC-IMS_Identify_Workflow.md §第六階段：
   輸入：_peaks.json（來自 peaks.py，已含 drift_relative 由 rip 整合）

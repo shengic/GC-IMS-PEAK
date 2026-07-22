@@ -1,0 +1,44 @@
+[
+  {
+    "rule_number": "R001",
+    "enabled": false,
+    "params": {
+      "threshold": 0
+    }
+  },
+  {
+    "rule_number": "R002",
+    "enabled": false,
+    "params": {
+      "top_n": 0
+    }
+  },
+  {
+    "rule_number": "R003",
+    "enabled": false,
+    "params": {
+      "threshold": 1.0
+    }
+  },
+  {
+    "rule_number": "R004",
+    "enabled": true,
+    "params": {
+      "half_width": 0.02
+    }
+  },
+  {
+    "rule_number": "R005",
+    "enabled": false,
+    "params": {
+      "min_ratio": 0.3
+    }
+  },
+  {
+    "rule_number": "R006",
+    "enabled": true,
+    "params": {
+      "boundary": 1.0
+    }
+  }
+]

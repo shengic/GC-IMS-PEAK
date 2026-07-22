@@ -1,6 +1,6 @@
 # GC-IMS Peak-Finding Pipeline — Implementation Notes
 
-**Version: ver.01 — by Albert Sheng**
+**Version: 2.1 — by Albert Sheng**
 
 **Purpose of this document:** a self-contained, portable record of the working code built for
 reading G.A.S. FlavourSpec® GC-IMS `.mea` files, exporting them, and detecting peaks. It is
@@ -11,33 +11,58 @@ workflow, and — in detail — how peaks are evaluated.
 Companion design document: `GC-IMS_Peak_Finding_Workflow.md` (the methodology/architecture blueprint).
 This file is the **implementation** counterpart.
 
-- Project root: `J:\GC-IMS-peak`
-- Platform: Windows 11, Python 3.14 (`c:\python314\python.exe`)
-- Status: raw-data mode working (parse → export → detect). Threshold calibration not yet done.
+- Project root: `F:\GC-IMS-PEAK` (was `J:\` / `K:\` in earlier sessions)
+- Platform: Windows 11, Python 3.13 in `.venv` at the project root
+- Status: raw-data mode working (parse → export → detect → interactive selection).
+  Threshold calibration not yet done.
 
 ---
 
 ## 0. TL;DR workflow
 
 ```powershell
-# one-time install (numpy already present)
-python -m pip install numpy scipy scikit-image matplotlib
+python -m pip install -r requirements.txt
 
-# step 1: parse the .mea, export matrix + CSV + heatmap
+# step 1: parse the .mea -> matrix + heatmap
 python readGAS.py
-#   -> results/<name>.csv          (full-res long table: drift, retention, intensity)
-#   -> results/<name>.npz          (lossless matrix + axes, ~varies)  <-- feeds step 2
+#   -> results/<name>.npz          (lossless matrix + axes, ~30 MB)  <-- feeds step 2
 #   -> results/<name>_heatmap.png  (rendered heatmap)
+#   The full-res long-table CSV is OPT-IN (--write-csv): it is 0.8-1.5 GB per
+#   file and nothing in the pipeline reads it. The .npz holds the same data
+#   losslessly at ~1/40 the size.
 
 # step 2: detect peaks from the matrix
 python peaks.py
+#   -> results/<name>_peaks.json   (every baseline peak + rule_active + funnel stats)
 #   -> results/<name>_peaks.csv    (peak_id, retention_s, drift_ms, intensity)
-#   -> results/<name>_overlay.png  (heatmap with red circles on detected peaks)
-#   -> results/<name>_peaks.json   (full per-peak metrics + provenance)
+#   -> results/<name>_maxima.npz   (all raw local maxima, ~2.4 MB) <-- live rule re-runs
+#   -> results/<name>_bg.png       (circle-free heatmap: the canvas backdrop)
+#   -> results/<name>_bg.json      (plot-area bbox + axis limits: places the circles)
+#   -> results/<name>_overlay.png  (static image with red circles, for VOCal comparison)
+
+# rebuild only the display background from an existing .npz (no .mea needed, no detection)
+python peaks.py results/<name>.npz --bg-only
+
+# step 3: the desktop UI
+python main.py
 ```
 
 Both scripts open a **file-explorer dialog** if you don't pass a path (`readGAS.py` defaults to
 `GAS/`, `peaks.py` defaults to `results/`).
+
+### Which artefacts are worth keeping
+
+`.mea` files are the original measurements and are **never modified or deleted** by
+any part of this project. Everything under `results/` is derived:
+
+| Artefact | Size | Cost to rebuild | Notes |
+|---|---|---|---|
+| `<name>.npz` | ~30 MB | ~13 s (re-read `.mea`) | The reusable core — every later stage reads this, not the `.mea` |
+| `<name>_maxima.npz` | ~2.4 MB | ~83 s (union-find) | Best value per byte: lets the Rules panel recompute the whole funnel in ~4 ms |
+| `<name>_peaks.json` | ~15 KB | included above | Peak list, rule verdicts, funnel stats |
+| `<name>_peaks_state.json` | <1 KB | **cannot** — it is the user's manual picks | |
+| `<name>_bg.png` + `_bg.json` | ~400 KB | ~14 s from the `.npz` (`--bg-only`) | Canvas backdrop + geometry |
+| `<name>.csv` (full-res) | 0.8–1.5 GB | — | No longer produced by default; nothing reads it |
 
 ---
 
@@ -98,11 +123,23 @@ It is:
 |---|---|---|
 | `gas_utils.py` | shared module | file-picker dialog + path resolution (imported, never run directly) |
 | `test_readGAS.py` | script | **probe**: inspect an unknown `.mea`'s structure (no plotting) |
-| `readGAS.py` | script | **parse + export**: `.mea` → matrix, CSV, npz, heatmap |
-| `peaks.py` | script | **detect**: matrix → peak list, overlay, JSON |
-| `results/` | folder | all outputs (auto-created) |
-| `GC-IMS_Peak_Finding_Workflow.md` | doc | methodology blueprint (pre-existing) |
+| `readGAS.py` | script | **parse + export**: `.mea` → matrix, npz, heatmap (CSV opt-in) |
+| `peaks.py` | script | **detect**: matrix → peak list, maxima cache, backdrop, JSON |
+| `main.py` | script | **desktop UI**: canvas with live circles, Rules panel, peak table |
+| `rip.py` | module | stage 1 — RIP location + `drift_relative` |
+| `dt_convert.py` | module | stage 2 — K0 conversion (three modes) |
+| `library.py` | module | stage 3 — `.ril` / `.iml` readers |
+| `match.py` | module | stage 5 — tolerance-window matching |
+| `identify.py` | script | stage 6 — integration CLI → `_peaks_identified.json` |
+| `rules.py` | module | stage 7 — rule engine (R001–R006) |
+| `rules_config.json` | config | per-rule `enabled` + params; mandatory rules re-forced on load |
+| `peak_with_number.py` | script | static numbered image for the Batch 8 report (not the canvas) |
+| `results/` | folder | all outputs (auto-created, git-ignored) |
+| `GAS/` | folder | original `.mea` measurements — never written to |
+| `GC-IMS_Peak_Finding_Workflow.md` | doc | methodology blueprint; §5.1 has the as-built flowchart |
+| `GC-IMS_Identify_Workflow.md` | doc | authoritative spec for stages 1–11 |
 | `GC-IMS_Pipeline_Implementation.md` | doc | this file |
+| `status.md` | doc | progress tracker / session handoff |
 
 Design principle followed throughout (from the blueprint §9/§10): **use library wheels for generic
 numeric/image work; write the domain decision logic ourselves.** Generic file reading, smoothing,
@@ -218,26 +255,49 @@ i.e. it reports metrics and applies only light, uncalibrated gates. Threshold ca
 - `load_surface(path)` → `(intensity, drift_ms, retention_s, meta)`.
 
 ### Pipeline inside `detect_peaks(...)`
-1. **Smooth** — `gaussian_filter(intensity, sigma)` (default `sigma=1.0`). Breaks int16 value
+1. **RIP** — `rip.find_rip()` before anything else (fail-fast). Must be recomputed per file;
+   the RIP drifts with temperature/pressure, so caching it across a batch is a silent error.
+2. **Smooth** — `gaussian_filter(intensity, sigma)` (default `sigma=1.0`). Breaks int16 value
    ties / suppresses noise so plateaus don't spawn spurious maxima. `sigma=0` disables.
-2. **Floor (sea level)** — `floor = percentile(work, floor_pct)` (default 85th). Only pixels
+3. **Floor (sea level)** — `floor = percentile(work, floor_pct)` (default 85th). Only pixels
    above the floor are processed (speed + ignores background). See §7 for why this is safe.
-3. **Prominence** — `compute_prominence(work, floor)` union-find persistence (see §7.1).
-4. **Prominence gate** — keep peaks with `prominence ≥ max(min_prominence, prom_frac × max_prom)`
-   (default `prom_frac=0.02` → 2% of the strongest peak's prominence). Sort by prominence desc.
-5. **De-duplicate** — greedy: walking from highest prominence down, drop any peak within
+4. **Prominence** — `compute_prominence(work, floor)` union-find persistence (see §7.1).
+   The full result is cached to `<name>_maxima.npz` here.
+5. **Drift-axis cut (mandatory rules R004 + R006)** — drop candidates with
+   `drift_relative ≤ 1.0 + half_width`, i.e. the RIP column and everything faster than the
+   reactant ion. **This must happen before step 6.** The gate below is *relative*, and the RIP
+   is normally the strongest feature in the image: leaving it in inflated the threshold from
+   30.9 to 101.0 on the reference file and silently killed real analyte peaks. Moving these
+   rules after detection makes the circles disappear but does not bring those peaks back —
+   `test/test_select_from_maxima.py` fails if anyone does.
+6. **Prominence gate** — keep peaks with `prominence ≥ max(min_prominence, prom_frac × max_prom)`
+   (default `prom_frac=0.02`). Sort by prominence desc.
+7. **De-duplicate** — greedy: walking from highest prominence down, drop any peak within
    `min_distance` px (default 3) of an already-kept peak (occupancy grid).
-6. **Top-N** (optional) — keep only the N most prominent (`top_n`, default 0 = all).
-7. **Measure each surviving peak** — flatness, edge distance, saturation, coordinates (see §7).
+8. **Top-N** (optional) — keep only the N most prominent (`top_n`, default 0 = all).
+9. **Assign `peak_id` 1..N** — this is the numbering baseline. Optional rules never renumber.
+10. **Measure each surviving peak** — flatness, edge distance, saturation, coordinates (see §7).
+11. **Optional rules** — `rules.mark_rules()` sets `rule_active` for R001/R002/R003/R005.
+    It *marks*, it does not remove: the UI needs rejected peaks on screen so the user can see
+    what a rule did and override it.
+
+Steps 5–9 also live in `select_from_maxima()`, which the UI calls directly against
+`_maxima.npz` — one implementation, so the Rules panel and the CLI cannot drift apart.
 
 ### Outputs (in `results/`)
 - **`<name>_peaks.csv`** — minimal, human-friendly: `peak_id,retention_s,drift_ms,intensity`.
-- **`<name>_overlay.png`** — heatmap with red hollow circles on detected peaks (evidence image;
-  resizable via `--figsize`, optional live window via `--show`).
 - **`<name>_peaks.json`** — full record: source/machine/sample, timestamp, matrix shape,
-  detection params, stats, and a `peaks[]` array where each element has:
-  `peak_id, rt_index, dt_index, retention_s, drift_ms, intensity, prominence, flatness,
-  flatness_truncated, edge_dist, saturated, rank`.
+  detection params (including the `rules_config` used), stats, and a `peaks[]` array where each
+  element has: `peak_id, rt_index, dt_index, retention_s, drift_ms, drift_relative, intensity,
+  prominence, flatness, flatness_truncated, edge_dist, saturated, rank, rule_active, active`.
+- **`<name>_maxima.npz`** — every raw local maximum (`pix / val_smooth / prom / val_raw /
+  flatness`) plus `shape / floor / rip_index` and both axes. Self-contained: the UI recomputes
+  the entire funnel from it in ~4 ms without touching the `.mea` or the `.npz`.
+- **`<name>_bg.png` + `<name>_bg.json`** — circle-free backdrop and its plot-area geometry
+  (`png_size`, `axes_bbox`, `xlim`, `ylim`). Written together, because geometry that disagrees
+  with the image it describes puts every circle in the wrong place.
+- **`<name>_overlay.png`** — static heatmap with red circles on the peaks that passed the rules
+  (evidence image for VOCal comparison; `--figsize`, `--show`).
 
 ### Key CLI flags
 | Flag | Default | Effect |
@@ -248,6 +308,8 @@ i.e. it reports metrics and applies only light, uncalibrated gates. Threshold ca
 | `--min-prominence F` | 0.0 | absolute prominence floor |
 | `--min-distance N` | 3 | min pixel spacing between peaks (dedup) |
 | `--top-n N` | 0 | keep only N most prominent (0 = all) |
+| `--rules-config P` | `rules_config.json` | rule set; missing file falls back to built-in defaults |
+| `--bg-only` | off | rebuild `_bg.png` + `_bg.json` from a `.npz` and stop — no detection |
 | `--mark-n N` | 0 | overlay marks only top N (0 = all) |
 | `--cmap NAME` | viridis | overlay colormap |
 | `--figsize WxH` | 8x9 | overlay size (inches) |

@@ -1,8 +1,10 @@
 """
 readGAS.py  —  G.A.S. FlavourSpec® .mea 解析 + 繪製 2D 熱圖
-Version: ver.02 — by Albert Sheng
+Version: 2.1 — by Albert Sheng
 
 變更記錄：
+  2.1  — 全解析度 CSV 改為可選（--write-csv）。真實尺寸每檔 0.8–1.5 GB，而管線
+         裡沒有任何程式讀它——同樣的資料在 .npz 裡無損且只有約 30 MB。
   ver.02 — 修復 plot_heatmap() 在真實尺寸矩陣（如 20413x3150）上 fig.savefig()
            時 OOM 崩潰的問題：新增 _downsample_for_display()，畫圖前先降到接近
            輸出解析度再交給 imshow()。已用真實資料驗證（見 workflow 文件 draft.11）。
@@ -390,7 +392,11 @@ def main():
                     help="圖/視窗起始大小（英吋），如 12x10 (預設 8x9)")
     ap.add_argument("--dpi", type=int, default=150, help="存檔解析度 dpi (預設 150)")
     ap.add_argument("--csv", default=None,
-                    help="CSV 輸出路徑（預設 results/<mea檔名>.csv）")
+                    help="CSV 輸出路徑（給定即代表要寫；預設不寫）")
+    ap.add_argument("--write-csv", action="store_true",
+                    help="另存全解析度長表 CSV 到 results/<名>.csv。"
+                         "預設不寫：真實尺寸資料約 0.8–1.5 GB／檔，"
+                         "而管線本身只讀 .npz（同資料無損、約 30 MB），沒有東西讀這份 CSV")
     ap.add_argument("--csv-format", choices=("long", "wide"), default="long",
                     help="long=三欄 drift,retention,intensity；wide=矩陣格式 (預設 long)")
     ap.add_argument("--csv-downsample", type=int, default=1, metavar="N",
@@ -412,15 +418,21 @@ def main():
     data, header, axes = read_mea(path)
     print_summary(path, data, header, axes)
 
-    csv_path = args.csv or default_csv_path(path)
-    export_csv(data, axes, csv_path, fmt=args.csv_format,
-               downsample=args.csv_downsample, rt_unit=args.rt_unit)
+    # 輸出檔名共同的字首。以前是從 csv_path 反推的，導致「不寫 CSV」也得先算出
+    # 一個 CSV 路徑；改成獨立變數，CSV 才能真正變成可選。
+    base_out = os.path.splitext(args.csv or default_csv_path(path))[0]
+
+    if args.csv or args.write_csv:
+        export_csv(data, axes, base_out + ".csv", fmt=args.csv_format,
+                   downsample=args.csv_downsample, rt_unit=args.rt_unit)
+    else:
+        log("略過全解析度 CSV（--write-csv 可開啟）——.npz 已含相同資料且無損")
 
     if args.npz:
-        export_npz(data, axes, os.path.splitext(csv_path)[0] + ".npz")
+        export_npz(data, axes, base_out + ".npz")
 
     # 預設把熱圖存到 results/<名>_heatmap.png（--save 可改路徑）
-    heatmap_path = args.save or (os.path.splitext(csv_path)[0] + "_heatmap.png")
+    heatmap_path = args.save or (base_out + "_heatmap.png")
     plot_heatmap(data, axes, header,
                  cmap=args.cmap, clip=tuple(args.clip), rt_unit=args.rt_unit,
                  log_scale=args.log, save=heatmap_path, show=not args.no_show,

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 peak_with_number.py — Render a GC-IMS overlay with peak circles AND peak-id numbers.
-Version: ver.02 — by Albert Sheng
+Version: 2.1 — by Albert Sheng
 
 Changelog:
   ver.02 — Fixed the OOM crash in write_overlay_numbered(): now downsamples the

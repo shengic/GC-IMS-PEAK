@@ -72,10 +72,26 @@ class TestCellValueLogic:
     def test_on_column_shows_checkbox_glyph(self):
         from main import CHECK_ON, CHECK_OFF
         app = self._mock_app()
-        assert app._cell_value("on", {"active": True}) == CHECK_ON
-        assert app._cell_value("on", {"active": False}) == CHECK_OFF
+        assert app._cell_value("on", {"rule_active": True}) == CHECK_ON
+        assert app._cell_value("on", {"rule_active": False}) == CHECK_OFF
         # default is active
         assert app._cell_value("on", {}) == CHECK_ON
+
+    def test_on_column_reflects_user_override_not_rule(self):
+        """The checkbox shows the *effective* state, so a manual pick wins.
+
+        Design decision (a): rules are heuristics, the user is the arbiter.
+        A peak the rules rejected but the user kept must read as selected,
+        otherwise the table would contradict the circle on the heatmap.
+        """
+        from main import CHECK_ON, CHECK_OFF
+        app = self._mock_app()
+        # rules said no, user rescued it
+        assert app._cell_value(
+            "on", {"rule_active": False, "user_active": True}) == CHECK_ON
+        # rules said yes, user dropped it
+        assert app._cell_value(
+            "on", {"rule_active": True, "user_active": False}) == CHECK_OFF
 
     def test_gc_ims_empty_shows_dash(self):
         app = self._mock_app()
@@ -114,8 +130,11 @@ class TestCellValueLogic:
     def test_trigger_dims_when_inactive(self):
         from main import TRIGGER_ACTIVE, TRIGGER_DIM
         app = self._mock_app()
-        assert app._cell_value("trigger", {"active": True}) == TRIGGER_ACTIVE
-        assert app._cell_value("trigger", {"active": False}) == TRIGGER_DIM
+        assert app._cell_value("trigger", {"rule_active": True}) == TRIGGER_ACTIVE
+        assert app._cell_value("trigger", {"rule_active": False}) == TRIGGER_DIM
+        # A rescued peak is usable again — ▶ follows the effective state
+        assert app._cell_value(
+            "trigger", {"rule_active": False, "user_active": True}) == TRIGGER_ACTIVE
 
 
 class TestPeakDataValidation:
