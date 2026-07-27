@@ -42,16 +42,16 @@ class TestPeakTableColumns:
             assert col in PEAK_TABLE_COLUMNS
 
     def test_peak_table_column_order(self):
-        """Column order (Batch 2, workflow §第八階段 draft.12):
-             # | drift_ms | drift_relative | retention_s | intensity | On | GC×IMS | GC | IMS | ▶
+        """Column order (第四階段：ri column inserted after retention_s):
+             # | drift_ms | drift_relative | retention_s | RI | intensity | On | GC×IMS | GC | IMS | ▶
         """
-        expected = ("peak_id", "drift_ms", "drift_relative", "retention_s",
+        expected = ("peak_id", "drift_ms", "drift_relative", "retention_s", "ri",
                     "intensity", "on", "gc_ims", "gc", "ims", "trigger")
         assert PEAK_TABLE_COLUMNS == expected
 
     def test_peak_table_columns_length(self):
-        """Peak table has 10 columns after Batch 2."""
-        assert len(PEAK_TABLE_COLUMNS) == 10
+        """Peak table has 11 columns (10 + ri for RT→RI 第四階段)."""
+        assert len(PEAK_TABLE_COLUMNS) == 11
 
 
 class TestCellValueLogic:
@@ -92,6 +92,15 @@ class TestCellValueLogic:
         # rules said yes, user dropped it
         assert app._cell_value(
             "on", {"rule_active": True, "user_active": False}) == CHECK_OFF
+
+    def test_ri_column_rendering(self):
+        """RI cell: dash when uncalibrated, value when present, '*' when extrapolated."""
+        app = self._mock_app()
+        assert app._cell_value("ri", {}) == "—"                     # no calibration
+        assert app._cell_value("ri", {"ri": None}) == "—"
+        assert app._cell_value("ri", {"ri": 726.34}) == "726.3"     # interpolated
+        assert app._cell_value(
+            "ri", {"ri": 1097.1, "ri_extrapolated": True}) == "1097.1*"  # extrapolated
 
     def test_gc_ims_empty_shows_dash(self):
         app = self._mock_app()

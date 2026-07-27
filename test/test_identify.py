@@ -141,5 +141,62 @@ def test_identify_smoke():
     print("[OK] all identify.py smoke checks passed")
 
 
+def test_identify_stage4_ri():
+    """第四階段 RT→RI 整合進 identify() 管線。"""
+    if not os.path.exists(MEA):
+        import pytest
+        pytest.skip(f"缺 .mea 測試檔 {MEA}")
+    if library.resolve_data_dir() is None:
+        import pytest
+        pytest.skip("library.resolve_data_dir() 找不到資料夾")
+
+    import calibration as cal
+    peaks_doc = _make_peaks_doc()
+
+    sep("[R1] 自動解析：從批次資料夾三層解析（結構一致性，不假設特定結果）")
+    res = identify.identify(peaks_doc, MEA)               # resolve_ri 預設 True
+    ri_sum = res["ri_calibration_summary"]
+    print(f"  ri_mode={ri_sum['ri_mode']}  ri_mode_summary={res['ri_mode_summary']}")
+    assert ri_sum["ri_mode"] in {"batch_own_std", "borrowed_from_registry", "unavailable"}
+    assert "ri_mode_summary" in res and "ri_source_summary" in res
+    for p in res["peaks"]:
+        assert "ri_mode" in p and "ri_source" in p
+        # provenance 一致性：有絕對 RI ⇔ multi_point_loglinear；其餘 ri 應為 None
+        if p["ri"] is not None:
+            assert p["ri_mode"] == "multi_point_loglinear"
+        elif p["ri_mode"] == "single_point_relative":
+            assert p.get("ri_relative") is not None
+
+    sep("[R2] 顯式相對校正 → 峰帶 ri_relative、ri=None、provenance 標記")
+    rel = cal.build_calibration([100, 200, 300, 400, 500])   # series None → 相對
+    res2 = identify.identify(peaks_doc, MEA, ri_calibration=rel, resolve_ri=False)
+    for p in res2["peaks"]:
+        assert p["ri"] is None
+        assert p["ri_mode"] == "single_point_relative"
+        assert p["ri_source"] == "provided"
+        assert p["ri_relative"] is not None
+    print(f"  ri_mode_summary={res2['ri_mode_summary']}")
+
+    sep("[R3] 顯式 n_alkane 絕對校正 → 峰帶 ri 值 + assumed_unverified 一路傳遞")
+    absol = cal.build_calibration([100, 200, 300, 400, 500], series_key="n_alkane")
+    res3 = identify.identify(peaks_doc, MEA, ri_calibration=absol, resolve_ri=False)
+    assert res3["ri_calibration_summary"]["assumed_unverified"] is True
+    for p in res3["peaks"]:
+        assert p["ri"] is not None
+        assert p["ri_mode"] == "multi_point_loglinear"
+        assert p["ri_assumed_unverified"] is True
+    print(f"  RI 值: {[round(p['ri'], 1) for p in res3['peaks']]}")
+
+    sep("[R4] --no-ri（resolve_ri=False 且無校正）→ RI unavailable")
+    res4 = identify.identify(peaks_doc, MEA, resolve_ri=False)
+    for p in res4["peaks"]:
+        assert p["ri_mode"] == "unavailable"
+    print("  RI 正確標記 unavailable")
+
+    print()
+    print("[OK] all identify.py Stage-4 RI checks passed")
+
+
 if __name__ == "__main__":
     test_identify_smoke()
+    test_identify_stage4_ri()

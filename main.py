@@ -1,6 +1,6 @@
 """
 main.py  —  GC-IMS Desktop UI (Tk)
-Version: 2.1 — by Albert Sheng
+Version: 3.0 — by Albert Sheng
 
 A desktop application for browsing, reading, and analyzing GC-IMS .mea files.
 Workflow: browse folder → select .mea (auto-read) → show detected peaks → inspect.
@@ -54,10 +54,15 @@ from tkinter.ttk import Treeview, PanedWindow
 import numpy as np
 from PIL import Image, ImageTk
 
+import calibration
 import library
 import peaks as peaks_mod
 import rip as rip_mod
 import rules
+
+# 第四階段 RT→RI：整批 STD 校準的參照系列（本專案 STD 已確認為 C4–C9 甲基酮，
+# RI 值為借用（見 methyl_ketone_RI_provenance.md），provenance 全程帶 assumed_unverified）
+RI_SERIES = "methyl_ketone"
 
 RULES_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "rules_config.json")
@@ -100,6 +105,7 @@ COORD_LABELS = {
     "drift_ms": "Drift [ms]",
     "drift_relative": "Drift rel. RIP",
     "retention_s": "Retention Time [s]",
+    "ri": "RI",
     "intensity": "Intensity",
     "prominence": "Prominence",
     "flatness": "Flatness",
@@ -117,7 +123,7 @@ COORD_LABELS = {
 # after drift_ms per this session's decision). Match values (gc_ims/gc/ims) are
 # placeholders "—" until Batch 5 wires identify.py into main.py.
 PEAK_TABLE_COLUMNS = (
-    "peak_id", "drift_ms", "drift_relative", "retention_s", "intensity",
+    "peak_id", "drift_ms", "drift_relative", "retention_s", "ri", "intensity",
     "on", "gc_ims", "gc", "ims", "trigger",
 )
 
@@ -172,6 +178,9 @@ class AppState:
         self.matrix_shape = None  # (n_rt, n_dt) from JSON
         self.overlay_canvas_size = None  # (width, height) of canvas
         self.overlay_image_size = None  # (width, height) of actual image
+        # 第四階段：本資料夾的 RT→RI 校準表（選資料夾時背景解析一次，跨檔案共用）
+        self.ri_calibration = None
+        self.ri_calibration_folder = None
 
         # Persisted settings (ui_settings.json)
         self.settings = load_settings()
@@ -720,7 +729,7 @@ class GCIMSApp:
         # Configure column widths and alignment
         col_widths = {
             "peak_id": 30, "drift_ms": 55, "drift_relative": 60,
-            "retention_s": 60, "intensity": 55,
+            "retention_s": 60, "ri": 55, "intensity": 55,
             "on": 35, "gc_ims": 100, "gc": 35, "ims": 35, "trigger": 25,
         }
         for col in PEAK_TABLE_COLUMNS:
@@ -821,6 +830,83 @@ class GCIMSApp:
         self.populate_file_list(folder)
         self.ui_state = UIState.FOLDER_SELECTED
         self.update_button_state()
+        # 第四階段：選資料夾即在背景「默默」解一次 RT→RI 校準（找 STD → 6 甲基酮
+        # 錨點 → log-linear 內插常數），存進 state 供之後每個 .mea 共用、不重算。
+        self._start_folder_calibration(folder)
+
+    def _start_folder_calibration(self, folder):
+        """背景解析本資料夾的 RT→RI 校準（第四階段），不阻塞 UI。
+
+        流程呼應使用者描述：選資料夾 → 默默找 STD → 取 6 個甲基酮峰 → 算內插常數
+        → 存 state。之後同資料夾換不同 .mea 檔時直接沿用（resolve_*_cached 有
+        session/sidecar 快取，不重算 STD）。STD 尚未偵測（缺 _peaks.json）時會回
+        unavailable，UI 就維持保留時間軸，不會卡住。
+        """
+        if self.state.ri_calibration_folder == folder and self.state.ri_calibration:
+            return                                   # 同資料夾已解過，直接沿用
+        self.state.ri_calibration = None
+        self.state.ri_calibration_folder = folder
+
+        def post(msg):
+            self.root.after(0, lambda: self._folder_cal_status(folder, msg))
+
+        def resolve():
+            calibration.clear_session_cache()
+            return calibration.resolve_ri_calibration_cached(
+                folder, series_key=RI_SERIES, use_sidecar=False)
+
+        def work():
+            cal = mode = None
+            try:
+                cal, mode, _ = resolve()
+                # STD 存在但尚未偵測（缺 _peaks.json）→ 背景逐一偵測後重解，直到取得
+                # 絕對 RI（有可用 STD 就停，不必把每支 STD 都跑完）。
+                if not (isinstance(cal, dict)
+                        and cal.get("mode") == "multi_point_loglinear"):
+                    for std in calibration.scan_folder_for_std(folder):
+                        if folder != self.state.current_folder:
+                            return                    # 使用者已換資料夾，放棄
+                        base = Path(std).stem
+                        if os.path.exists(os.path.join("results", base + "_peaks.json")):
+                            continue
+                        post(f"Detecting STD {base} for RI calibration (~90 s)…")
+                        subprocess.run(
+                            [sys.executable,
+                             str(Path(__file__).with_name("peaks.py")), std],
+                            capture_output=True)
+                        cal, mode, _ = resolve()
+                        if isinstance(cal, dict) and cal.get("mode") == "multi_point_loglinear":
+                            break
+            except Exception as e:
+                cal, mode = None, f"error: {e}"
+            self.root.after(0, lambda: self._on_calibration_ready(folder, cal, mode))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _folder_cal_status(self, folder, msg):
+        """Update status only if the user is still on the folder being calibrated."""
+        if folder == self.state.current_folder:
+            self.status_label.config(text=msg)
+
+    def _on_calibration_ready(self, folder, cal, mode):
+        """背景校準完成 → 存 state；若在此期間使用者換了資料夾則丟棄。"""
+        if folder != self.state.current_folder:
+            return
+        if isinstance(cal, dict) and cal.get("mode") == "multi_point_loglinear":
+            self.state.ri_calibration = cal
+            n = cal.get("anchor_selection", {}).get("n_clean_anchors", "?")
+            flag = " (assumed/borrowed)" if cal.get("assumed_unverified") else ""
+            self.status_label.config(
+                text=f"✓ RI calibration ready ({mode}, {n} ketone anchors){flag} — "
+                     f"heatmap & table now in Retention Index")
+            # 若已載入某檔的峰，立即重繪帶上 RI
+            if self.state.peaks:
+                self.populate_peak_table(self.state.peaks)
+        else:
+            self.state.ri_calibration = None
+            self.status_label.config(
+                text="RI calibration unavailable (no usable STD / not detected) — "
+                     "showing retention time")
 
     def populate_file_list(self, folder):
         """List all .mea files in folder."""
@@ -902,6 +988,8 @@ class GCIMSApp:
         q = queue.Queue()
         cmd = [sys.executable, str(Path(__file__).with_name("peaks.py")),
                npz, "--bg-only"]
+        if self.state.ri_calibration is not None:   # 背景圖 y 軸標成 RI
+            cmd += ["--ri-series", RI_SERIES]
         threading.Thread(target=run_subprocess, args=(cmd, q), daemon=True).start()
         self._poll_bg_render(q, base)
 
@@ -963,6 +1051,10 @@ class GCIMSApp:
             self.state.selected_mea_file,
             "--no-show",
         ]
+        # 第四階段：校準就緒時，原始熱圖也以 RI 為 y 軸（x 仍是正規化 drift）——
+        # 呼應「所有熱圖都反映正規化座標：normalized drift × RI」。
+        if self.state.ri_calibration is not None:
+            cmd += ["--ri-series", RI_SERIES]
         thread = threading.Thread(
             target=run_subprocess, args=(cmd, output_queue), daemon=True
         )
@@ -1052,6 +1144,8 @@ class GCIMSApp:
 
         output_queue = queue.Queue()
         cmd = [sys.executable, str(Path(__file__).with_name("peaks.py")), self.state.selected_mea_file]
+        if self.state.ri_calibration is not None:   # 背景圖/疊圈圖 y 軸標成 RI
+            cmd += ["--ri-series", RI_SERIES]
         thread = threading.Thread(
             target=run_subprocess, args=(cmd, output_queue), daemon=True
         )
@@ -1280,8 +1374,13 @@ class GCIMSApp:
         if not g:
             return None
         dr = peak.get("drift_relative")
-        rt = peak.get("retention_s")
-        if dr is None or rt is None:
+        # 第四階段：背景圖若已重採樣成 RI 座標（geom.y_axis=='ri'），圈的 y 要用
+        # peak['ri']（與圖同座標系）；否則用保留時間。RI 為 None 的峰不畫。
+        if g.get("y_axis") == "ri":
+            yval = peak.get("ri")
+        else:
+            yval = peak.get("retention_s")
+        if dr is None or yval is None:
             return None
         pw, ph = g["png_size"]
         x0, y0, bw, bh = g["axes_bbox"]
@@ -1290,8 +1389,8 @@ class GCIMSApp:
         if xmax == xmin or ymax == ymin:
             return None
         fx = x0 + (dr - xmin) / (xmax - xmin) * bw
-        fy = y0 + (rt - ymin) / (ymax - ymin) * bh   # figure fraction, from bottom
-        return fx * pw, (1.0 - fy) * ph              # canvas y runs downward
+        fy = y0 + (yval - ymin) / (ymax - ymin) * bh   # figure fraction, from bottom
+        return fx * pw, (1.0 - fy) * ph                # canvas y runs downward
 
     def _draw_peak_circles(self):
         """(Re)draw one oval + number per peak on top of the background image.
@@ -1476,6 +1575,12 @@ class GCIMSApp:
             p.setdefault("rule_active", p.get("active", True))
             p.setdefault("user_active", None)
         self._apply_saved_peak_state(peaks)
+        # 第四階段：若本資料夾已解出絕對 RI 校準，就地把 ri 蓋到每個峰（RT→RI）
+        if self.state.ri_calibration is not None:
+            try:
+                calibration.attach_ri(peaks, self.state.ri_calibration)
+            except Exception as e:
+                print(f"[warn] attach_ri failed: {e}", file=sys.stderr)
         self.state.peaks = peaks
         self.peak_tree.tag_configure("inactive", foreground="gray60")
         self.peak_tree.tag_configure("override", foreground="firebrick")
@@ -1524,6 +1629,13 @@ class GCIMSApp:
             return str(sum(1 for h in ims_hits if h.get("CAS") not in combined_cas))
         if col == "trigger":
             return TRIGGER_ACTIVE if effective_active(peak) else TRIGGER_DIM
+
+        if col == "ri":
+            ri = peak.get("ri")
+            if ri is None:
+                return "—"                       # 無絕對校準 → 相對/未校準
+            # 外插值加 '*'（draft.20/21：外插 + 標記）
+            return f"{ri:.1f}{'*' if peak.get('ri_extrapolated') else ''}"
 
         # Default: raw peak field
         return peak.get(col)
@@ -1603,6 +1715,9 @@ class GCIMSApp:
         cmd = [sys.executable,
                str(Path(__file__).with_name("peak_with_number.py")),
                self.state.selected_mea_file]
+        # 第四階段：校準就緒時，讓疊圈圖 y 軸改標成 RI（x 軸仍是正規化 drift）
+        if self.state.ri_calibration is not None:
+            cmd += ["--ri-series", RI_SERIES]
         threading.Thread(target=run_subprocess, args=(cmd, q), daemon=True).start()
         self.poll_numbered_overlay(q)
 

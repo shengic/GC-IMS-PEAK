@@ -28,3 +28,6 @@ ui_settings.json
 
 # --- legacy vendor bundle (kept locally as reference, not tracked) ---
 /VOCal Release 0.4.31.412/
+
+# --- stray screenshots pasted for reference (ShareX-style names) ---
+/python_*.png

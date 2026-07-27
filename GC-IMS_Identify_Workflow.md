@@ -1,6 +1,6 @@
 # GC-IMS 化合物比對工作流程 —— 第一版草稿
 
-**Version: draft.13 — by Albert Sheng**
+**Version: draft.20 — by Albert Sheng**
 **狀態：草稿，持續更新中，尚未定案**
 
 本文件是 `GC-IMS-PEAK` 專案在 `readGAS.py` → `peaks.py` 之後，銜接「化合物比對」這一段的規劃文件。內容依據對 VOCal（G.A.S. 官方軟體）多支 plugin jar 反編譯逆向出的邏輯整理，逐項標明來源可信度：
@@ -215,20 +215,105 @@ identify.py 讀取順序：
 
 2. **[本輪驗證確認] `ColNormX` 的單位是 `log10(保留時間秒數)`，不是取樣索引，與 RT 軸解析度無關**：實際用專案檔裡 `Compounds` 清單的 `ethanol-M` 真實資料（`RI=420.9`、`Rt=44.358秒`）反向驗證——把 `log10(44.358)=1.6470` 代入校準表最低兩點做線性外插，算出 `RI=420.89`，與專案檔記錄值誤差僅 `0.013`，確認吻合。這代表校準表存的是真實物理時間（秒），**不是「第幾條光譜」這種會隨取樣密度（`Chunk sample rate`/`Chunk averages`）改變的索引值**——只要兩次量測的秒數準確，換算結果就能跨儀器/跨取樣設定穩定重現，不需要擔心 RT 軸解析度不一致的問題。此結論僅適用本階段（y 軸/RT 的 RI 校準），**與第一階段 RIP 正規化（x 軸/DT）是兩個獨立機制，不要混淆**——RIP 正規化本身也與解析度無關，但原因不同（見第一階段），兩者不要互相援引對方的理由。
 
-3. **[待決策]** 前置實驗步驟（跟寫程式無關）：
-   - 準備一批已知碳數的正構烷烴標準品
-   - 在跟樣品**完全相同**的 GC 條件（管柱、升溫程序）下跑一次
-   - 記錄每個烷烴的實際 `Rt`（保留時間秒數）
+3. **[VOCal 反編譯驗證，本輪新增] `Dlg_EditColumnNorm` 對話框（`bj.java`/`B.java`/`aV.java`）：VOCal 不記錄、也無法重建校正標準品的化合物身分**。CFR 反編譯 `VOCal_412_obf.jar` 後追蹤 `ColNormX`/`ColNormY` 的寫入路徑，實際對應到一個標題為 `"RI normalization"` 的 `JDialog`。從 `messages_EN.properties` 撈出的介面文字（`Dlg_EditColumnNorm.*`）顯示：這是一個**純數值 X-Y 點編輯器**——操作者在圖上點選或用剪貼簿貼上 `(RT, RI)` 數值對，介面上沒有化合物名稱欄位、沒有系列選單（不是從烷烴/酮類清單挑選），不連任何化學資料庫。**結論：標準品的化合物身分只存在操作者的外部記憶或紀錄裡，VOCal 的資料結構本身沒有、也不可能有這個欄位**——這不是資料遺失，是系統設計上的空缺。
 
-4. **有校準資料後的計算邏輯**（Van den Dool–Kratz，業界標準公式，非 VOCal 專屬）：
+4. **[VOCal 反編譯驗證，本輪新增，修正前一輪錯誤推論] `Use Fit` 核取方塊會把原始輸入值改寫成擬合值，非整百 RI 不能用來判斷標準品系列**：`bj.java` 依核取方塊狀態，決定寫入 `aV.s`/`aV.t`（最終存檔為 `ColNormX`/`ColNormY`）的來源是原始手動輸入點，還是 `B.java` 內部由擬合函式重新取樣、四捨五入到小數點後三位的「擬合點」：
+   ```java
+   // bj.java —— 依 Use Fit 核取方塊決定來源
+   if (!b.isSelected()) { aV.s[n2] = bj2.c.p.get(n2); aV.t[n2] = bj2.c.q.get(n2); }  // 原始點
+   if ( b.isSelected()) { aV.s[n2] = bj2.c.n.get(n2); aV.t[n2] = bj2.c.o.get(n2); }  // 擬合點
+   // B.java —— 擬合點的產生邏輯
+   n.add(0.001 * Math.round(fitFn.a(x)));  o.add(0.001 * Math.round(fitFn2.a(x)));
    ```
-   RI = 100 × n + 100 × (Rt - Rt_n) / (Rt_(n+1) - Rt_n)
+   **本輪對話中途曾主張「已知某支 `.gasprj` 校準表的六個 RI 值非整百（例如 589.4、688.6），因此推測標準品不是烷烴系列」——這個推論已確認不成立**：只要存檔當下勾選了 `Use Fit`，即使原始標準品確實是精確整百 RI 的烷烴，存檔值也會被擬合演算法改成帶小數的近似輸出。**非整百這個特徵無法用來判斷標準品系列，後續不應再以此做篩選依據。**
+
+5. **[本輪實測，draft.18 更新為 6 點] 用真實 `260625_141215_STD.mea`（`COFFEE-40RAW` 方法）驗證讀取與找峰流程，確認 6 個乾淨候選錨點**：
+
+   二進位格式：純文字表頭以 `nom Drift Tube Length` 那一行的換行符號結尾，資料區起點為該換行符號位置 **+2**（+1 換行本身，+1 一個額外對齊位元組，已用兩支檔案交叉驗證），矩陣為 `int16` little-endian、形狀 `(20413, 3150)`，與表頭 `Chunks count`/`Chunk sample count` 一致。RIP index=680（drift time 4.533ms，`find_rip()` 邏輯不變）。
+
+   | RT (s) | 強度 | DT_rel（相對 RIP） |
+   |---|---|---|
+   | 282.0 | 4937 | 1.104 |
+   | 334.3 | 2500 | 1.234 |
+   | 400.3 | 3230 | 1.356 |
+   | 521.8 | 3189 | 1.487 |
+   | 697.0 | 2932 | 1.613 |
+   | 949.0 | 2213 | 1.737 |
+
+   **訊號範圍確認只落在 RT 258–949s**，此範圍外（含 RT<250s 與 RT>950s 直到檔案結束的 2572s）皆為平坦背景，殘差雜訊僅個位數，無真實峰。
+
+   **[draft.18 新增] 347.9s 這個候選點改標記為「疑似拖尾偽影，予以排除」**：原本另有一個候選點在 RT=347.9s（強度 2025），與 334.3s 同屬待釐清雙峰。定量比較兩種六點組合的間距均勻度後（`np.diff().std()`）：納入 334.3、排除 347.9 的組合，DT_rel 間距標準差僅 0.0034（六點依序 1.104/1.234/1.356/1.487/1.613/1.737，間距 0.130/0.122/0.131/0.126/0.124，近乎等差），比納入 347.9 的組合（DT_rel 標準差 0.0797）小約 23 倍。且 347.9s 這個候選點的 DT_rel（1.104）與 282.0s 完全相同（不是接近，是同值），不符合同系物序列該遞增的預期，較合理解釋是 282.0s 那個全域最強峰（4937）的拖尾/肩峰，非獨立化合物。**此判斷依據為 DT_rel 間距均勻度的定量比較，非化合物身分確認**，log10(RT) 間距在此六點組合下反而略不如原 5 點組合均勻（標準差 0.0135→0.0247），推測與方法本身的多段升溫程式（`Program` 欄位）有關、GC 保留時間不保證嚴格 log-linear，但此推論未經進一步驗證，維持為推測層級。
+
+   334.3s/347.9s 這組雙峰最初考慮是否為同一化合物的 monomer/dimer——原先假設「M/D 的 RT 應幾乎相同」已被另一支真實 `.gasprj`（`Auto_Project_Backup.gasprj`）的 `Compounds` 清單推翻：`ethanol-M`（Rt=44.358s）與 `ethanol-D`（Rt=47.53s）相差達 3.17 秒，證明這只是經驗傾向非保證。目前依 DT_rel 均勻度判斷排除 347.9、保留 334.3 作為第六個錨點。
+
+6. **[本輪實測] 品質前置過濾的實例驗證**：同一天另一支 `260625_012251_STD.mea` 表頭同樣標記 `Status="doubtful"`，`Status comment` 列出 `FlowGClow`/`SeptumDurability`/`NoValidSnapshot` 三項未解決診斷，實測只找到 3 個峰（RT 330/342/412s），連 141215 最強的 282s/4937 強度峰都完全缺失。**這是第九階段設計的 `Status` 前置過濾邏輯在真實資料上的具體驗證案例**：012251 應予排除，不與 141215 做時間加權的 bracket 校準內插，否則會把壞資料的誤差線性摻進所有中間時間點樣品的校正結果裡。
+
+7. **[待決策，未變]** 化合物身分是整條鏈路唯一真正卡住的缺口：需要 STD 標準品證書、採購記錄，或操作者當初配製/操作 VOCal 時留下的對照紀錄，才能把上表的 5–7 個錨點指派絕對 RI 值。無法從 RT/DT 座標、`.gasprj` 資料結構、或 VOCal UI 反推——GC-IMS 沒有質譜，這是技術上的硬限制，不是資料不齊全。
+
+8. **[設計提案，本輪對話討論，非反編譯驗證] `series_key` 可插拔架構**：在化合物身分確認之前，把「標準品是哪個系列」做成可替換的設定，`calibration.py` 核心邏輯不綁定任何特定系列：
+
+   ```python
+   # reference_series.py
+   REFERENCE_SERIES = {
+       "n_alkane":      {"assumed": True, "ri_formula": lambda n: 100*n, "assumed_start_carbon": 6},
+       "methyl_ketone": {"assumed": False, "ri_values": None},   # 待對照表
+       "custom":        {"assumed": False, "ri_values": None},   # 使用者直接指定
+   }
    ```
-   n 為 Rt 落在的兩個相鄰烷烴碳數之間的下界
+   `assumed_unverified` 這個信心標記需比照 Stage 2 `k0_mode` 的 provenance 原則，全程跟隨 RI 值寫進 `_peaks.json`，下游比對不可把不同信心等級的結果混為一談。
 
-5. **沒有校準資料時的退路**：直接用 `.iml` 庫內建的 `Rt[sec]` 欄位做保留時間比對（精度較低，且只能對 `.iml`，因為 `.ril` 沒有存 Rt 只有存 RI）
+9. **[設計提案，本輪對話討論，優先於烷烴假設] `single_point_relative` 降級模式**：在化合物對照表到位之前，建議先實作這個模式打通全流程——只用 141215 這支 STD 的 6 個乾淨錨點（282/334.3/400.3/521.8/697/949s）做內部相對位置比對，`known_ri_available=False` 明確標記，不指派任何絕對 RI 值，避免把未驗證假設偷渡成既定事實。等對照表到位後，改用 `series_key` 指定實際系列重跑一次即可升級，`calibration.py` 核心邏輯不需更動。
 
-6. **[待決策]** 是否已有現成的烷烴校準跑資料——這是整條鏈路能否做到「真正的 RI 比對」的關鍵前提。
+10. **有校準資料後的計算邏輯**：等化合物對照表確認、`series_key` 指定實際系列後，套用第 2 點已驗證的 `log10(Rt)` 分段線性內插（**不是** Van den Dool–Kratz 那個線性 Rt 版本——FlavourSpec 為等溫操作，且第 2 點已用真實資料驗證校準表存的是 `log10(Rt)` 空間，故應使用對應的 Kovats log 形式：`RI = 100n + 100×[log(Rt)-log(Rt_n)]/[log(Rt_(n+1))-log(Rt_n)]`，先前版本記錄的線性公式與此處已驗證的資料格式不一致，以此為準）。
+
+11. **沒有校準資料時的另一條退路**：直接用 `.iml` 庫內建的 `Rt[sec]` 欄位做保留時間比對（精度較低，且只能對 `.iml`，因為 `.ril` 沒有存 Rt 只有存 RI）。
+
+12. **[設計提案，本輪對話討論，非反編譯驗證] 批次資料夾內沒有 STD 檔案時的三層解析邏輯**：判斷「有沒有 STD」不應依賴檔名慣例（操作者可能漏打/打錯），改讀表頭 `Sample` 欄位是否為 `"STD"`：
+
+    ```python
+    def resolve_ri_calibration(folder_path, instrument, column, method,
+                                registry_path="ri_calibration_registry.json"):
+        std_files = scan_folder_for_std(folder_path)  # 依表頭 Sample=="STD" 判斷，非檔名
+        if std_files:
+            return build_calibration_from_std(std_files), "batch_own_std"
+
+        registry = load_registry(registry_path)
+        key = f"{instrument}|{column}|{method}"
+        if key in registry:
+            entry = registry[key]
+            days_gap = (today() - entry["built_date"]).days
+            return entry["calibration"], f"borrowed_from_registry(days_gap={days_gap})"
+
+        return None, "unavailable"
+    ```
+
+    三種情境：**(a) 批次內有 STD**——走第 5–9 點已定案的品質過濾 + `single_point_relative`/`series_key` 流程；**(b) 批次內沒有，但同一套「儀器＋管柱＋方法」組合過去建過校正**——新增持久化的 `ri_calibration_registry.json`（比照 Stage 2 `calibration_profile.json` 綁定同組合共用的精神），借用舊校正曲線，但信心標記必須帶 `days_gap`（校正曲線建立至今的天數），下游依此分級，不能跟本批次自建的校正混為同等品質，`days_gap` 過大時（門檻無理論值，需實測資料校準）應視同不可用；**(c) 兩者皆無**——走第 11 點的 `.iml` 直接比對退路，或標記 `ri_mode="unavailable"`，讓 Stage 5 比對邏輯跳過 RI 維度、只靠 K0 維度（若可用）。此設計與 Stage 2 `k0_mode` 的 `standard_based`/`raw_parameters`/`unavailable` 三態對稱，RI 與 K0 兩個維度應各自獨立標記 provenance，不可因其中一個缺失就整峰放棄比對：
+
+    ```json
+    {
+      "peak_id": 12,
+      "ri_value": 892.3,
+      "ri_mode": "borrowed_from_registry",
+      "ri_confidence_note": "days_gap=45, 非本批次自建校正",
+      "k0_value": null,
+      "k0_mode": "unavailable"
+    }
+    ```
+
+13. **[本輪使用者提供，draft.19] 化合物身分部分確認：C4–C9 甲基酮同系物**，非烷烴。使用者確認 STD 標準品範圍是「酮」、碳數 C4–C9，對應到 2-butanone → 2-nonanone 這條標準甲基酮同系物（每個成員比前一個多一個 CH₂），依 RT 由小到大對應 6 個錨點：
+
+    | RT (s) | 假設化合物 | DT_rel |
+    |---|---|---|
+    | 282.0 | 2-butanone (C4) | 1.104 |
+    | 334.3 | 2-pentanone (C5) | 1.234 |
+    | 400.3 | 2-hexanone (C6) | 1.356 |
+    | 521.8 | 2-heptanone (C7) | 1.487 |
+    | 697.0 | 2-octanone (C8) | 1.613 |
+    | 949.0 | 2-nonanone (C9) | 1.737 |
+
+    **[待決策，未解決] 精確 RI 值仍缺**：甲基酮的 RI 依定義不是整百（不像正構烷烴 RI=100n 是定義本身），是**相對於烷烴尺實測出來的**數值，查過 NIST WebBook 只取得 2-butanone 在極性管柱（DB-Wax）的 Kovats RI（~917–950），與本專案的 SE-54（非極性/中等非極性）管柱不可比，未查到可用的非極性管柱數值。**`series_key` 已可切換為 `"methyl_ketone"`，但 `ri_values` 查找表仍是空的**，需要文獻查證（非極性管柱數據）或標準品證書提供精確數字，在此之前 `single_point_relative` 仍是唯一能實際運作的模式。
+
+14. **[本輪對話補充，draft.20] RT→RI 套用步驟的數學細節，獨立成檔** `RT_to_RI_normalization_math.md`：內容涵蓋分段線性內插的五步驟推導（建表需先取 `log10(RT)`，查詢新峰時同一個峰的 RT 也要先取 `log10` 才能查表——這是實作最常漏掉的一步）、手算範例（`RT=450s → RI=644.1`，可直接當單元測試 ground truth）、`np.interp`/`scipy.interp1d` 的 clamp vs 外插行為差異，與五項實作檢查清單。**外插時該 clamp 還是真的沿邊界斜率外插，此處未定案**，需要之後另外決定並補回此節。
 
 ---
 
@@ -638,7 +723,7 @@ peaks.py
 | # | 問題 | 卡住哪個階段 |
 |---|---|---|
 | 1 | 儀器常數（L/U/T/P）從哪來？ | 第二階段（K0 換算）——`L`/`U` 本輪已可從表頭取得，`T`/`P` 仍不確定 |
-| 2 | 有沒有烷烴校準跑資料？ | 第四階段（RI 轉換），沒有的話整條鏈路退化成只能用 Rt 秒數粗略比對 |
+| 2 | STD 標準品的化合物身分（不限於烷烴，甲基酮等其他同系物亦可）？ | 第四階段（RI 轉換）——本輪已確認 VOCal 的資料結構與 UI 都不記錄此資訊，只能靠證書/採購記錄/操作者紀錄，沒有的話整條鏈路退化成 `single_point_relative` 或只能用 Rt 秒數粗略比對 |
 | 3 | 有沒有 K0 校準標準品資料？ | 第二階段（`standard_based` 模式），沒有的話只能用帶殘留誤差的 `raw_parameters` 退路 |
 
 這些不是技術問題，是需要先盤點手上實際擁有的資料才能回答。
@@ -647,6 +732,13 @@ peaks.py
 
 ## 修訂記錄
 
+- **draft.20**：第四階段新增第 14 點——RT→RI 套用步驟的數學細節獨立成 `RT_to_RI_normalization_math.md`（分段線性內插五步驟、手算範例可當單元測試、外插行為待決策），此處僅存指標與摘要，不重複完整推導。**同時修正 draft.19 編輯時誤刪的「## 第五階段：容許窗比對」標題**（上一版 str_replace 操作疏失，標題與內容被誤合併，本版已修復，第五階段以下章節內容本身未受影響）。
+
+- **draft.19**：第四階段新增第 13 點——使用者確認 STD 標準品為 C4–C9 甲基酮同系物（非烷烴），依 RT 對應 2-butanone→2-nonanone 六個錨點。明確標注精確 RI 值仍缺（甲基酮 RI 非定義式整百，需查證非極性管柱文獻值或證書），`series_key="methyl_ketone"` 可切換但 `ri_values` 查找表尚空，`single_point_relative` 仍是唯一可運作模式。
+
+- **draft.18**：第四階段第 5、9 點更新——用 DT_rel 間距均勻度定量比較（`np.diff().std()`），將 141215 STD 的錨點從 5 點升級為 6 點：新納入 334.3s，原本待釐清的 347.9s 改標記為「疑似拖尾偽影」予以排除（理由：DT_rel 與 282.0s 完全重疊、不符合序列遞增預期，且納入 334.3 後 DT_rel 間距標準差降至 0.0034，比排除方案小 23 倍）。同時誠實記錄一個未解的張力：此六點組合的 log10(RT) 間距均勻度反而略遜於原 5 點組合，推測與方法多段升溫程式有關，但未驗證，維持推測層級。`single_point_relative` 提案的錨點數同步更新為 6。
+- **draft.17**：第四階段新增第 12 點——批次資料夾內沒有 STD 檔案時的三層解析邏輯（`resolve_ri_calibration()`）。判斷依據改為表頭 `Sample` 欄位而非檔名慣例；新增跨批次共用的 `ri_calibration_registry.json`（比照 Stage 2 `calibration_profile.json` 綁定「儀器＋管柱＋方法」組合的精神），借用舊校正曲線時強制帶 `days_gap` 信心標記；完全無可用校正時降級走 `.iml` 直接比對或標記 `ri_mode="unavailable"`，與 Stage 2 `k0_mode` 三態設計對稱，RI/K0 兩維度 provenance 各自獨立標記。
+- **draft.16**：第四階段大幅補充，共六項本輪確認。**(1)** CFR 反編譯 `VOCal_412_obf.jar` 成功，追蹤 `ColNormX`/`ColNormY` 寫入路徑至 `Dlg_EditColumnNorm` 對話框（`bj.java`/`B.java`/`aV.java`），確認這是純數值 X-Y 點編輯器，**VOCal 的資料結構與 UI 都不記錄校正標準品的化合物身分**，此資訊只能來自操作者外部紀錄。**(2)** 發現並確認 `Use Fit` 核取方塊會把原始輸入值改寫成擬合後的近似值（四捨五入至小數點後三位），**推翻本輪對話中途「非整百 RI 值代表標準品非烷烴系列」的錯誤推論**——即使標準品確實是整百 RI 的烷烴，勾選 Use Fit 後存檔值仍會帶小數，此特徵不可再用於系列判斷。**(3)** 用真實 `260625_141215_STD.mea` 二進位資料實測（非目測讀圖），得到精確的 RIP index（680）與 7 個候選峰座標，確認訊號範圍僅落在 RT 258–949s，此範圍外皆為平坦背景。**(4)** 用另一支同日 `260625_012251_STD.mea` 實測驗證第九階段 `Status` 前置過濾邏輯的實際必要性——該支同樣標記 `doubtful`，峰數與強度明顯遠低於 141215，應予排除，不做 bracket 平均。**(5)** 新增 `series_key` 可插拔架構設計（`reference_series.py`），與 `single_point_relative` 降級模式提案，作為化合物身分未確認前的可執行路徑，避免把未驗證假設當作既定事實輸出。**(6)** 修正第 10 點公式：原記錄的 Van den Dool–Kratz（線性 Rt）與第 2 點已驗證的 `log10(Rt)` 資料格式不一致，改為對應的 Kovats log 形式。
 - **draft.01**：初版，六階段拆解 + 三個關鍵決策點。
 - **draft.02**：新增第七～十階段（峰選取/取消選取 UI、批次轉檔、自動比對觸發與面板串接、匯出待議），確認 Java→Python 移植範圍，補充其他建議功能與一項待確認邏輯疑點（候選峰數量級）。
 - **draft.03**：新增第七階段（可插拔候選峰篩選規則庫），解決 draft.02 遺留的候選峰數量級疑點；原第七～十階段依序後移為第八～十一階段。

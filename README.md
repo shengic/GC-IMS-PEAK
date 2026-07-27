@@ -6,7 +6,7 @@ topographic prominence, filters them with a pluggable rule engine, and lets you
 accept or reject each peak interactively before matching against `.ril` / `.iml`
 libraries.
 
-> Version **2.1** — by Albert Sheng
+> Version **3.0** — by Albert Sheng
 
 ---
 

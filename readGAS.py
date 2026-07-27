@@ -1,6 +1,6 @@
 """
 readGAS.py  —  G.A.S. FlavourSpec® .mea 解析 + 繪製 2D 熱圖
-Version: 2.1 — by Albert Sheng
+Version: 3.0 — by Albert Sheng
 
 變更記錄：
   2.1  — 全解析度 CSV 改為可選（--write-csv）。真實尺寸每檔 0.8–1.5 GB，而管線
@@ -286,7 +286,7 @@ def _downsample_for_display(img, figsize, dpi, margin=1.5):
 
 def plot_heatmap(data, axes, header, cmap="viridis", clip=(1.0, 99.5),
                  rt_unit="s", log_scale=False, save=None, show=True,
-                 figsize=(8, 9), dpi=150):
+                 figsize=(8, 9), dpi=150, ri_calibration=None):
     try:
         import matplotlib
     except ImportError:
@@ -336,20 +336,40 @@ def plot_heatmap(data, axes, header, cmap="viridis", clip=(1.0, 99.5),
     if img_ds.shape != img.shape:
         log(f"顯示前降採樣：{img.shape} -> {img_ds.shape}（避免 savefig 爆記憶體）")
 
+    # 第四階段：校準就緒 → 沿 y 把顯示影像重採樣成「均勻於 RI」，讓 RI 軸**線性
+    # （非 log 刻度）**。x 軸 drift 正規化不動；RI 模式下 rt_unit(min) 不再適用。
+    y_extent = (rt[0], rt[-1])
+    y_label = rt_label
+    if ri_calibration is not None:
+        try:
+            import calibration as _cal
+            rt_s = axes["retention_s"]
+            row_rts = np.linspace(float(rt_s[0]), float(rt_s[-1]), img_ds.shape[0])
+            warped, ri_lo, ri_hi = _cal.warp_rows_to_ri(img_ds, row_rts, ri_calibration)
+            if ri_lo is not None:
+                img_ds = warped
+                y_extent = (ri_lo, ri_hi)
+                y_label = "Retention Index (RI)"
+            else:
+                log("[info] RI 校正非絕對模式（無 series），y 軸維持保留時間")
+        except Exception as _e:
+            log(f"[warn] RI warp 略過（{_e}）；維持保留時間軸")
+
     # constrained_layout 會在視窗縮放時自動重排，避免固定版面卡死
     fig, ax = plt.subplots(figsize=figsize, constrained_layout=True)
     im = ax.imshow(
         img_ds,
         aspect="auto",      # 隨視窗大小自由縮放（非鎖死長寬比）
         origin="lower",
-        extent=[drift_norm[0], drift_norm[-1], rt[0], rt[-1]],
+        extent=[drift_norm[0], drift_norm[-1], y_extent[0], y_extent[1]],
         cmap=cmap,
         vmin=vmin,
         vmax=vmax,
         interpolation="nearest",
     )
     ax.set_xlabel(drift_label)
-    ax.set_ylabel(rt_label)
+    ax.set_ylabel(y_label)
+
     # 每 0.5 一格 major tick，避免自動選擇只在整數上打刻度（範圍多為 0-3）
     from matplotlib.ticker import MultipleLocator, FormatStrFormatter
     ax.xaxis.set_major_locator(MultipleLocator(0.5))
@@ -404,6 +424,12 @@ def main():
     ap.add_argument("--no-npz", dest="npz", action="store_false",
                     help="不要另存 .npz（預設會存無損矩陣 results/<名>.npz，峰偵測用）")
     ap.set_defaults(npz=True)
+    ap.add_argument("--ri-series", default=None,
+                    help="把熱圖 y 軸從保留時間改標成保留指數 RI（第四階段）。值為參照"
+                         "系列（如 n_alkane/custom），會從本檔資料夾的 STD 解析校正；"
+                         "省略則維持保留時間軸。x 軸 drift 正規化不受影響")
+    ap.add_argument("--ri-start-carbon", type=int, default=None,
+                    help="--ri-series n_alkane 的起始碳數（覆寫暫定 C6）")
     args = ap.parse_args()
 
     try:
@@ -431,12 +457,28 @@ def main():
     if args.npz:
         export_npz(data, axes, base_out + ".npz")
 
+    # 第四階段：若要 RI 軸，從本檔資料夾解析 STD 校正（顯示層用）
+    ri_calibration = None
+    if args.ri_series:
+        try:
+            import calibration as _cal
+            folder = os.path.dirname(os.path.abspath(path))
+            dims = _cal.extract_registry_dims(header)
+            ri_calibration, ri_mode, _ = _cal.resolve_ri_calibration(
+                folder, dims=dims, series_key=args.ri_series,
+                start_carbon=args.ri_start_carbon)
+            log(f"[RI] 校正來源={ri_mode}，series={args.ri_series}"
+                + ("（假設未驗證）" if isinstance(ri_calibration, dict)
+                   and ri_calibration.get("assumed_unverified") else ""))
+        except Exception as _e:
+            log(f"[warn] RI 校正解析失敗（{_e}）；熱圖維持保留時間軸")
+
     # 預設把熱圖存到 results/<名>_heatmap.png（--save 可改路徑）
     heatmap_path = args.save or (base_out + "_heatmap.png")
     plot_heatmap(data, axes, header,
                  cmap=args.cmap, clip=tuple(args.clip), rt_unit=args.rt_unit,
                  log_scale=args.log, save=heatmap_path, show=not args.no_show,
-                 figsize=figsize, dpi=args.dpi)
+                 figsize=figsize, dpi=args.dpi, ri_calibration=ri_calibration)
 
 
 if __name__ == "__main__":

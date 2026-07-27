@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 peak_with_number.py — Render a GC-IMS overlay with peak circles AND peak-id numbers.
-Version: 2.1 — by Albert Sheng
+Version: 3.0 — by Albert Sheng
 
 Changelog:
   ver.02 — Fixed the OOM crash in write_overlay_numbered(): now downsamples the
@@ -55,7 +55,8 @@ def load_peaks_json(json_path):
 
 
 def write_overlay_numbered(intensity, drift_ms, retention_s, peaks, path,
-                           cmap="viridis", figsize=(8, 9), dpi=150):
+                           cmap="viridis", figsize=(8, 9), dpi=150,
+                           ri_calibration=None):
     """Render heatmap + red circles + white peak-id numbers, all in data coords."""
     import matplotlib
     matplotlib.use("Agg")
@@ -76,20 +77,41 @@ def write_overlay_numbered(intensity, drift_ms, retention_s, peaks, path,
     drift_label = "Drift relative to RIP (RIP at 1.0)"
 
     # Downsample before imshow — see peaks.py._downsample_for_display for the
-    # OOM background. Scatter/annotate below still use data coords so
-    # peak positions are unaffected.
+    # OOM background.
     img_ds = _peaks._downsample_for_display(intensity, figsize, dpi)
+
+    # Stage 4: resample rows to be uniform in RI so the RI axis is LINEAR (not
+    # log). x-axis drift normalization untouched; circles/numbers use RI too.
+    y_extent = (float(retention_s[0]), float(retention_s[-1]))
+    y_label = "Retention time [s]"
+    ri_fn = None
+    if ri_calibration is not None:
+        try:
+            import calibration as _cal
+            row_rts = np.linspace(float(retention_s[0]), float(retention_s[-1]),
+                                  img_ds.shape[0])
+            warped, ri_lo, ri_hi = _cal.warp_rows_to_ri(img_ds, row_rts, ri_calibration)
+            if ri_lo is not None:
+                img_ds = warped
+                y_extent = (ri_lo, ri_hi)
+                y_label = "Retention Index (RI)"
+                ri_fn = _cal.make_rt_to_ri(ri_calibration)
+        except Exception as _e:
+            print(f"[warn] RI warp skipped ({_e})")
 
     fig, ax = plt.subplots(figsize=figsize, constrained_layout=True)
     ax.imshow(img_ds, aspect="auto", origin="lower",
-              extent=[drift_norm[0], drift_norm[-1], retention_s[0], retention_s[-1]],
+              extent=[drift_norm[0], drift_norm[-1], y_extent[0], y_extent[1]],
               cmap=cmap, vmin=vmin, vmax=vmax, interpolation="nearest")
 
     def _peak_x(p):
         return p.get("drift_relative", p["drift_ms"] / drift_ms[rip_index])
 
+    def _peak_y(p):
+        return ri_fn(p["retention_s"])[0] if ri_fn is not None else p["retention_s"]
+
     xs = [_peak_x(p) for p in peaks]
-    ys = [p["retention_s"] for p in peaks]
+    ys = [_peak_y(p) for p in peaks]
     ax.scatter(xs, ys, s=28, facecolors="none", edgecolors="red", linewidths=0.8)
 
     # White number with a thin black outline so it reads on any colormap.
@@ -97,14 +119,15 @@ def write_overlay_numbered(intensity, drift_ms, retention_s, peaks, path,
     for p in peaks:
         ax.annotate(
             str(p.get("peak_id", "")),
-            xy=(_peak_x(p), p["retention_s"]),
+            xy=(_peak_x(p), _peak_y(p)),
             xytext=(3, 3), textcoords="offset points",
             color="white", fontsize=7, fontweight="bold",
             ha="left", va="bottom", path_effects=outline,
         )
 
     ax.set_xlabel(drift_label)
-    ax.set_ylabel("Retention time [s]")
+    ax.set_ylabel(y_label)
+
     from matplotlib.ticker import MultipleLocator, FormatStrFormatter
     ax.xaxis.set_major_locator(MultipleLocator(0.5))
     ax.xaxis.set_minor_locator(MultipleLocator(0.1))
@@ -127,6 +150,12 @@ def main():
                     help="圖大小（英吋），如 14x11 (預設 8x9)")
     ap.add_argument("--dpi", type=int, default=150, help="輸出 dpi (預設 150)")
     ap.add_argument("--cmap", default="viridis", help="配色 (預設 viridis)")
+    ap.add_argument("--ri-series", default=None,
+                    help="把 y 軸從保留時間改標成保留指數 RI（第四階段）；值為參照系列"
+                         "（如 n_alkane/custom），會從原始 .mea 資料夾的 STD 解析校正。"
+                         "x 軸 drift 正規化不受影響")
+    ap.add_argument("--ri-start-carbon", type=int, default=None,
+                    help="--ri-series n_alkane 的起始碳數（覆寫暫定 C6）")
     args = ap.parse_args()
 
     try:
@@ -153,10 +182,29 @@ def main():
     peaks = load_peaks_json(peaks_json)
     print(f"讀入 {len(peaks)} 個峰")
 
+    # Stage 4: resolve RI calibration from the ORIGINAL .mea's folder (STDs live
+    # in GAS/<batch>/, not results/). Prefer the .mea path; else the surface meta.
+    ri_calibration = None
+    if args.ri_series:
+        try:
+            import calibration as _cal
+            src = path if path.lower().endswith(".mea") else (_meta or {}).get("source")
+            folder = os.path.dirname(os.path.abspath(src)) if src else None
+            if folder:
+                ri_calibration, ri_mode, _ = _cal.resolve_ri_calibration(
+                    folder, series_key=args.ri_series,
+                    start_carbon=args.ri_start_carbon)
+                print(f"[RI] source={ri_mode}, series={args.ri_series}")
+            else:
+                print("[warn] 找不到原始 .mea 資料夾，RI 軸略過")
+        except Exception as _e:
+            print(f"[warn] RI 校正解析失敗（{_e}）；維持保留時間軸")
+
     out = args.out or os.path.join(RESULTS_DIR, base + "_overlay_numbered.png")
     os.makedirs(RESULTS_DIR, exist_ok=True)
     write_overlay_numbered(intensity, drift_ms, retention_s, peaks, out,
-                           cmap=args.cmap, figsize=figsize, dpi=args.dpi)
+                           cmap=args.cmap, figsize=figsize, dpi=args.dpi,
+                           ri_calibration=ri_calibration)
     print(f"完成：{out}")
 
 

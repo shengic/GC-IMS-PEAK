@@ -1,6 +1,6 @@
 # GC-IMS Peak-Finding Pipeline — Implementation Notes
 
-**Version: 2.1 — by Albert Sheng**
+**Version: 3.0 — by Albert Sheng**
 
 **Purpose of this document:** a self-contained, portable record of the working code built for
 reading G.A.S. FlavourSpec® GC-IMS `.mea` files, exporting them, and detecting peaks. It is

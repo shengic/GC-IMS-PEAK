@@ -1,6 +1,6 @@
 """
 peaks.py  —  GC-IMS 峰偵測（第一層：偵測 / 測量；measure-only v1）
-Version: 2.1 — by Albert Sheng
+Version: 3.0 — by Albert Sheng
 
 變更記錄：
   2.1  — 強制規則 R004/R006 移到突出度門檻**之前**（門檻是相對值，RIP 會把它
@@ -422,7 +422,7 @@ def write_json(peaks, path, params, stats, meta, shape, geom=None):
 
 
 def write_bg(intensity, drift_ms, retention_s, out_base, rip_index=None,
-             cmap="viridis", figsize=(8, 9), dpi=150):
+             cmap="viridis", figsize=(8, 9), dpi=150, ri_calibration=None):
     """Render the circle-free background image + its geometry sidecar.
 
     Everything this needs (intensity + both axes) lives in the `.npz`, so the
@@ -433,11 +433,14 @@ def write_bg(intensity, drift_ms, retention_s, out_base, rip_index=None,
     whoever writes the PNG must write the matching geometry: a bg-only render
     produces no peaks file, and geometry that disagrees with the image it
     describes would put every circle in the wrong place.
+
+    ri_calibration 提供時，背景圖 y 軸標成 RI（顯示層 relabel）；幾何仍以
+    retention_s 記錄，故 Canvas 圈位置不受影響。
     """
     geom = write_overlay(intensity, drift_ms, retention_s, [], out_base + "_bg.png",
                          cmap=cmap, figsize=figsize, dpi=dpi, show=False,
                          rip_index=rip_index, draw_circles=False,
-                         title="GC-IMS heatmap")
+                         title="GC-IMS heatmap", ri_calibration=ri_calibration)
     with open(out_base + "_bg.json", "w", encoding="utf-8") as f:
         json.dump(geom, f, ensure_ascii=False, indent=2)
     print(f"  GEOM → {out_base}_bg.json")
@@ -492,7 +495,7 @@ def _downsample_for_display(img, figsize, dpi, margin=1.5):
 
 def write_overlay(intensity, drift_ms, retention_s, peaks, path,
                   cmap="viridis", mark_n=0, figsize=(8, 9), dpi=150, show=False,
-                  rip_index=None, draw_circles=True, title=None):
+                  rip_index=None, draw_circles=True, title=None, ri_calibration=None):
     """Render overlay heatmap with peak circles.
 
     橫軸使用 drift_relative（本次使用者決策，見 readGAS.plot_heatmap 註解）。
@@ -523,18 +526,41 @@ def write_overlay(intensity, drift_ms, retention_s, peaks, path,
     # 畫圖前降到接近輸出解析度，避免 savefig() 光柵化整個原始矩陣爆記憶體
     img_ds = _downsample_for_display(intensity, figsize, dpi)
 
+    # 第四階段：校準就緒 → 沿 y 把顯示影像重採樣成「均勻於 RI」，讓 RI 軸**線性
+    # （非 log 刻度）**。x 軸 drift 正規化不動；scatter 與幾何 y 座標一律改用 RI。
+    y_extent = (float(retention_s[0]), float(retention_s[-1]))
+    y_label = "Retention time [s]"
+    y_axis_kind = "retention_s"
+    ri_fn = None
+    if ri_calibration is not None:
+        try:
+            import calibration as _cal
+            row_rts = np.linspace(float(retention_s[0]), float(retention_s[-1]),
+                                  img_ds.shape[0])
+            warped, ri_lo, ri_hi = _cal.warp_rows_to_ri(img_ds, row_rts, ri_calibration)
+            if ri_lo is not None:
+                img_ds = warped
+                y_extent = (ri_lo, ri_hi)
+                y_label = "Retention Index (RI)"
+                y_axis_kind = "ri"
+                ri_fn = _cal.make_rt_to_ri(ri_calibration)
+        except Exception as _e:
+            print(f"  [warn] RI warp skipped ({_e})")
+
     # constrained_layout：視窗縮放時自動重排
     fig, ax = plt.subplots(figsize=figsize, constrained_layout=True)
     ax.imshow(img_ds, aspect="auto", origin="lower",
-              extent=[drift_norm[0], drift_norm[-1], retention_s[0], retention_s[-1]],
+              extent=[drift_norm[0], drift_norm[-1], y_extent[0], y_extent[1]],
               cmap=cmap, vmin=vmin, vmax=vmax, interpolation="nearest")
     shown = peaks[:mark_n] if mark_n and mark_n > 0 else peaks
     if draw_circles:
         xs = [p.get("drift_relative", p["drift_ms"] / drift_ms[rip_index]) for p in shown]
-        ys = [p["retention_s"] for p in shown]
+        ys = ([ri_fn(p["retention_s"])[0] for p in shown] if ri_fn is not None
+              else [p["retention_s"] for p in shown])
         ax.scatter(xs, ys, s=28, facecolors="none", edgecolors="red", linewidths=0.8)
     ax.set_xlabel(drift_label)
-    ax.set_ylabel("Retention time [s]")
+    ax.set_ylabel(y_label)
+
     # 每 0.5 一格 major tick（跟 readGAS.plot_heatmap 一致）
     from matplotlib.ticker import MultipleLocator, FormatStrFormatter
     ax.xaxis.set_major_locator(MultipleLocator(0.5))
@@ -553,6 +579,8 @@ def write_overlay(intensity, drift_ms, retention_s, peaks, path,
                       round(bbox.width, 6), round(bbox.height, 6)],
         "xlim": [float(v) for v in ax.get_xlim()],
         "ylim": [float(v) for v in ax.get_ylim()],
+        # y 軸座標種類：'ri' 時 UI 要用 peak['ri'] 擺圈，'retention_s' 時用保留時間
+        "y_axis": y_axis_kind,
     }
     print(f"  PNG  -> {path}  (marked {len(shown) if draw_circles else 0} peaks)")
     if show:
@@ -593,6 +621,11 @@ def main():
     ap.add_argument("--dpi", type=int, default=150, help="overlay 存檔 dpi (預設 150)")
     ap.add_argument("--show", action="store_true",
                     help="存檔後也開可縮放視窗顯示 overlay")
+    ap.add_argument("--ri-series", default=None,
+                    help="背景圖/疊圈圖 y 軸改標成 RI（第四階段），值為參照系列（如"
+                         " methyl_ketone），從本檔資料夾的 STD 解析校準；省略維持保留時間軸。"
+                         "x 軸 drift 正規化不受影響")
+    ap.add_argument("--ri-start-carbon", type=int, default=None)
     args = ap.parse_args()
 
     try:
@@ -620,9 +653,26 @@ def main():
     base = os.path.splitext(os.path.basename(path))[0]
     out = os.path.join(RESULTS_DIR, base)
 
+    # 第四階段：若要 RI y 軸，從原始 .mea 所在資料夾解析 STD 校準（STD 在 GAS/<batch>/）
+    ri_calibration = None
+    if args.ri_series:
+        try:
+            import calibration as _cal
+            src = path if path.lower().endswith(".mea") else (meta or {}).get("source")
+            folder = os.path.dirname(os.path.abspath(src)) if src else None
+            if folder:
+                ri_calibration, ri_mode, _ = _cal.resolve_ri_calibration(
+                    folder, series_key=args.ri_series, start_carbon=args.ri_start_carbon)
+                print(f"[RI] source={ri_mode}, series={args.ri_series}")
+            else:
+                print("[warn] 找不到原始 .mea 資料夾，RI 軸略過")
+        except Exception as _e:
+            print(f"[warn] RI 校準解析失敗（{_e}）；維持保留時間軸")
+
     if args.bg_only:
         write_bg(intensity, drift_ms, retention_s, out, rip_index=rip_index,
-                 cmap=args.cmap, figsize=figsize, dpi=args.dpi)
+                 cmap=args.cmap, figsize=figsize, dpi=args.dpi,
+                 ri_calibration=ri_calibration)
         print(f"完成：僅重畫背景圖，未執行找峰。")
         return
 
@@ -677,9 +727,10 @@ def main():
     write_overlay(intensity, drift_ms, retention_s, active_peaks, out + "_overlay.png",
                   cmap=args.cmap, mark_n=args.mark_n,
                   figsize=figsize, dpi=args.dpi, show=args.show,
-                  rip_index=rip_index)
+                  rip_index=rip_index, ri_calibration=ri_calibration)
     geom = write_bg(intensity, drift_ms, retention_s, out, rip_index=rip_index,
-                    cmap=args.cmap, figsize=figsize, dpi=args.dpi)
+                    cmap=args.cmap, figsize=figsize, dpi=args.dpi,
+                    ri_calibration=ri_calibration)
     write_json(peaks, out + "_peaks.json", params, stats, meta, intensity.shape,
                geom=geom)
     print(f"完成：基準 {len(peaks)} 個峰，其中 {len(active_peaks)} 個通過規則。"

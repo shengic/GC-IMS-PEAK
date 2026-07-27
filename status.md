@@ -22,61 +22,66 @@ progress tracker, not the design.
   `"F:/GC-IMS-PEAK/.venv/Scripts/python.exe" -m pip install -r requirements.txt`.
   VS Code auto-detects this venv.
 
-### What changed on 2026-07-22 (workflow draft.14)
+### What changed on 2026-07-22 (workflow draft.14–15, tagged v2.1)
 
-Peak selection was restructured around two **mandatory** rules, and the peak
-circles became live Canvas objects:
+**Selection order — the load-bearing change.** `R004` (RIP band) and the new
+`R006` (`drift_relative ≤ 1.0`, "faster than the reactant ion → not an analyte")
+are **mandatory and applied before the prominence gate**. That gate is relative
+(`prom_frac × max_prominence`) and the RIP is normally the strongest feature in
+the image, so leaving it among the candidates inflated the threshold ~3.3× and
+silently discarded real peaks. Measured on `A_1_3`: threshold 101.0 → 30.9;
+peaks 37 (14 of them RIP artefacts) → 31, all with `drift_relative` > 1.0.
+Applying these rules *after* detection makes the circles disappear but does not
+recover the suppressed peaks — `test/test_select_from_maxima.py` fails if anyone
+moves them back.
 
-- `R004` (RIP band) + new `R006` (`drift_relative ≤ 1.0`, "faster than the
-  reactant ion → not an analyte") are **mandatory and applied before the
-  prominence gate**. The gate is relative (`prom_frac × max_prominence`) and the
-  RIP is normally the strongest feature, so leaving it in inflated the threshold
-  ~3.3× and silently killed real peaks. Measured on `A_1_3`: threshold
-  101.0 → 30.9; peaks 37 (14 of them RIP artefacts) → 31 (all `drift_relative`
-  > 1.0).
-- Mandatory is enforced in `rules.load_config()`/`save_config()`, not in the UI —
-  hand-editing `rules_config.json` cannot bypass it. Their *params* remain
-  editable (changing them does renumber).
-- `peak_id` is assigned **once**, right after the mandatory rules. Optional rules
-  only remove peaks — numbering never reshuffles, gaps are informative.
-  Verified: 0 renumbered peaks across three optional-rule combinations.
-- New artefacts per `.mea`: `_maxima.npz` (all 252k raw maxima, 2.4 MB) lets the
-  Rules panel recompute the whole funnel in ~4 ms instead of re-running the 83 s
-  detection; `_bg.png` (circle-free heatmap) + `canvas_geometry` in `_peaks.json`
-  back the interactive canvas.
-- Fixed a long-standing coordinate bug: `highlight_peak_on_overlay()` assumed the
-  plot area filled the whole PNG, ignoring matplotlib margins (8.5% on the left
-  alone), so peak markers never sat on their peaks.
+- "Mandatory" is enforced in `rules.load_config()`/`save_config()`, not in the
+  UI, so hand-editing `rules_config.json` cannot bypass it. Their *params* stay
+  editable — and changing those does move the baseline, which renumbers.
+
+**Rules mark, they no longer remove.** `rules.mark_rules()` sets `rule_active`
+and keeps every peak. The UI shows a rejected peak greyed instead of deleting
+it, so the user can see what a rule did and override it; a manual pick beats the
+rule and is drawn with a dashed ring. `apply_rules()` keeps its old filtering
+contract for `identify.py`, where spending match compute on unwanted peaks would
+be pointless.
+
+**Numbering.** `peak_id` is assigned once, immediately after the mandatory rules
+— that set *is* the baseline. Optional rules only mark, so numbering never
+reshuffles and a gap is informative ("R001 dropped #19"). Verified: 0 renumbered
+peaks across three optional-rule combinations.
+
+**Per-peak selection (Batch 3).** `toggle_peak()` backs both the circle click
+and the table's On checkbox. State persists to `<name>_peaks_state.json` keyed
+by `(rt_index, dt_index)` — **not** `peak_id`, which is a prominence rank within
+the baseline and is reassigned whenever `R004.half_width` / `R006.boundary`
+changes; a selection saved against it would silently reattach to another peak.
+
+**Canvas (Batch 6).** Circles and numbers are native Tk items over the
+circle-free `_bg.png`, positioned from `_bg.json` (written by whoever renders
+the PNG, so geometry always matches the image). This fixed a long-standing
+offset: the old `highlight_peak_on_overlay()` assumed the plot area filled the
+whole PNG, ignoring matplotlib's margins (8.5 % on the left alone), so markers
+never sat on their peaks. Platform note: `-outlinestipple` is silently ignored
+on Windows, so the circle changes colour while the number uses `-stipple`.
+
+**New artefacts per `.mea`.** `_maxima.npz` (all 252k raw maxima, 2.4 MB) lets
+the Rules panel recompute the whole funnel in ~4 ms instead of re-running the
+83 s detection. `_bg.png` + `_bg.json` back the interactive canvas.
+
+**Reuse and disk.** Selecting a `.mea` that already has an `.npz` now *asks*
+whether to reuse it rather than deciding silently; `peaks.py --bg-only` rebuilds
+the display background from the `.npz` alone. The full-res CSV became opt-in
+(`readGAS.py --write-csv`): the seven existing ones (8.39 GB, read by nothing)
+were deleted with the user's explicit approval, taking `results/` from 8.5 GB to
+~245 MB. `.mea` files are never modified or deleted by any part of this project.
 
 **Existing results are stale**: any `.mea` detected before this change has no
 `_maxima.npz` / `_bg.png`, and its `_peaks.json` uses the old numbering. Only
 `260623_161351_A_1_3` has been regenerated — re-run detection per file.
 
-### Also on 2026-07-22 (workflow draft.15, v2.1)
-
-- **Rules mark instead of remove.** `rules.mark_rules()` sets `rule_active` and
-  keeps every peak; the UI shows rejected peaks greyed rather than deleting them,
-  so the user can see what a rule did — and override it. A manual pick beats the
-  rule and is drawn with a dashed ring. `apply_rules()` keeps its old filtering
-  contract for `identify.py`.
-- **Selection persists** to `<name>_peaks_state.json`, keyed by
-  `(rt_index, dt_index)`. Not `peak_id` — that is reassigned whenever the
-  mandatory-rule baseline moves, so a saved selection would reattach to the
-  wrong peak.
-- **Canvas circles are native Tk items** over `_bg.png`, positioned from
-  `_bg.json`. Fixed the old `highlight_peak_on_overlay()` offset (it ignored
-  matplotlib's margins). Note: `-outlinestipple` is silently ignored on Windows,
-  so the circle changes colour while the number uses `-stipple`.
-- **`.npz` reuse is a prompt, not a silent decision.** Selecting a `.mea` that
-  already has an `.npz` asks reuse-vs-re-read. `peaks.py --bg-only` rebuilds the
-  display background from the `.npz` alone. The `.mea` is never modified.
-- **Disk**: the full-res CSV is now opt-in (`readGAS.py --write-csv`). The seven
-  existing ones (8.39 GB, nothing read them) were deleted with the user's
-  explicit approval — `results/` went 8.5 GB → ~245 MB. `.mea` files untouched.
-
-**Housekeeping decision (2026-07-22)**: no automatic cleanup of `results/`.
-Files stay until the user says otherwise. `.mea` files are original experiment
-data and are never removed by any tooling.
+**Housekeeping decision**: no automatic cleanup of `results/`. Files stay until
+the user says otherwise.
 
 ### ⚠ Editor hazard seen repeatedly this session
 

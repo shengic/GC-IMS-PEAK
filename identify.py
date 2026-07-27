@@ -1,16 +1,17 @@
 """
 identify.py  —  GC-IMS Identify Workflow 第六階段：整合輸出
-Version: 2.1 — by Albert Sheng
+Version: 3.0 — by Albert Sheng
 
 依 GC-IMS_Identify_Workflow.md §第六階段：
   輸入：_peaks.json（來自 peaks.py，已含 drift_relative 由 rip 整合）
        + 原始 .mea 檔（用來讀表頭 L/U/sample_rate；只讀前 32KB）
        + 選定的 .ril/.iml 檔（library.select_*）
-       + calibration_profile.json（可選，缺 → 走 unavailable 模式）
+       + calibration_profile.json（可選，缺 → 走 K0 unavailable 模式）
        + rules_config.json（可選，缺 → 用 default_config）
+       + 批次資料夾內的 STD.mea（可選；第四階段 RT→RI，缺 → RI unavailable）
 
-  管線：peaks_json → header → k0 attach → rules filter → library select →
-       per-peak match_all → 輸出 _peaks_identified.json
+  管線：peaks_json → header → k0 attach（§2）→ ri attach（§4）→ rules filter（§7）
+       → library select（§3）→ per-peak match_all（§5）→ 輸出 _peaks_identified.json
 
   輸出：_peaks_identified.json，每顆峰附三分支候選（gc/ims/combined），每筆
        候選帶 source_file provenance。彙總資訊放在 top-level 欄位以供 UI 顯示：
@@ -40,6 +41,7 @@ import readGAS
 import library
 import rules
 import dt_convert
+import calibration
 import match
 
 
@@ -114,6 +116,8 @@ def select_library_files(data_dir, header):
 def identify(peaks_doc, mea_path,
              profile=None, rules_config=None, raw_tp=None,
              library_dir=None,
+             ri_calibration=None, resolve_ri=True, ri_series_key=None,
+             ri_registry_path="ri_calibration_registry.json", ri_max_days_gap=None,
              ri_tolerance=match.DEFAULT_RI_TOLERANCE,
              rt_tolerance=match.DEFAULT_RT_TOLERANCE,
              k0_tolerance=match.DEFAULT_K0_TOLERANCE):
@@ -130,6 +134,13 @@ def identify(peaks_doc, mea_path,
     rules_config : list  rules_config.json 內容；None → rules.default_config()
     raw_tp : dict|None   {'T_C':..., 'P_mbar':...}，raw_parameters 模式必要
     library_dir : str|None  覆寫 library.resolve_data_dir()
+    ri_calibration : dict|None  預先解好的 RI 校正表（calibration.resolve_ri_calibration
+                     或 build_from_std_peaks 產物）；None 且 resolve_ri=True 時，
+                     自動從 .mea 所在資料夾解析（三層：batch_own_std/registry/unavailable）
+    resolve_ri : bool    ri_calibration 為 None 時，是否自動從資料夾解析（False → RI unavailable）
+    ri_series_key : str|None  自動解析時的參照系列（None → single_point_relative 相對模式）
+    ri_registry_path : str    registry 借用來源
+    ri_max_days_gap : int|None  借用校正的天數上限，超過視同不可用
     """
     peaks = [dict(p) for p in peaks_doc.get("peaks", [])]
     stats = peaks_doc.get("stats", {})
@@ -143,6 +154,28 @@ def identify(peaks_doc, mea_path,
             "no calibration profile provided to identify.py"
         )
     dt_convert.attach_k0(peaks, header, profile, raw_TP=raw_tp)
+
+    # ---- 第四階段：RT→RI 校正 ----
+    ri_detail = {}
+    if ri_calibration is None and resolve_ri:
+        folder = os.path.dirname(os.path.abspath(mea_path))
+        dims = calibration.extract_registry_dims(header)
+        ri_calibration, ri_mode, ri_detail = calibration.resolve_ri_calibration(
+            folder, dims=dims, series_key=ri_series_key,
+            registry_path=ri_registry_path, max_days_gap=ri_max_days_gap,
+        )
+    else:
+        ri_mode = (ri_calibration.get("ri_mode", "provided")
+                   if isinstance(ri_calibration, dict) else "unavailable")
+
+    if ri_calibration is None:
+        for p in peaks:
+            p["ri"] = None
+            p["ri_mode"] = "unavailable"
+            p["ri_source"] = "unavailable"
+    else:
+        calibration.attach_ri(peaks, ri_calibration)
+        calibration.stamp_ri_provenance(peaks, ri_calibration, ri_mode)
 
     # ---- 第七階段：規則篩選 ----
     if rules_config is None:
@@ -179,11 +212,13 @@ def identify(peaks_doc, mea_path,
         gc_dims.append(r["gc_dimension"])
 
     # ---- 彙總 ----
-    k0_mode_summary = {}
-    for p in filtered_peaks:
-        k0_mode_summary[p.get("k0_mode", "unknown")] = (
-            k0_mode_summary.get(p.get("k0_mode", "unknown"), 0) + 1
-        )
+    def _tally(key):
+        out = {}
+        for p in filtered_peaks:
+            out[p.get(key, "unknown")] = out.get(p.get(key, "unknown"), 0) + 1
+        return out
+
+    k0_mode_summary = _tally("k0_mode")
 
     identified_doc = {
         "source_peaks_json": peaks_doc.get("source"),
@@ -192,6 +227,20 @@ def identify(peaks_doc, mea_path,
         "n_peaks_in": len(peaks),
         "n_peaks_out": len(filtered_peaks),
         "k0_mode_summary": k0_mode_summary,
+        "ri_mode_summary": _tally("ri_mode"),
+        "ri_source_summary": _tally("ri_source"),
+        "ri_calibration_summary": {
+            "ri_mode": ri_mode,
+            "known_ri_available": bool(ri_calibration.get("known_ri_available"))
+                                  if isinstance(ri_calibration, dict) else False,
+            "assumed_unverified": bool(ri_calibration.get("assumed_unverified"))
+                                  if isinstance(ri_calibration, dict) else False,
+            "series_used": ri_calibration.get("series_used")
+                           if isinstance(ri_calibration, dict) else None,
+            "n_anchors": ri_calibration.get("n_anchors")
+                         if isinstance(ri_calibration, dict) else 0,
+            "resolution": ri_detail,
+        },
         "rules_summary": rules_report,
         "library_summary": {
             "resolved_data_dir": resolved_lib_dir,
@@ -226,6 +275,14 @@ def main():
                     help="rules_config.json 路徑（省略 → default_config）")
     ap.add_argument("--raw-tp", default=None,
                     help="raw_parameters 模式必要，格式 'T_C,P_mbar'，e.g. '45,1013'")
+    ap.add_argument("--ri-series", default=None, choices=calibration.rs.list_series(),
+                    help="第四階段參照系列（省略 → single_point_relative 相對模式）")
+    ap.add_argument("--ri-registry", default="ri_calibration_registry.json",
+                    help="RI 校正 registry（無 STD 時借用來源）")
+    ap.add_argument("--ri-max-days-gap", type=int, default=None,
+                    help="借用校正的天數上限，超過視同不可用")
+    ap.add_argument("--no-ri", action="store_true",
+                    help="停用第四階段 RT→RI（RI 直接 unavailable，走 RT 退路）")
     ap.add_argument("--ri-tol", type=float, default=match.DEFAULT_RI_TOLERANCE)
     ap.add_argument("--rt-tol", type=float, default=match.DEFAULT_RT_TOLERANCE)
     ap.add_argument("--k0-tol", type=float, default=match.DEFAULT_K0_TOLERANCE)
@@ -256,6 +313,8 @@ def main():
         peaks_doc, mea_path,
         profile=profile, rules_config=rules_config, raw_tp=raw_tp,
         library_dir=args.library_dir,
+        resolve_ri=not args.no_ri, ri_series_key=args.ri_series,
+        ri_registry_path=args.ri_registry, ri_max_days_gap=args.ri_max_days_gap,
         ri_tolerance=args.ri_tol,
         rt_tolerance=args.rt_tol,
         k0_tolerance=args.k0_tol,
@@ -278,6 +337,9 @@ def main():
     print(f"完成：{out_path}")
     print(f"  峰數: {identified['n_peaks_in']} → {identified['n_peaks_out']} (規則篩選後)")
     print(f"  k0 模式: {identified['k0_mode_summary']}")
+    ri_sum = identified["ri_calibration_summary"]
+    print(f"  RI 來源: {ri_sum['ri_mode']} | 模式: {identified['ri_mode_summary']}"
+          + (f" | ⚠ 假設未驗證 series={ri_sum['series_used']}" if ri_sum["assumed_unverified"] else ""))
     print(f"  library: {len(identified['library_summary']['ril_files'])} .ril, "
           f"{len(identified['library_summary']['iml_files'])} .iml"
           f" ({identified['library_summary']['n_ril_rows']} + "
