@@ -129,6 +129,8 @@ It is:
 | `rip.py` | module | stage 1 — RIP location + `drift_relative` |
 | `dt_convert.py` | module | stage 2 — K0 conversion (three modes) |
 | `library.py` | module | stage 3 — `.ril` / `.iml` readers |
+| `calibration.py` | module+CLI | **stage 4 — RT→RI**: STD anchor selection, log-linear interp, folder resolution + cache |
+| `reference_series.py` | module | stage 4 — pluggable calibration series (`methyl_ketone` / `n_alkane` / `custom`) |
 | `match.py` | module | stage 5 — tolerance-window matching |
 | `identify.py` | script | stage 6 — integration CLI → `_peaks_identified.json` |
 | `rules.py` | module | stage 7 — rule engine (R001–R006) |
@@ -392,6 +394,50 @@ generality / other instruments.
 > scoring), treating the system as a *calibratable instrument* — algorithm fixed, ~5–10
 > physically-meaningful thresholds tuned to best match human judgement. That calibration step is
 > **not yet implemented** (no ground-truth list yet).
+
+---
+
+## 7b. `calibration.py` / `reference_series.py` — stage 4 (RT→RI)
+
+Converts a peak's retention time to a **Retention Index**. Runs off a batch
+**STD** run; the x-axis drift/RIP normalization is untouched.
+
+**Pipeline (all automatic from a folder):**
+1. `scan_folder_for_std(folder)` — find the STD by header `Sample=="STD"`.
+2. Load the STD's `_peaks.json`; `select_homolog_ladder(peaks, 6)` picks the 6
+   calibration peaks as the strongest strictly-increasing **DT_rel** ladder
+   (this batch: C4–C9 methyl ketones — no template RTs needed).
+3. `reference_series.assign_ri()` supplies the 6 RI values for the series.
+4. `build_calibration()` stores `log10(RT)` anchors; `make_rt_to_ri()` is the one
+   shared `RT→(RI, extrapolated)` function used by peak values **and** the heatmap
+   axis. Out-of-range = **extrapolate + flag** (never clamp).
+5. `resolve_ri_calibration(folder)` is 3-tier — `batch_own_std` /
+   `borrowed_from_registry` (`ri_calibration_registry.json`, with `days_gap`) /
+   `unavailable` — with a session + `_folder_calibration.json` sidecar cache.
+
+**Series (`reference_series.REFERENCE_SERIES`):** `methyl_ketone` (this project;
+RI `[589.4,688.6,784.2,892.2,996.5,1095.6]`, `assumed=True`,
+`confidence="borrowed_cross_referenced"`), `n_alkane` (generic 100·n mechanism),
+`custom` (user RI values). Provenance (`assumed_unverified`, `ri_confidence`)
+rides on the calibration and every peak, symmetric with stage-2 `k0_mode`.
+
+**Per-peak fields added** (`attach_ri`): `ri`, `ri_mode`
+(`multi_point_loglinear` / `single_point_relative` / `unavailable`),
+`ri_extrapolated`, `ri_relative`, `ri_known_available`, `ri_assumed_unverified`,
+`ri_confidence`, `ri_source`.
+
+**Heatmap axis:** `warp_rows_to_ri()` resamples display rows uniform-in-RI so the
+RI axis is **linear** (not log). `_bg.json` records `y_axis: "ri" | "retention_s"`
+so the UI places circles by `peak["ri"]` when the backdrop is RI.
+
+**CLI flags** (added to `readGAS.py`, `peaks.py`, `peak_with_number.py`):
+`--ri-series <name>` (`methyl_ketone` etc.) resolves the folder STD and renders
+the y-axis as RI; `--ri-start-carbon N` overrides the n_alkane start.
+`identify.py`: `--ri-series / --ri-registry / --ri-max-days-gap / --no-ri`.
+Standalone: `python calibration.py <STD_peaks.json> [--series ...] [--ri-values ...]`.
+
+Math + implementation checklist: `RT_to_RI_normalization_math.md`. RI-value
+provenance and the upgrade-to-verified path: `methyl_ketone_RI_provenance.md`.
 
 ---
 

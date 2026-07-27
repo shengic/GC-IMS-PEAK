@@ -1,6 +1,6 @@
 # GC-IMS-PEAK — Status & Session Handoff
 
-**Last updated**: 2026-07-22 (session with Claude) — code tagged **v2.1**
+**Last updated**: 2026-07-27 (session with Claude) — code tagged **v3**
 **Project root**: `F:/GC-IMS-PEAK` (was `K:/` in earlier sessions — paths below updated)
 **Purpose**: catch a new session up on where the Identify Workflow implementation
 stands, what has been decided, what is testable now, and what to do next. Pair
@@ -11,16 +11,64 @@ progress tracker, not the design.
 
 ## TL;DR
 
-- CLI-side identify pipeline (stages 1, 2, 3, 5, 6, 7 of the workflow) is
+- CLI-side identify pipeline (stages 1, 2, 3, **4**, 5, 6, 7 of the workflow) is
   **complete and end-to-end runnable**. Real `.mea` → `_peaks_identified.json`
   works. Verified on `260625_141215_STD.mea`, coffee-fermentation sample.
-- UI (`main.py`) rollout: **Batches 1, 2, 3, 4, 6 done**. Batches 5, 7, 8 pending.
-- Stage 4 (`calibration.py`, RT→RI) not written — blocked on user obtaining
-  n-alkane calibration data (external decision, not code).
-- **91** pytest checks passing across `test/`.
+- **Stage 4 (RT→RI) is now built** (`calibration.py` + `reference_series.py`) and
+  wired into the UI: selecting a folder silently resolves the STD calibration
+  (auto-detecting the STD if needed), the peak table gains an **RI** column, and
+  every heatmap's y-axis becomes a **linear Retention Index** axis (x-axis
+  drift/RIP normalization untouched).
+- STD confirmed **C4–C9 methyl ketones**; the 6 RI values are **borrowed**
+  (`assumed_unverified` / `borrowed_cross_referenced`, see
+  `methyl_ketone_RI_provenance.md`) — upgrade path documented there.
+- UI (`main.py`) rollout: **Batches 1, 2, 3, 4, 6 done** + Stage-4 wiring.
+  Batches 5, 7, 8 pending.
+- **125** pytest checks passing across `test/` (added `test_calibration.py`).
 - Project uses `.venv` at project root; install with
   `"F:/GC-IMS-PEAK/.venv/Scripts/python.exe" -m pip install -r requirements.txt`.
   VS Code auto-detects this venv.
+
+### What changed on 2026-07-27 (workflow draft.16–21, tagged v3) — Stage 4 RT→RI
+
+**Stage 4 is implemented.** `calibration.py` + `reference_series.py` convert a
+peak's retention time to a Retention Index, and the whole thing runs
+automatically from a folder's STD.
+
+- **Compound identity (draft.19):** the STD is **C4–C9 methyl ketones**
+  (2-butanone → 2-nonanone), *not* n-alkanes. Their RI is not `100·n`.
+- **RI values (methyl_ketone_RI_provenance.md):** the 6 values
+  `[589.4, 688.6, 784.2, 892.2, 996.5, 1095.6]` are **borrowed** from another
+  project's `.gasprj`, cross-referenced with literature (<11 RI). Marked
+  `assumed_unverified` / `confidence="borrowed_cross_referenced"` and carried on
+  every peak — **not** verified, not self-calibrated. Only the RI (Y) is
+  borrowed; the RTs (X) are this batch's own STD peaks.
+- **Auto 6-anchor selection:** `select_homolog_ladder()` picks the 6 ketones out
+  of the STD's ~9–14 detected peaks via the monotonic DT_rel ladder — no template
+  RTs needed. Recovers the documented 6 (282/334/400/522/697/949 s), spacing std
+  0.0034.
+- **Math (RT_to_RI_normalization_math.md, draft.20–21):** piecewise-linear in
+  `log10(RT)`; out-of-range = **extrapolate + flag** (`ri_extrapolated`), never
+  clamp. One shared `make_rt_to_ri()` used by both peak values and heatmap axis.
+- **Folder resolution + cache (draft.17):** `resolve_ri_calibration()` is 3-tier
+  (`batch_own_std` / `borrowed_from_registry` / `unavailable`), symmetric with
+  Stage 2 `k0_mode`; session + `_folder_calibration.json` sidecar cache reused
+  across files.
+- **Heatmaps show linear RI:** rows are resampled uniform-in-RI so the RI axis is
+  linear (not log). Applies to the main canvas backdrop (`_bg.png`), the numbered
+  overlay, and the original heatmap. Circles are placed in RI (`_bg.json` records
+  `y_axis`). **x-axis drift/RIP normalization is untouched.**
+- **UI:** folder-select spawns a background thread that resolves (and, if the STD
+  isn't detected yet, detects it) the calibration once and caches it; the peak
+  table gains an **RI** column (`*` = extrapolated); `identify.py` carries
+  `ri_mode` / provenance into `_peaks_identified.json`.
+- New modules/docs: `calibration.py`, `reference_series.py`,
+  `RT_to_RI_normalization_math.md`, `Stage4_code_reference_for_CLI.md`,
+  `methyl_ketone_RI_provenance.md`, `test/test_calibration.py`.
+
+**Still open:** RI is borrowed/assumed — upgrade to verified per
+`methyl_ketone_RI_provenance.md`. A fresh folder whose STD isn't detected yet
+shows retention time until the background STD detection finishes.
 
 ### What changed on 2026-07-22 (workflow draft.14–15, tagged v2.1)
 
@@ -101,7 +149,7 @@ in the editor while another process is editing it.
 | 1 | RIP normalization | `rip.py` | Done | `find_rip()` + `attach_drift_relative()`. Integrated into `peaks.py` ver.03. RIP found at dt_index=680 (4.53 ms) on the test .mea. |
 | 2 | K0 conversion | `dt_convert.py` | Done — architecture; two decisions still open | Three modes: `standard_based` / `raw_parameters` / `unavailable`. `raw_parameters` refuses to run unless caller passes `raw_TP={T_C, P_mbar}` (workflow explicitly wants no silent assumption). `L`/`U`/`sample_rate_khz` confirmed extractable from header; `T`/`P` field mapping still ambiguous. |
 | 3 | Library readers | `library.py` | Done | `.ril` 21 cols / `.iml` 16 cols. `source_file` provenance auto-propagates via dict copy. `resolve_data_dir()` priority chain: explicit arg → `GCIMS_LIBRARY_DIR` env → `<PROJECT>/library_data/` → legacy VOCal folder → None. |
-| 4 | RT→RI conversion | `calibration.py` | **Not written** | Blocked on user obtaining n-alkane calibration run. Formula is Van den Dool–Kratz (workflow §第四階段). Without this, gc-branch match falls back to RT seconds via `.iml Rt[sec]`. |
+| 4 | RT→RI conversion | `calibration.py` + `reference_series.py` | **Done — values borrowed** | Auto-selects 6 STD anchors (DT_rel homolog ladder), `log10(RT)` piecewise-linear interp (extrapolate+flag), 3-tier folder resolution + cache. STD = C4–C9 methyl ketones; 6 RI values **borrowed** (`assumed_unverified`, see `methyl_ketone_RI_provenance.md`). Wired into `identify.py` + UI; heatmaps show a linear RI y-axis. Upgrade to verified still pending. |
 | 5 | Tolerance-window match | `match.py` | Done | Three lists: `gc_matches` / `ims_matches` / `combined_matches` (intersect by CAS). `match_all()` picks RI vs RT fallback per peak. Default tolerances are placeholders (RI ±10, Rt ±5s, K0 ±0.05). |
 | 6 | Integration | `identify.py` | Done | CLI-runnable. Full pipeline: peaks.json → header → K0 → rules → library → match → `_peaks_identified.json`. Provenance carried through (`k0_mode`, `source_file`, `match_dimensions`, `gc_dimension`). |
 | 7 | Rule engine | `rules.py` | Done | R001–**R006** registered. Three rule types (per_peak / per_peak_with_context / batch) + a `mandatory` flag. `mark_rules()` marks `rule_active` without removing; `apply_rules()` = mark + filter (kept for `identify.py`). R004/R006 are mandatory and applied **before** the prominence gate inside `peaks.py`. |

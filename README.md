@@ -16,12 +16,25 @@ libraries.
 2. **Detect** peaks via union-find persistent homology / prominence (`peaks.py`)
 3. **Filter** them with rules R001–R006 (`rules.py`)
 4. **Select** — click circles on the heatmap or tick the table to keep/drop peaks
-5. **Identify** — RIP normalisation, K0 conversion, tolerance-window matching
+5. **Normalise** the axes — drift → relative-to-RIP (x), and retention time →
+   **Retention Index** (y) from a batch STD (`calibration.py`, `reference_series.py`)
+6. **Identify** — RIP normalisation, K0 conversion, tolerance-window matching
    against GC and IMS libraries (`rip.py`, `dt_convert.py`, `library.py`,
    `match.py`, `identify.py`)
 
 `.mea` files are the original measurements and are **never modified or deleted**
 by any part of this project.
+
+### Retention Index (RT→RI, Stage 4)
+
+Selecting a folder silently finds its **STD** run, auto-picks the 6 calibration
+peaks (this batch: **C4–C9 methyl ketones**, via the drift-relative homolog
+ladder), and fits a `log10(RT)` piecewise-linear curve. Every peak then gets an
+RI, and each heatmap's y-axis becomes a **linear Retention Index** axis while the
+x-axis stays drift-relative-to-RIP. The calibration is cached per folder and
+reused across files. The methyl-ketone RI values are currently **borrowed** and
+flagged `assumed_unverified` (see `methyl_ketone_RI_provenance.md`); the axis
+falls back to retention time when no usable STD is available.
 
 ---
 
@@ -87,11 +100,13 @@ than `peak_id`, which is reassigned whenever the baseline moves.
 | `peaks.py` | prominence detection, maxima cache, canvas backdrop |
 | `rules.py` | rule engine, R001–R006, mandatory-rule enforcement |
 | `rip.py` / `dt_convert.py` | RIP normalisation, K0 conversion |
+| `calibration.py` | Stage 4 RT→RI: STD anchor selection, log-linear interp, folder resolution + cache |
+| `reference_series.py` | pluggable calibration series (methyl_ketone / n_alkane / custom) |
 | `library.py` / `match.py` / `identify.py` | library readers, matching, integration |
 | `peak_with_number.py` | static numbered image for the report (not the canvas) |
 | `gas_utils.py` | file-picker helpers |
 | `rules_config.json` | per-rule `enabled` + params |
-| `test/` | pytest suite (91 tests) |
+| `test/` | pytest suite (125 tests) |
 
 ### Output files (per `.mea`, written to `results/`)
 
@@ -101,10 +116,13 @@ than `peak_id`, which is reassigned whenever the baseline moves.
 <name>_peaks.json          every baseline peak + rule verdicts + funnel stats
 <name>_peaks.csv           compact peak list
 <name>_peaks_state.json    your manual keep/drop choices (cannot be regenerated)
-<name>_bg.png / _bg.json   circle-free backdrop + plot-area geometry
+<name>_bg.png / _bg.json   circle-free backdrop + plot-area geometry (_bg.json records y_axis: ri|retention_s)
 <name>_overlay.png         static image with circles, for VOCal comparison
 <name>_heatmap.png         heatmap from readGAS.py
 ```
+
+Per folder (not per `.mea`): `_folder_calibration.json` caches the resolved
+RT→RI calibration so it is reused across every file in the folder.
 
 The full-resolution long-table CSV is **opt-in** (`readGAS.py --write-csv`): it
 runs 0.8–1.5 GB per file and nothing in the pipeline reads it, since the `.npz`
@@ -121,9 +139,11 @@ so measurement data never gets committed.
 pytest test/ -q
 ```
 
-91 tests cover the rule engine and mandatory-rule enforcement, the selection
+125 tests cover the rule engine and mandatory-rule enforcement, the selection
 funnel and its ordering constraint, peak selection state and its coordinate
-keying, the state machine, file I/O, peak-table rendering, and UI validators.
+keying, the state machine, file I/O, peak-table rendering, UI validators, and the
+Stage-4 RT→RI calibration (anchor selection, log-linear interp, extrapolate+flag,
+pinning, folder resolution/cache, and the linear-RI axis resampling).
 
 ---
 
@@ -134,6 +154,9 @@ keying, the state machine, file I/O, peak-table rendering, and UI validators.
 | `GC-IMS_Identify_Workflow.md` | authoritative spec for stages 1–11 |
 | `GC-IMS_Peak_Finding_Workflow.md` | methodology; §5.1 is the as-built flowchart |
 | `GC-IMS_Pipeline_Implementation.md` | file formats, CLI flags, output schemas |
+| `RT_to_RI_normalization_math.md` | Stage-4 RT→RI interpolation math + checklist |
+| `Stage4_code_reference_for_CLI.md` | Stage-4 code skeletons / reference |
+| `methyl_ketone_RI_provenance.md` | why the 6 borrowed RI values, and how to upgrade to verified |
 | `UI.md` | UI specification and change log |
 | `status.md` | progress tracker and session handoff |
 | `Report_Content_Example.md` | what the Batch 8 report should contain |

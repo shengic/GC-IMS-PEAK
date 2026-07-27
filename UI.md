@@ -1,11 +1,24 @@
 # GC-IMS Tk UI Specification
 
-Version: **v2** (Numbered overlay + footer cleanup)
+Version: **v3** (Stage 4 RT→RI in the UI)
 
-**Status**: ✅ **COMPLETE & TESTED** — 54 unit tests passing.
+**Status**: ✅ **COMPLETE & TESTED** — 125 unit tests passing.
 
 This document defines the user interface behavior for the GC-IMS peak-finding desktop app.
 It is a design/specification document with concrete implementation guidance for a Tk/PIL-based desktop application.
+
+> ### What's new in v3 (read this first)
+> **Stage 4 (RT→RI) is wired into the UI.** Selecting a folder spawns a background
+> thread that silently resolves the batch's RT→RI calibration from its **STD**
+> (auto-detecting the STD if its `_peaks.json` is missing) and caches it for reuse
+> across every `.mea` in the folder. When a calibration is active:
+> - the peak table gains a **RI** column (`*` marks extrapolated values);
+> - **every heatmap's y-axis becomes a linear Retention Index axis** (the image is
+>   resampled uniform-in-RI); the x-axis stays drift-relative-to-RIP;
+> - native circles are placed by `peak["ri"]` (the `_bg.json` `y_axis` field tells
+>   the UI which coordinate the backdrop uses).
+> When no usable STD exists, the y-axis falls back to retention time.
+> See **§21. UI Change Log → v3**.
 
 > ### What's new in v2 (read this first)
 > Two earlier designs described below have been **superseded** — where the older
@@ -34,6 +47,9 @@ It is a design/specification document with concrete implementation guidance for 
 | Peak table (sortable, centered, even widths) | ✅ | v1.2 |
 | Matrix dimensions + peak count in table header | ✅ | v2 |
 | **Numbered overlay (peak_with_number.py)** | ✅ | **v2** |
+| **Folder-level RT→RI calibration (silent, cached, auto-detect STD)** | ✅ | **v3** |
+| **RI column in peak table (`*` = extrapolated)** | ✅ | **v3** |
+| **Linear Retention-Index y-axis on all heatmaps** | ✅ | **v3** |
 | Image zoom viewer (click, pan/zoom) | ✅ | v1.2 |
 | Single-line status bar; Exit button in footer | ✅ | v2 |
 | Export heatmap/overlay/CSV | ✅ | v1.0 |
@@ -1295,6 +1311,36 @@ If the renderer fails, the UI falls back silently to the plain overlay.
 ## 21. UI Change Log
 
 *(Consolidated from the former `UI_IMPROVEMENTS.md`.)*
+
+### v3 — Stage 4 RT→RI in the UI
+
+Implements Identify-Workflow **stage 4** (RT→RI) end-to-end in the desktop app.
+Backed by `calibration.py` + `reference_series.py`; the x-axis drift/RIP
+normalization is unchanged.
+
+**Folder-level calibration (silent, cached).**
+- On folder select, `_start_folder_calibration()` runs a background thread that
+  calls `calibration.resolve_ri_calibration_cached(folder, series_key="methyl_ketone")`.
+  If the STD's `_peaks.json` is missing it detects the STD first
+  (`peaks.py <std.mea>`, ~90 s), then resolves — stopping at the first usable STD.
+- The result is stored in `state.ri_calibration` and reused for every `.mea` in
+  the folder (no recompute). Status line reports readiness (and the
+  `assumed/borrowed` provenance).
+
+**Peak table.** A new **RI** column (after `retention_s`) shows each peak's RI;
+`*` suffix marks an extrapolated value (out of the anchor range). `—` when no
+absolute calibration is active. Attached in `populate_peak_table()` via
+`calibration.attach_ri()`.
+
+**Heatmaps → linear RI axis.** `peaks.py` / `readGAS.py` / `peak_with_number.py`
+gained `--ri-series`; `main.py` passes it when a calibration is active. The image
+rows are **resampled uniform-in-RI** (`calibration.warp_rows_to_ri`) so the RI
+axis is linear (not log-bunched). `_bg.json` records `y_axis: "ri" |
+"retention_s"`; `_peak_to_image_xy()` places native circles by `peak["ri"]` when
+the backdrop is RI, so circles stay aligned.
+
+**Fallback.** No usable STD → RI unavailable; the y-axis stays retention time and
+the RI column shows `—`.
 
 ### v2.1 — Native circle layer, live Rules panel, per-peak selection
 

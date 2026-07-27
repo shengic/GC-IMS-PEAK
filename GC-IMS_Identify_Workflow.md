@@ -3,6 +3,14 @@
 **Version: draft.20 — by Albert Sheng**
 **狀態：草稿，持續更新中，尚未定案**
 
+> **[實作狀態 2026-07-27 — 程式已 tag v3]** 第一~七階段皆已實作並可端到端執行。
+> **第四階段（RT→RI）已落地**：`calibration.py` + `reference_series.py` 自動從批次
+> STD 挑 6 個甲基酮錨點（DT_rel 階梯）、做 `log10(RT)` 分段線性內插（範圍外外插+標記），
+> 資料夾層級三態解析 + 快取，並串進 `identify.py` 與桌面 UI（RI 欄、線性 RI 熱圖軸；
+> x 軸 drift 正規化不動）。甲基酮 6 個 RI 值目前為**借用值**（`assumed_unverified`，見
+> `methyl_ketone_RI_provenance.md`）。數學細節見 `RT_to_RI_normalization_math.md`。
+> 本規劃文件仍為設計權威；此處只標「已實作到哪」，設計內容不因實作而改寫。
+
 本文件是 `GC-IMS-PEAK` 專案在 `readGAS.py` → `peaks.py` 之後，銜接「化合物比對」這一段的規劃文件。內容依據對 VOCal（G.A.S. 官方軟體）多支 plugin jar 反編譯逆向出的邏輯整理，逐項標明來源可信度：
 
 - **[VOCal 反編譯驗證]**：原始碼裡直接看到、或用真實資料測試過，可信度高
