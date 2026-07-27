@@ -1,6 +1,6 @@
 # GC-IMS 化合物比對工作流程 —— 第一版草稿
 
-**Version: draft.20 — by Albert Sheng**
+**Version: draft.22 — by Albert Sheng**
 **狀態：草稿，持續更新中，尚未定案**
 
 > **[實作狀態 2026-07-27 — 程式已 tag v3]** 第一~七階段皆已實作並可端到端執行。
@@ -207,9 +207,37 @@ identify.py 讀取順序：
 
 ---
 
-## 第四階段：RT→RI 轉換 —— 目前最大的缺口
+## 第四階段：RT→RI 轉換 —— 已實作（v3）
 
-**建議模組名稱**：`calibration.py`
+**模組**：`calibration.py` + `reference_series.py`
+
+> **[已實作 draft.22 — 對應 tag v3] 本階段已從「最大缺口」變成可端到端執行。**
+> 以下 1–14 點的設計與逆向調查全部保留（是決策的依據），此摘要說明「最後長成什麼樣」：
+>
+> - **找 6 個錨點（自動、免模板）**：`select_homolog_ladder(peaks, 6)` 從 STD 偵測到的
+>   ~9–14 個峰中，挑「DT_rel 嚴格遞增、間距最均勻、突出度最大」的 6 個同系物錨點
+>   （呼應第 5、8 點）。實測從 141215 STD 還原出文獻的 6 點（282/334/400/522/697/949s，
+>   DT_rel 間距 std 0.0034）。另有 `pin_anchors()` 可用已知 RT 模板釘定（第 5 點）。
+> - **化合物身分與 RI 值**：STD 為 C4–C9 甲基酮（第 13 點）。6 個 RI 值
+>   `[589.4,688.6,784.2,892.2,996.5,1095.6]` 目前為**借用值**（`assumed=True`、
+>   `confidence="borrowed_cross_referenced"`，只借 RI/Y、Rt/X 用本批實測），完整來源與
+>   升級條件見 `methyl_ketone_RI_provenance.md`。系列定義在 `reference_series.py`
+>   （`methyl_ketone`/`n_alkane`/`custom`，第 8 點的 `series_key` 架構）。
+> - **內插與外插**：`build_calibration()` 存 `log10(RT)` 錨點；`make_rt_to_ri()` 是
+>   **唯一共用**的 `RT→(RI, extrapolated)` 函式（peak 值與熱圖軸都走它，避免不一致）。
+>   範圍外**外插並標記**（`ri_extrapolated`），不 clamp（draft.21 定案）。數學與檢查清單
+>   見 `RT_to_RI_normalization_math.md`。
+> - **資料夾三態解析 + 快取**（第 12 點）：`resolve_ri_calibration()` =
+>   `batch_own_std` / `borrowed_from_registry`(`days_gap`) / `unavailable`，
+>   session + `_folder_calibration.json` sidecar 快取，跨檔案共用。品質前置過濾
+>   （第 6 點）用峰數 + 強度擋掉訊號缺失的 STD（如 012251）。
+> - **provenance**：`assumed_unverified` / `ri_confidence` / `ri_mode` / `ri_source`
+>   隨校正表與每個 peak 一路傳進 `_peaks.json`，與 Stage 2 `k0_mode` 對稱。
+> - **UI/顯示**：`identify.py` 串入本階段；桌面 UI 選資料夾即背景解析（STD 未偵測會
+>   自動先偵測）、峰表新增 **RI 欄**、所有熱圖 y 軸重採樣成**線性 RI 軸**
+>   （`warp_rows_to_ri`，非 log；x 軸 drift 正規化不動；`_bg.json` 記 `y_axis` 供 UI 擺圈）。
+>
+> **仍未定案**：RI 為借用值，升級成 verified 見 provenance 文件。以下原始設計/調查記錄保留。
 
 1. **問題**：VOCal 原始碼裡沒找到「現場計算」的公式，只找到已經算好、存在專案檔（`.gasprj`）裡的校準表：
 
@@ -731,7 +759,7 @@ peaks.py
 | # | 問題 | 卡住哪個階段 |
 |---|---|---|
 | 1 | 儀器常數（L/U/T/P）從哪來？ | 第二階段（K0 換算）——`L`/`U` 本輪已可從表頭取得，`T`/`P` 仍不確定 |
-| 2 | STD 標準品的化合物身分（不限於烷烴，甲基酮等其他同系物亦可）？ | 第四階段（RI 轉換）——本輪已確認 VOCal 的資料結構與 UI 都不記錄此資訊，只能靠證書/採購記錄/操作者紀錄，沒有的話整條鏈路退化成 `single_point_relative` 或只能用 Rt 秒數粗略比對 |
+| 2 | STD 標準品的化合物身分（不限於烷烴，甲基酮等其他同系物亦可）？ | 第四階段（RI 轉換）——**身分已確認為 C4–C9 甲基酮（draft.19）**；VOCal 資料結構與 UI 不記錄此資訊。6 個 RI 值目前用**借用值**（`assumed_unverified`，見 `methyl_ketone_RI_provenance.md`）跑通絕對 RI；**仍待**證書/文獻查證以升級成 verified（未到位前旗標維持 borrowed，不當既定事實） |
 | 3 | 有沒有 K0 校準標準品資料？ | 第二階段（`standard_based` 模式），沒有的話只能用帶殘留誤差的 `raw_parameters` 退路 |
 
 這些不是技術問題，是需要先盤點手上實際擁有的資料才能回答。
@@ -740,6 +768,8 @@ peaks.py
 
 ## 修訂記錄
 
+- **draft.22（對應程式 tag v3）**：第四階段由「最大缺口」改標為**已實作**，章節開頭新增「已實作」摘要（設計 1–14 點與逆向調查全數保留）。實際落地：`calibration.py` + `reference_series.py`——`select_homolog_ladder()` 自動挑 6 個甲基酮錨點（DT_rel 階梯，免模板；另有 `pin_anchors()` 模板釘定）；`methyl_ketone` 借用 6 個 RI 值（`assumed_unverified`，見 `methyl_ketone_RI_provenance.md`）；`make_rt_to_ri()` 為唯一共用 RT→RI 函式（外插+標記）；`resolve_ri_calibration()` 三態 + `_folder_calibration.json` 快取；串進 `identify.py` 與桌面 UI（RI 欄、`warp_rows_to_ri()` 線性 RI 熱圖軸，x 軸 drift 正規化不動）。測試 `test/test_calibration.py`（全套 125 項通過）。同步更新 `status.md`/`README.md`/`GC-IMS_Pipeline_Implementation.md`/`UI.md`。
+- **draft.21**：第四階段外插行為**定案**——邊界外「外插並標記」（`scipy.interp1d(fill_value='extrapolate')` + `ri_extrapolated` 旗標），不 clamp；理由是 clamp 會讓範圍外的峰全部壓到邊界值、失去 RI 區分度（悄悄丟資訊），外插保留區分度並由旗標讓下游分級。要求 `attach_ri()` 與熱圖軸共用同一個 `make_rt_to_ri()`/`interp_fn`，避免「峰表外插、軸 clamp」不一致。`RT_to_RI_normalization_math.md` 的參考實作與檢查清單同步改用 scipy 外插版、並標明手算範例（RT=450→644.1）為「內插演算法測試、非校準驗證」。
 - **draft.20**：第四階段新增第 14 點——RT→RI 套用步驟的數學細節獨立成 `RT_to_RI_normalization_math.md`（分段線性內插五步驟、手算範例可當單元測試、外插行為待決策），此處僅存指標與摘要，不重複完整推導。**同時修正 draft.19 編輯時誤刪的「## 第五階段：容許窗比對」標題**（上一版 str_replace 操作疏失，標題與內容被誤合併，本版已修復，第五階段以下章節內容本身未受影響）。
 
 - **draft.19**：第四階段新增第 13 點——使用者確認 STD 標準品為 C4–C9 甲基酮同系物（非烷烴），依 RT 對應 2-butanone→2-nonanone 六個錨點。明確標注精確 RI 值仍缺（甲基酮 RI 非定義式整百，需查證非極性管柱文獻值或證書），`series_key="methyl_ketone"` 可切換但 `ri_values` 查找表尚空，`single_point_relative` 仍是唯一可運作模式。
