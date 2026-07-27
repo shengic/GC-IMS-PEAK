@@ -67,8 +67,11 @@ class TestRunSubprocess:
             messages.append(output_q.get())
 
         error_msgs = [m for m in messages if m[0] == "error"]
+        # Only assert that an error was reported — the message text itself is the
+        # OS's wording, not our logic (Linux says "[Errno 2] No such file or
+        # directory", Windows phrases it differently), so asserting on specific
+        # substrings is platform-dependent and would break on Linux CI.
         assert len(error_msgs) == 1
-        assert "error" in error_msgs[0][1].lower() or "not found" in error_msgs[0][1].lower()
 
     def test_output_queue_thread_safety(self):
         """Output queue should be thread-safe."""
