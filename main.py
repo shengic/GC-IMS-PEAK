@@ -1990,7 +1990,7 @@ class GCIMSApp:
                     "—" if libval is None else f"{libval:g}",
                     "—" if delta is None else f"{delta:.3g}", src)
 
-        # ±10 RI on a 100k-row library can return hundreds of hits; cap each group
+        # ±5 RI on a 100k-row library can return hundreds of hits; cap each group
         # at the closest MAX_PER (already delta-sorted) to stay usable.
         MAX_PER = 150
         total = len(combined) + len(gc_only) + len(ims_only)

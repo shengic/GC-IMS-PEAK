@@ -31,7 +31,7 @@ workflow §第三階段第 4 點），不需要在此另外處理。
 # --------------------------------------------------------------------------- #
 # 預設容許窗寬度（佔位值，未校準；workflow §第五階段第 4 點）
 # --------------------------------------------------------------------------- #
-DEFAULT_RI_TOLERANCE = 10.0
+DEFAULT_RI_TOLERANCE = 5.0     # RI 絕對容差（單位）
 DEFAULT_RT_TOLERANCE = 5.0     # 秒
 DEFAULT_K0_TOLERANCE = 0.05
 DEFAULT_DRIFTREL_TOLERANCE = 0.05   # 漂移相對 RIP（RIPrel）；佔位值，未校準
