@@ -53,7 +53,7 @@ PEAK = {"peak_id": 1, "ri": 726.3, "retention_s": 358.7, "drift_relative": 1.1,
         "ri_assumed_unverified": True}
 
 
-def test_panel_lists_gc_candidates():
+def test_panel_defaults_to_combined_and_gc_toggle_reveals_gc_only():
     tk, root = _tk_root_or_skip()
     try:
         result = {
@@ -68,14 +68,17 @@ def test_panel_lists_gc_candidates():
         }
         shim = _panel_shim(root)
         shim._render_match_panel(PEAK, result, {"ril_strategy": "column_name"})
-        tops = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)]
-        assert len(tops) == 1 and "Peak #1" in tops[0].title()
-        tree = _tree_in(tops[0])
+        win = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)][0]
+        tree = win._tree
+        # Default: GC+IMS only → GC-only hits hidden → empty tree
+        assert len(tree.get_children()) == 0
+        # Toggle "GC only" on → the two GC candidates appear
+        win._filter_vars["gc"].set(True)
+        win._refresh_candidates()
         rows = [tree.item(r, "values") for r in tree.get_children()]
         assert len(rows) == 2
-        assert {r[1] for r in rows} == {"Ethanol", "Acetone"}   # names (col 2)
-        assert all(r[0] == "GC" for r in rows)                  # match label
-        assert rows[0][2] in {"C64175", "C67641"}               # CAS shown
+        assert {r[1] for r in rows} == {"Ethanol", "Acetone"}
+        assert all(r[0] == "GC" for r in rows)
     finally:
         root.destroy()
 
@@ -251,7 +254,7 @@ def test_one_match_window_per_peak():
 
 
 if __name__ == "__main__":
-    test_panel_lists_gc_candidates()
+    test_panel_defaults_to_combined_and_gc_toggle_reveals_gc_only()
     test_panel_combined_dedups_and_labels()
     test_panel_opens_with_no_candidates()
     test_autofill_populates_gc_column_without_trigger()

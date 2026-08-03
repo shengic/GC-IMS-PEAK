@@ -46,7 +46,7 @@ import threading
 from enum import Enum
 from pathlib import Path
 from tkinter import (
-    filedialog, messagebox, ttk, Canvas, Frame, Label, Tk, Text, END,
+    filedialog, messagebox, ttk, Canvas, Checkbutton, Frame, Label, Tk, Text, END,
     Toplevel, Menu, BooleanVar, StringVar, TclError,
 )
 from tkinter.ttk import Treeview, PanedWindow
@@ -1940,6 +1940,16 @@ class GCIMSApp:
                   fg="firebrick", anchor="w", font=("Georgia", 8), bg="white"
                   ).pack(fill="x", padx=8)
 
+        # ---- group filter checkboxes (default: GC+IMS only) ----
+        # We mostly care about the two-axis "combined" hits; GC-only / IMS-only can
+        # be toggled on when wanted. Counts are shown so it's clear what's hidden.
+        filt = Frame(win, bg="white")
+        filt.pack(fill="x", padx=8, pady=(2, 0))
+        Label(filt, text="Show:", bg="white", font=("Georgia", 8)).pack(side="left")
+        show_comb = BooleanVar(value=True)     # GC+IMS on by default
+        show_gc = BooleanVar(value=False)
+        show_ims = BooleanVar(value=False)
+
         # ---- candidates tree ----
         cols = ("match", "name", "cas", "formula", "libval", "delta", "source")
         headers = {"match": "Match", "name": "Compound", "cas": "CAS",
@@ -1957,6 +1967,11 @@ class GCIMSApp:
         tree.configure(yscrollcommand=vs.set)
         tree.pack(side="left", fill="both", expand=True)
         vs.pack(side="right", fill="y")
+        tree.tag_configure("combined", background="#e7f5e7")
+
+        foot_lbl = Label(win, justify="left", anchor="w",
+                         font=("Georgia", 8), fg="gray30", bg="white")
+        foot_lbl.pack(fill="x", padx=8, pady=(0, 8))
 
         def _row(cand, label):
             name = cand.get("Name") or cand.get("NAME") or "?"
@@ -1975,30 +1990,46 @@ class GCIMSApp:
                     "—" if libval is None else f"{libval:g}",
                     "—" if delta is None else f"{delta:.3g}", src)
 
-        # ±10 RI on a 100k-row library can return hundreds of hits; show the
-        # closest MAX_PER of each branch (already delta-sorted) to stay usable.
+        # ±10 RI on a 100k-row library can return hundreds of hits; cap each group
+        # at the closest MAX_PER (already delta-sorted) to stay usable.
         MAX_PER = 150
-        tree.tag_configure("combined", background="#e7f5e7")
-        for c in combined:
-            tree.insert("", "end", values=_row(c, "GC+IMS"), tags=("combined",))
-        for c in gc_only[:MAX_PER]:
-            tree.insert("", "end", values=_row(c, "GC"))
-        for c in ims_only[:MAX_PER]:
-            tree.insert("", "end", values=_row(c, "IMS"))
-
         total = len(combined) + len(gc_only) + len(ims_only)
-        shown = len(combined) + min(len(gc_only), MAX_PER) + min(len(ims_only), MAX_PER)
-        trunc = "" if shown == total else f" — showing closest {shown} of {total}"
-        foot = (f"{total} candidate(s) within tolerance{trunc} "
-                f"(RI ±{match.DEFAULT_RI_TOLERANCE:g}, "
-                f"Rt ±{match.DEFAULT_RT_TOLERANCE:g}s, "
-                f"drift ±{match.DEFAULT_DRIFTREL_TOLERANCE:g}, "
-                f"K0 ±{match.DEFAULT_K0_TOLERANCE:g}; sorted by Δ).  "
-                f"GC lib strategy: {select_info.get('ril_strategy', '?')}"
+
+        def refresh(*_):
+            tree.delete(*tree.get_children())
+            shown = 0
+            if show_comb.get():
+                for c in combined:
+                    tree.insert("", "end", values=_row(c, "GC+IMS"), tags=("combined",))
+                shown += len(combined)
+            if show_gc.get():
+                for c in gc_only[:MAX_PER]:
+                    tree.insert("", "end", values=_row(c, "GC"))
+                shown += min(len(gc_only), MAX_PER)
+            if show_ims.get():
+                for c in ims_only[:MAX_PER]:
+                    tree.insert("", "end", values=_row(c, "IMS"))
+                shown += min(len(ims_only), MAX_PER)
+            foot_lbl.config(text=(
+                f"Showing {shown} of {total} candidate(s) "
+                f"(RI ±{match.DEFAULT_RI_TOLERANCE:g}, Rt ±{match.DEFAULT_RT_TOLERANCE:g}s, "
+                f"drift ±{match.DEFAULT_DRIFTREL_TOLERANCE:g}, K0 ±{match.DEFAULT_K0_TOLERANCE:g}; "
+                f"sorted by Δ, each group capped at {MAX_PER}).  "
+                f"GC lib: {select_info.get('ril_strategy', '?')}"
                 + ("" if total else
-                   "  —  nothing matched; widen tolerance or check RI calibration."))
-        Label(win, text=foot, justify="left", anchor="w",
-              font=("Georgia", 8), fg="gray30", bg="white").pack(fill="x", padx=8, pady=(0, 8))
+                   "  Nothing matched; widen tolerance or check RI calibration.")))
+
+        for var, lab, n in ((show_comb, "GC×IMS", len(combined)),
+                            (show_gc, "GC only", len(gc_only)),
+                            (show_ims, "IMS only", len(ims_only))):
+            Checkbutton(filt, text=f"{lab} ({n})", variable=var, bg="white",
+                        font=("Georgia", 8), command=refresh).pack(side="left", padx=4)
+
+        refresh()
+        # Hooks for tests / programmatic control of the group filter.
+        win._filter_vars = {"combined": show_comb, "gc": show_gc, "ims": show_ims}
+        win._refresh_candidates = refresh
+        win._tree = tree
 
     def generate_numbered_overlay(self):
         """Invoke peak_with_number.py to render an overlay with peak-id numbers."""
