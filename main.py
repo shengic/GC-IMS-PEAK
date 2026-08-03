@@ -736,7 +736,7 @@ class GCIMSApp:
         col_widths = {
             "peak_id": 30, "drift_ms": 55, "drift_relative": 60,
             "retention_s": 60, "ri": 55, "intensity": 55,
-            "on": 35, "gc_ims": 60, "gc": 130, "ims": 40, "trigger": 25,
+            "on": 35, "gc_ims": 60, "gc": 78, "ims": 40, "trigger": 25,
         }
         for col in PEAK_TABLE_COLUMNS:
             width = col_widths.get(col, 100)
