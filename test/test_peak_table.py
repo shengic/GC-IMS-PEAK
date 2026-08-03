@@ -37,21 +37,24 @@ class TestPeakTableColumns:
 
     def test_peak_table_columns_defined(self):
         """Required columns should be defined."""
-        for col in ("peak_id", "drift_ms", "drift_relative", "retention_s",
-                    "intensity", "on", "gc_ims", "gc", "ims", "trigger"):
+        for col in ("peak_id", "drift_relative", "ri", "intensity",
+                    "on", "gc_ims", "gc", "ims", "trigger"):
             assert col in PEAK_TABLE_COLUMNS
+        # raw Drift time [ms] / Retention time [s] moved to the ▶ popup
+        assert "drift_ms" not in PEAK_TABLE_COLUMNS
+        assert "retention_s" not in PEAK_TABLE_COLUMNS
 
     def test_peak_table_column_order(self):
-        """Column order (第四階段：ri column inserted after retention_s):
-             # | drift_ms | drift_relative | retention_s | RI | intensity | On | GC×IMS | GC | IMS | ▶
+        """Column order (raw drift_ms/retention_s dropped → ▶ popup):
+             # | Drift rel. RIP | RI | Intensity | On | GC×IMS | GC (RI) | IMS | ▶
         """
-        expected = ("peak_id", "drift_ms", "drift_relative", "retention_s", "ri",
+        expected = ("peak_id", "drift_relative", "ri",
                     "intensity", "on", "gc_ims", "gc", "ims", "trigger")
         assert PEAK_TABLE_COLUMNS == expected
 
     def test_peak_table_columns_length(self):
-        """Peak table has 11 columns (10 + ri for RT→RI 第四階段)."""
-        assert len(PEAK_TABLE_COLUMNS) == 11
+        """9 columns after dropping raw drift_ms / retention_s."""
+        assert len(PEAK_TABLE_COLUMNS) == 9
 
 
 class TestCellValueLogic:

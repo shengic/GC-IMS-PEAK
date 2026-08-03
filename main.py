@@ -122,8 +122,11 @@ COORD_LABELS = {
 # Full column layout per workflow §第八階段 draft.12 (drift_relative inserted
 # after drift_ms per this session's decision). Match values (gc_ims/gc/ims) are
 # placeholders "—" until Batch 5 wires identify.py into main.py.
+# Raw Drift time [ms] and Retention time [s] were moved out of the table into the
+# ▶ popup (they duplicate the normalized Drift rel. RIP / RI columns). Dropping
+# them frees width so the ▶ trigger column is visible.
 PEAK_TABLE_COLUMNS = (
-    "peak_id", "drift_ms", "drift_relative", "retention_s", "ri", "intensity",
+    "peak_id", "drift_relative", "ri", "intensity",
     "on", "gc_ims", "gc", "ims", "trigger",
 )
 
@@ -684,8 +687,11 @@ class GCIMSApp:
         self.file_tree.bind("<<TreeviewSelect>>", self.on_file_selected)
 
         # ---- Center pane: main image (heatmap → overlay after detection) ---
+        # weight 2 (was 3): narrower heatmap pane so the peak table (right) gets
+        # more width and the ▶ trigger column is revealed. Heatmap image still
+        # fits/scrolls within its canvas.
         center_frame = Frame(main_pane, bg="white")
-        main_pane.add(center_frame, weight=3)
+        main_pane.add(center_frame, weight=2)
 
         self.main_canvas_label = Label(
             center_frame, text="(no file loaded)", bg="white", font=("Georgia", 9),
@@ -710,7 +716,7 @@ class GCIMSApp:
 
         # ---- Right pane: peak table ----------------------------------------
         right_frame = Frame(main_pane, bg="white")
-        main_pane.add(right_frame, weight=2)
+        main_pane.add(right_frame, weight=3)   # wider table (was 2) → shows ▶
         table_frame = right_frame
 
         self.peaks_header_label = Label(table_frame, text="Detected Peaks:", bg="white", font=("Georgia", 9))
@@ -734,9 +740,8 @@ class GCIMSApp:
 
         # Configure column widths and alignment
         col_widths = {
-            "peak_id": 30, "drift_ms": 55, "drift_relative": 60,
-            "retention_s": 60, "ri": 55, "intensity": 55,
-            "on": 35, "gc_ims": 130, "gc": 78, "ims": 78, "trigger": 25,
+            "peak_id": 30, "drift_relative": 70, "ri": 60, "intensity": 60,
+            "on": 35, "gc_ims": 140, "gc": 90, "ims": 90, "trigger": 40,
         }
         for col in PEAK_TABLE_COLUMNS:
             width = col_widths.get(col, 100)
@@ -1899,9 +1904,11 @@ class GCIMSApp:
         ims_txt = {"drift_rel": f"drift vs RIP-relative ({len(ims_hits)} hit(s))",
                    "k0": f"K0 ({len(ims_hits)} hit(s))",
                    None: "no drift hit within tolerance"}.get(ims_dim, str(ims_dim))
-        head = (f"Peak #{peak.get('peak_id')}   "
-                f"RI={ri_txt}   Rt={peak.get('retention_s', '—')}s   "
-                f"Drift(rel RIP)={peak.get('drift_relative', '—')}\n"
+        head = (f"Peak #{peak.get('peak_id')}   RI={ri_txt}   "
+                f"Intensity={peak.get('intensity', '—')}\n"
+                f"Retention time={peak.get('retention_s', '—')} s   "
+                f"Drift time={peak.get('drift_ms', '—')} ms   "
+                f"Drift rel. RIP={peak.get('drift_relative', '—')}\n"
                 f"GC: {dim_txt}   |   IMS: {ims_txt}   |   combined (both axes): {len(combined)}")
         Label(win, text=head, justify="left", anchor="w",
               font=("Georgia", 9), bg="white").pack(fill="x", padx=8, pady=(8, 2))
