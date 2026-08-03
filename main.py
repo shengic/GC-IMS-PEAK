@@ -1926,11 +1926,11 @@ class GCIMSApp:
         ims_txt = {"drift_rel": f"drift vs RIP-relative ({len(ims_hits)} hit(s))",
                    "k0": f"K0 ({len(ims_hits)} hit(s))",
                    None: "no drift hit within tolerance"}.get(ims_dim, str(ims_dim))
-        head = (f"Peak #{peak.get('peak_id')}   RI={ri_txt}   "
-                f"Intensity={peak.get('intensity', '—')}\n"
+        head = (f"Peak #{peak.get('peak_id')}   "
+                f"Drift rel. RIP={peak.get('drift_relative', '—')}   RI={ri_txt}\n"
+                f"Intensity={peak.get('intensity', '—')}   "
                 f"Retention time={peak.get('retention_s', '—')} s   "
-                f"Drift time={peak.get('drift_ms', '—')} ms   "
-                f"Drift rel. RIP={peak.get('drift_relative', '—')}\n"
+                f"Drift time={peak.get('drift_ms', '—')} ms\n"
                 f"GC: {dim_txt}   |   IMS: {ims_txt}   |   combined (both axes): {len(combined)}")
         Label(win, text=head, justify="left", anchor="w",
               font=("Georgia", 9), bg="white").pack(fill="x", padx=8, pady=(8, 2))
