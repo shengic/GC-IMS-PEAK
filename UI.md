@@ -1312,6 +1312,22 @@ If the renderer fails, the UI falls back silently to the plain overlay.
 
 *(Consolidated from the former `UI_IMPROVEMENTS.md`.)*
 
+### Post-v3 — Compound matching in the peak table (Stage 10, 2-D)
+
+The peak table's identification columns are now live and auto-filled (no ▶ click):
+
+- **GC (RI)** — the closest library RI value + Δ, to read against the peak's own RI.
+- **IMS** — the closest **drift** value + Δ, matched via `DtMode="RIPrel"` (peak
+  `drift_relative` vs library `Dt[a.u.]`), i.e. **no K0 calibration needed**.
+- **GC×IMS** — the compound that matches on **both** axes (the "combined" result);
+  intersecting RI and drift collapses hundreds of RI-only hits to a few.
+
+Matching runs `match.match_all` for every peak once (background, cached per file by
+coordinate) after the libraries load; ▶ opens the full candidate list. All `.iml`
+files are loaded for the drift dimension (drift is instrument-relative, not
+GC-column-specific). Caveats surfaced: peak RI is borrowed/assumed, and the
+tolerances (RI ±10, drift ±0.05) are placeholders.
+
 ### v3 — Stage 4 RT→RI in the UI
 
 Implements Identify-Workflow **stage 4** (RT→RI) end-to-end in the desktop app.

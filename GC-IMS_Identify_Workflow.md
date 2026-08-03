@@ -355,16 +355,28 @@ identify.py 讀取順序：
 
 ## 第五階段：容許窗比對
 
-**建議模組名稱**：`match.py`
+**模組**：`match.py`
+
+> **[已實作，本輪更新] 漂移軸改走 RIPrel（免 K0）。** 掃描 `.iml` 庫發現漂移多以
+> `DtMode="RIPrel"`（相對 RIP 的漂移）儲存——與峰的 `drift_relative` 同一物理量、
+> 單位一致。因此 IMS 維度**不必等 K0 校準**即可運作：`match_drift_rel()` 直接用
+> `peak.drift_relative` 比對 `DtMode=="RIPrel"` 的 `Dt[a.u.]`（±0.05 佔位）。`match_all`
+> 的 IMS 分支優先 K0（有 `k0_value` 時，比對 `DtMode` 含 "K0"），否則走 RIPrel 漂移；
+> 回傳新增 `ims_dimension`（`"k0"`/`"drift_rel"`/None）。`.iml` 對 IMS 而言不綁 GC 管柱，
+> 故比對時載入**全部** `.iml`（DtMode 篩選確保 RIPrel 與 1/K0 不混比）。實測咖啡樣品
+> 33 個峰因此取得 combined 命中（如 RI 1097/漂移 1.139 → Guaiacol）。UI 三欄
+> GC(RI)/IMS/GC×IMS 對應顯示：最近 RI 值、最近漂移值、兩軸皆中的化合物。
 
 1. **核心邏輯** **[VOCal 反編譯驗證]**（`S.h()`）：`center ± tolerance` 區間判斷
 2. **兩個獨立維度**：
-   - RI 維度：`peak_ri` vs `.ril`/`.iml` 的 `RI` 欄位
-   - K0/Dt 維度：`peak_k0` vs `.iml` 的 `Dt[a.u.]` 欄位（須先篩選 `DtMode` 相符項目才比較）
+   - GC/RI 維度：`peak_ri` vs `.ril`/`.iml` 的 `RI` 欄位（無 RI 時退 `Rt[sec]`）
+   - IMS 維度：優先 `peak_k0` vs `Dt[a.u.]`（`DtMode` 含 K0）；否則
+     `peak.drift_relative` vs `Dt[a.u.]`（`DtMode=="RIPrel"`）——**免 K0 校準**
 3. **輸出三個候選清單** **[設計沿用，非逐字反編譯]**：
-   - `gc_matches`：只有 RI 命中
-   - `ims_matches`：只有 K0 命中
-   - `combined_matches`：RI 與 K0 都命中且為同一 CAS 的交集
+   - `gc_matches`：只有 GC（RI/RT）命中
+   - `ims_matches`：只有 IMS（K0 或 RIPrel 漂移）命中
+   - `combined_matches`：GC 與 IMS 都命中且為同一 CAS 的交集（**最可信**，兩軸交集
+     把 RI 單軸的數百候選收斂到少數）
 4. **[待決策]** 容許窗寬度：
    - VOCal 是使用者手動輸入，本專案可考慮做成固定值、或依 `peaks.py` 已算出的 `flatness`/`prominence` 動態調整
    - 沒有「正確答案」，需要拿幾個已知化合物的真實資料試跑校準
