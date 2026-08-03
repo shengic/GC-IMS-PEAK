@@ -112,16 +112,21 @@ class TestCellValueLogic:
         peak = {"matches": {"combined_matches": [{"Name": "Diacetyl", "CAS": "C1"}]}}
         assert app._cell_value("gc_ims", peak) == "Diacetyl"
 
-    def test_gc_column_counts_gc_only(self):
+    def test_gc_column_shows_best_match_and_value(self):
         app = self._mock_app()
         # No matches → "—" (not run)
         assert app._cell_value("gc", {}) == "—"
-        # 3 gc hits, 1 in combined → 2 gc-only
-        peak = {"matches": {
-            "gc_matches": [{"CAS": "A"}, {"CAS": "B"}, {"CAS": "C"}],
-            "combined_matches": [{"CAS": "A"}],
-        }}
-        assert app._cell_value("gc", peak) == "2"
+        # Shows the closest (delta-sorted [0]) hit: name · RI value · (total count)
+        peak = {"matches": {"combined_matches": [], "gc_matches": [
+            {"Name": "Ethanol", "CAS": "A", "RI": 720.0, "delta_ri": 0.1,
+             "match_dimensions": ["ri"]},
+            {"NAME": "Acetone", "CAS": "B", "RI": 721.0, "delta_ri": 1.1,
+             "match_dimensions": ["ri"]},
+        ]}}
+        v = app._cell_value("gc", peak)
+        assert v.startswith("Ethanol")     # best match name
+        assert "RI 720" in v               # the matched library value
+        assert "(2)" in v                  # total candidate count
 
     def test_ims_dash_when_k0_unavailable(self):
         app = self._mock_app()

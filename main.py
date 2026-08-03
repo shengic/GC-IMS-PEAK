@@ -114,7 +114,7 @@ COORD_LABELS = {
     # Batch 2: identification columns
     "on": "On",
     "gc_ims": "GC×IMS",
-    "gc": "GC",
+    "gc": "GC match (best, by RI)",
     "ims": "IMS",
     "trigger": "▶",
 }
@@ -732,7 +732,7 @@ class GCIMSApp:
         col_widths = {
             "peak_id": 30, "drift_ms": 55, "drift_relative": 60,
             "retention_s": 60, "ri": 55, "intensity": 55,
-            "on": 35, "gc_ims": 100, "gc": 35, "ims": 35, "trigger": 25,
+            "on": 35, "gc_ims": 60, "gc": 210, "ims": 40, "trigger": 25,
         }
         for col in PEAK_TABLE_COLUMNS:
             width = col_widths.get(col, 100)
@@ -1616,12 +1616,25 @@ class GCIMSApp:
                 return combined[0].get("Name") or combined[0].get("NAME") or "?"
             return "—"
         if col == "gc":
+            # Show the closest library match (name + the value it matched on) so
+            # the table carries the actual GC hit, not just a count. Full list is
+            # in the ▶ panel. gc_hits are delta-sorted; [0] is the closest.
             gc_hits = m.get("gc_matches")
-            if gc_hits is None:
+            if not gc_hits:
                 return "—"
-            combined_cas = {c.get("CAS") for c in (m.get("combined_matches") or [])}
-            return str(sum(1 for h in gc_hits if h.get("CAS") not in combined_cas))
+            best = gc_hits[0]
+            name = best.get("Name") or best.get("NAME") or "?"
+            if "rt" in best.get("match_dimensions", []):
+                val, lab = best.get("Rt[sec]"), "Rt"
+            else:
+                val, lab = best.get("RI"), "RI"
+            tail = f" · {lab} {val:g}" if val is not None else ""
+            more = f"  ({len(gc_hits)})" if len(gc_hits) > 1 else ""
+            return f"{name}{tail}{more}"
         if col == "ims":
+            # "—" when the K0 dimension is unavailable (no calibration), which is
+            # the current state — peaks are tagged k0_mode="unavailable" at match
+            # time. "0" is reserved for "K0 available but no hit".
             if peak.get("k0_mode") == "unavailable":
                 return "—"
             ims_hits = m.get("ims_matches")
@@ -1709,7 +1722,7 @@ class GCIMSApp:
         until a K0 calibration profile is available.
         """
         if self.state.library_rows is not None:
-            self._show_match_panel(peak)
+            self._match_all_peaks_then_show(peak)
             return
         self.status_label.config(text="Loading compound libraries…")
         q = queue.Queue()
@@ -1748,17 +1761,58 @@ class GCIMSApp:
             self.status_label.config(
                 text=f"✓ Libraries loaded ({len(ril_rows):,} .ril + "
                      f"{len(iml_rows):,} .iml rows)")
-            self._show_match_panel(peak)
+            self._match_all_peaks_then_show(peak)
         else:
             messagebox.showwarning("Library load failed", payload)
             self.status_label.config(text="Compound library load failed")
 
-    def _show_match_panel(self, peak):
-        """Run match_all for `peak` against the cached libraries and render."""
-        import match
+    def _match_all_peaks_then_show(self, peak):
+        """Match *every* peak against the cached libraries (background), so the
+        GC column fills in for the whole table, then open the panel for `peak`."""
         ril_rows, iml_rows, select_info = self.state.library_rows
-        result = match.match_all(peak, ril_rows, iml_rows)
-        self._render_match_panel(peak, result, select_info)
+        peaks = list(self.state.peaks)
+        if peaks and all("matches" in p for p in peaks):   # already matched
+            self._render_match_panel(peak, peak.get("matches") or {}, select_info)
+            return
+        self.status_label.config(text="Matching peaks against libraries…")
+        q = queue.Queue()
+
+        def work():
+            import match
+            for p in peaks:
+                if "matches" not in p:
+                    p["matches"] = match.match_all(p, ril_rows, iml_rows)
+                    # We do not compute K0 here (no calibration profile), so mark
+                    # the IMS dimension unavailable → the IMS column reads "—".
+                    p.setdefault("k0_mode", "unavailable")
+            q.put("done")
+
+        threading.Thread(target=work, daemon=True).start()
+        self._poll_matches(q, peak, select_info)
+
+    def _poll_matches(self, q, peak, select_info):
+        """Wait for background matching, refresh the table, open the panel."""
+        try:
+            q.get_nowait()
+        except queue.Empty:
+            self.root.after(100, lambda: self._poll_matches(q, peak, select_info))
+            return
+        self._refresh_match_columns()
+        self.status_label.config(
+            text="✓ Compound matches ready — GC column shows the closest RI hit")
+        self._render_match_panel(peak, peak.get("matches") or {}, select_info)
+
+    def _refresh_match_columns(self):
+        """Re-render every table row now that peaks carry `matches`."""
+        for item in self.peak_tree.get_children():
+            vals = self.peak_tree.item(item, "values")
+            try:
+                pid = int(vals[0])
+            except (ValueError, TypeError, IndexError):
+                continue
+            p = self._peak_by_id(pid)
+            if p is not None:
+                self._refresh_row(item, p)
 
     def _render_match_panel(self, peak, result, select_info):
         """Toplevel listing candidate compounds (combined / GC-only / IMS-only)."""
