@@ -381,6 +381,89 @@ identify.py 讀取順序：
    - VOCal 是使用者手動輸入，本專案可考慮做成固定值、或依 `peaks.py` 已算出的 `flatness`/`prominence` 動態調整
    - 沒有「正確答案」，需要拿幾個已知化合物的真實資料試跑校準
 
+### 5.1 漂移軸（IMS）比對怎麼找到化合物——數學式與流程圖
+
+**先講清楚一個關鍵：兩邊比的是同一個「相對 RIP 的無因次比值」，不是絕對漂移時間。**
+
+**（a）峰的漂移相對值 $d_p$（第一階段產出）**
+
+反應離子峰（RIP）在漂移軸上的取樣點索引：
+
+$$r = \arg\max_{j \ge 200} \; I[0,\,j]$$
+
+（取 RT=0 那一列、跳過前 200 點後的最大值位置。）每個峰用自己的漂移索引 $j_p$（`dt_index`）除以 $r$，得到相對值：
+
+$$d_p = \frac{j_p}{r}$$
+
+所以 RIP 本身 $d_p = 1.0$；$d_p = 1.13$ 代表「比 RIP 多跑 13%」。這是**無因次比值**，不受取樣率、管長、溫壓影響。
+
+**（b）資料庫的漂移值 $d_\ell$**
+
+`.iml` 庫每一列的 `Dt[a.u.]` 存的漂移值，其單位由同列的 `DtMode` 標記。同一個化合物可能以不同慣例出現：
+
+| `DtMode` | `Dt[a.u.]` 的意義 | 能不能直接跟 $d_p$ 比 |
+| --- | --- | --- |
+| `RIPrel` | 相對 RIP 的比值（庫自己量的 $j_\ell / r_\ell$） | **可以**，同為無因次比值 |
+| `1/K0` | 逆約化遷移率 | 不行，要先做 K0 校準 |
+| `ms` | 原始漂移時間（毫秒） | 不行，單位不同 |
+
+因此比對前先用 `DtMode == "RIPrel"` 過濾，只留下與 $d_p$ **同單位**的列（`match_drift_rel()` 的第一道關卡）。
+
+**（c）比對條件（容許窗）**
+
+對每一個通過 `RIPrel` 過濾的庫列，計算誤差並判斷是否落窗：
+
+$$\Delta_d(\ell) = \bigl|\, d_\ell - d_p \,\bigr| \qquad\text{命中} \iff \Delta_d(\ell) \le \tau_d,\quad \tau_d = 0.05$$
+
+命中的列依 $\Delta_d$ 由小到大排序，最相近的排最前——那一筆的 $d_\ell$ 就填進 UI 的 **IMS** 欄（如 `1.139 (Δ0.026)`）。
+
+**（d）雙軸交集 → 真正的 GC×IMS 鑑定**
+
+單看漂移只說「有化合物漂移位置接近」；可信的鑑定來自和 GC/RI 軸取交集。RI 軸的命中條件同型：
+
+$$\Delta_{RI}(\ell) = \bigl|\, RI_\ell - RI_p \,\bigr| \le \tau_{RI},\quad \tau_{RI} = 5$$
+
+`combine_by_cas()` 以 **CAS 號**為鍵，找「同一個 CAS 同時出現在 RI 命中清單與漂移命中清單」的化合物：
+
+$$
+\text{combined} = \Bigl\{\, c \;\Big|\;
+\underbrace{\exists\,\ell_{gc}:\ \mathrm{CAS}(\ell_{gc})=c,\ \Delta_{RI}(\ell_{gc}) \le \tau_{RI}}_{\text{GC 軸中}}
+\ \wedge\
+\underbrace{\exists\,\ell_{ims}:\ \mathrm{CAS}(\ell_{ims})=c,\ \Delta_{d}(\ell_{ims}) \le \tau_{d}}_{\text{IMS 軸中}}
+\,\Bigr\}
+$$
+
+交集結果依綜合誤差 $\Delta_{RI} + \Delta_d$ 排序，填進 **GC×IMS** 欄。兩軸同時吻合，把 RI 單軸動輒數百個候選收斂到少數幾個。
+
+**流程圖（`match_all` 對單一峰）**
+
+```mermaid
+flowchart TD
+    P["峰 peak<br/>d_p = drift_relative<br/>RI_p = ri"] --> GC{"有 RI_p ?"}
+
+    subgraph GCaxis["GC / RI 軸"]
+        GC -- 是 --> MRI["match_ri：掃 .ril + .iml<br/>命中 ⟺ |RI_ℓ − RI_p| ≤ 5<br/>存 Δ_RI，依 Δ_RI 排序"]
+        GC -- 否，但有 retention_s --> MRT["match_rt 退路<br/>|Rt_ℓ − Rt_p| ≤ 5s"]
+    end
+
+    P --> IMS{"有 k0_value ?"}
+    subgraph IMSaxis["IMS / 漂移軸"]
+        IMS -- 是 --> MK0["match_k0：DtMode 含 K0<br/>|Dt_ℓ − k0_p| ≤ 0.05<br/>（需 K0 校準，目前休眠）"]
+        IMS -- "否，但有 d_p" --> MDR["match_drift_rel<br/>① 先篩 DtMode == RIPrel<br/>② 命中 ⟺ |Dt_ℓ − d_p| ≤ 0.05<br/>存 Δ_d，依 Δ_d 排序"]
+    end
+
+    MRI --> GCH["gc_matches"]
+    MRT --> GCH
+    MK0 --> IMSH["ims_matches"]
+    MDR --> IMSH
+
+    GCH --> CB["combine_by_cas<br/>取兩清單「同 CAS」交集<br/>依 Δ_RI + Δ_d 排序"]
+    IMSH --> CB
+    CB --> OUT["combined_matches → GC×IMS 欄<br/>（最可信：兩軸皆中）"]
+```
+
+> **目前狀態**：K0 分支休眠（無校準標準品），所以 IMS 軸實際走 `match_drift_rel`（RIPrel）。$\tau_d = 0.05$ 與 $\tau_{RI} = 5$ 皆為未校準佔位值，需拿已知化合物真實資料驗證。
+
 ---
 
 ## 第六階段：整合輸出
