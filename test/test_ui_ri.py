@@ -172,6 +172,21 @@ def test_calibration_ready_ignored_after_folder_change():
     assert shim.status_label.texts == []             # no status update either
 
 
+def test_apply_cached_matches_by_coordinate():
+    shim = _bind("_apply_cached_matches")
+    shim.state = AppState()
+    shim.state.match_cache = {
+        (100, 50): {"gc_matches": [{"RI": 726.0, "delta_ri": 0.3,
+                                    "match_dimensions": ["ri"]}]},
+    }
+    peaks = [{"rt_index": 100, "dt_index": 50},   # cached
+             {"rt_index": 999, "dt_index": 9}]    # not cached
+    shim._apply_cached_matches(peaks)
+    assert peaks[0]["matches"]["gc_matches"][0]["RI"] == 726.0
+    assert peaks[0]["k0_mode"] == "unavailable"    # IMS marked unavailable
+    assert "matches" not in peaks[1]               # uncached row untouched
+
+
 def test_folder_cal_status_only_when_still_on_folder():
     shim = _bind("_folder_cal_status")
     shim.state = AppState()

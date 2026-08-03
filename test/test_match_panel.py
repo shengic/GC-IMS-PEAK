@@ -113,8 +113,64 @@ def test_panel_opens_with_no_candidates():
         root.destroy()
 
 
+def test_autofill_populates_gc_column_without_trigger():
+    """The GC (RI) column fills on its own (no ▶ click): _autofill_gc_matches
+    matches the peaks against the loaded libraries and refreshes the table."""
+    import time
+    tk, root = _tk_root_or_skip()
+    try:
+        from tkinter.ttk import Treeview
+        from main import AppState, PEAK_TABLE_COLUMNS
+
+        class _Shim:
+            pass
+        app = _Shim()
+        app.root = root
+        app.state = AppState()
+        # tiny synthetic library: Ethanol RI 726 is within ±10 of the peak's 726.3
+        app.state.library_rows = (
+            [{"NAME": "Ethanol", "CAS": "A", "RI": 726.0},
+             {"NAME": "Nonanal", "CAS": "B", "RI": 1100.0}], [], {"ril_strategy": "t"})
+        app.peak_tree = Treeview(root, columns=PEAK_TABLE_COLUMNS, show="headings")
+
+        class _L:
+            def config(self, **k):
+                pass
+        app.status_label = _L()
+        for name in ("_apply_cached_matches", "_autofill_gc_matches", "_match_and_cache",
+                     "_poll_match_and_cache", "_ensure_libraries_then", "_poll_libraries",
+                     "_refresh_match_columns", "_cell_value", "_peak_by_id", "_refresh_row"):
+            setattr(app, name, getattr(GCIMSApp, name).__get__(app, _Shim))
+        app._row_tags = GCIMSApp._row_tags   # staticmethod
+
+        peak = {"peak_id": 1, "ri": 726.3, "rt_index": 100, "dt_index": 50,
+                "retention_s": 300.0, "drift_relative": 1.1,
+                "rule_active": True, "user_active": None}
+        app.state.peaks = [peak]
+        app.peak_tree.insert("", "end",
+                             values=tuple(app._cell_value(c, peak) for c in PEAK_TABLE_COLUMNS))
+        # Before autofill the GC cell is a dash (no matches yet)
+        assert app._cell_value("gc", peak) == "—"
+
+        app._autofill_gc_matches()               # no ▶ click
+        for _ in range(100):                      # pump the loop for the bg match
+            root.update()
+            if peak.get("matches"):
+                break
+            time.sleep(0.02)
+
+        assert peak.get("matches") is not None
+        assert (100, 50) in app.state.match_cache            # cached by coordinate
+        gc = app._cell_value("gc", peak)
+        assert gc.startswith("726")                          # matched RI value shown
+        assert "Ethanol" not in gc                           # value, not name
+    finally:
+        root.destroy()
+
+
 if __name__ == "__main__":
     test_panel_lists_gc_candidates()
     test_panel_combined_dedups_and_labels()
     test_panel_opens_with_no_candidates()
-    print("✓ match-panel render checks passed")
+    test_autofill_populates_gc_column_without_trigger()
+    print("✓ match-panel render + autofill checks passed")

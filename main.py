@@ -114,7 +114,7 @@ COORD_LABELS = {
     # Batch 2: identification columns
     "on": "On",
     "gc_ims": "GC×IMS",
-    "gc": "Matched RI (Δ)",
+    "gc": "GC (RI)",
     "ims": "IMS",
     "trigger": "▶",
 }
@@ -183,6 +183,9 @@ class AppState:
         self.ri_calibration_folder = None
         # 第十階段：載入一次的比對庫 (ril_rows, iml_rows, select_info)，跨峰共用
         self.library_rows = None
+        self.library_unavailable = False   # 記住庫載入失敗，避免每次重繪重試
+        # 每檔案的比對結果快取，key=(rt_index, dt_index)，換規則重繪時不必重算
+        self.match_cache = {}
 
         # Persisted settings (ui_settings.json)
         self.settings = load_settings()
@@ -213,6 +216,7 @@ class AppState:
         self.heatmap_photo_ref = None
         self.overlay_photo_ref = None
         self.highlight_id = None
+        self.match_cache = {}          # 換檔案 → 比對快取失效
 
 
 # ============================================================================== #
@@ -1583,6 +1587,9 @@ class GCIMSApp:
                 calibration.attach_ri(peaks, self.state.ri_calibration)
             except Exception as e:
                 print(f"[warn] attach_ri failed: {e}", file=sys.stderr)
+        # 第十階段：套用已快取的比對結果，讓 GC (RI) 欄一畫出來就有值（換規則重繪
+        # 時免重算）。未快取的峰稍後由 _autofill_gc_matches() 背景補上。
+        self._apply_cached_matches(peaks)
         self.state.peaks = peaks
         self.peak_tree.tag_configure("inactive", foreground="gray60")
         self.peak_tree.tag_configure("override", foreground="firebrick")
@@ -1595,6 +1602,9 @@ class GCIMSApp:
         self.update_peaks_header()
         self.sort_column = None
         self.sort_reverse = False
+
+        # 第十階段：自動填 GC (RI) 欄——不需按 ▶。背景載庫 + 比對未快取的峰。
+        self._autofill_gc_matches()
 
         # _overlay_numbered.png is a static export for the Batch 8 report, not
         # something the canvas shows any more (circles and numbers are Canvas
@@ -1714,16 +1724,21 @@ class GCIMSApp:
                 return
             self._open_compound_match_panel(peak)
 
-    def _open_compound_match_panel(self, peak):
-        """Stage 10: match one peak against the .ril/.iml libraries, list candidates.
-
-        Reuses `match.match_all` (the same matcher `identify.py` runs). Libraries
-        are loaded once and cached on `state.library_rows`. GC uses the peak's RI
-        (stage 4) or falls back to retention seconds; the IMS (K0) branch is empty
-        until a K0 calibration profile is available.
-        """
+    # ------------------------------------------------------------------------- #
+    # Stage 10 — compound matching against .ril/.iml (GC column + ▶ panel)
+    # ------------------------------------------------------------------------- #
+    def _ensure_libraries_then(self, on_ready, notify=False):
+        """Load .ril/.iml once (background, cached on state.library_rows), then
+        call on_ready(). Only calls on_ready when libraries are actually available.
+        notify=True pops a dialog on failure (▶ path); the auto-fill path stays
+        quiet and remembers the failure so it does not retry every render."""
         if self.state.library_rows is not None:
-            self._match_all_peaks_then_show(peak)
+            on_ready()
+            return
+        if getattr(self.state, "library_unavailable", False):
+            if notify:
+                messagebox.showwarning(
+                    "No libraries", "No .ril/.iml library found (library_data/).")
             return
         self.status_label.config(text="Loading compound libraries…")
         q = queue.Queue()
@@ -1740,68 +1755,86 @@ class GCIMSApp:
                 header = (identify.read_mea_header(mea)
                           if mea and os.path.exists(mea) else {})
                 ril_paths, iml_paths, info = identify.select_library_files(data_dir, header)
-                ril_rows = library.load_ril_many(ril_paths)
-                iml_rows = library.load_iml_many(iml_paths)
-                q.put(("done", (ril_rows, iml_rows, info)))
-            except Exception as e:   # noqa: BLE001 — surface any load failure to the user
+                q.put(("done", (library.load_ril_many(ril_paths),
+                                library.load_iml_many(iml_paths), info)))
+            except Exception as e:   # noqa: BLE001 — surface any load failure
                 q.put(("error", str(e)))
 
         threading.Thread(target=work, daemon=True).start()
-        self._poll_library_load(q, peak)
+        self._poll_libraries(q, on_ready, notify)
 
-    def _poll_library_load(self, q, peak):
-        """Wait for the background library load, then open the match panel."""
+    def _poll_libraries(self, q, on_ready, notify):
         try:
             kind, payload = q.get_nowait()
         except queue.Empty:
-            self.root.after(100, lambda: self._poll_library_load(q, peak))
+            self.root.after(120, lambda: self._poll_libraries(q, on_ready, notify))
             return
         if kind == "done":
-            ril_rows, iml_rows, _info = payload
             self.state.library_rows = payload
+            rr, ir, _ = payload
             self.status_label.config(
-                text=f"✓ Libraries loaded ({len(ril_rows):,} .ril + "
-                     f"{len(iml_rows):,} .iml rows)")
-            self._match_all_peaks_then_show(peak)
+                text=f"✓ Libraries loaded ({len(rr):,} .ril + {len(ir):,} .iml rows)")
+            on_ready()
         else:
-            messagebox.showwarning("Library load failed", payload)
-            self.status_label.config(text="Compound library load failed")
+            self.state.library_unavailable = True
+            self.status_label.config(text="Compound library unavailable")
+            if notify:
+                messagebox.showwarning("Library load failed", payload)
 
-    def _match_all_peaks_then_show(self, peak):
-        """Match *every* peak against the cached libraries (background), so the
-        GC column fills in for the whole table, then open the panel for `peak`."""
-        ril_rows, iml_rows, select_info = self.state.library_rows
+    def _apply_cached_matches(self, peaks):
+        """Set peak['matches'] from the per-file cache (keyed by coordinate) so the
+        GC column renders immediately on re-draw (e.g. rule tweaks reuse it)."""
+        cache = self.state.match_cache
+        for p in peaks:
+            res = cache.get((p.get("rt_index"), p.get("dt_index")))
+            if res is not None:
+                p["matches"] = res
+                p.setdefault("k0_mode", "unavailable")
+
+    def _autofill_gc_matches(self):
+        """Fill the GC (RI) column automatically — no ▶ click needed. Applies any
+        cached results, then matches the uncached peaks in the background."""
         peaks = list(self.state.peaks)
-        if peaks and all("matches" in p for p in peaks):   # already matched
-            self._render_match_panel(peak, peak.get("matches") or {}, select_info)
+        if not peaks:
             return
-        self.status_label.config(text="Matching peaks against libraries…")
+        self._apply_cached_matches(peaks)
+        uncached = [p for p in peaks
+                    if (p.get("rt_index"), p.get("dt_index")) not in self.state.match_cache]
+        if uncached:
+            self._ensure_libraries_then(
+                lambda: self._match_and_cache(uncached, refresh=True), notify=False)
+
+    def _match_and_cache(self, targets, refresh=False, then=None):
+        """Match `targets` (background), store results in the per-file cache by
+        coordinate, then optionally refresh the table / run `then`."""
+        ril_rows, iml_rows, _info = self.state.library_rows
         q = queue.Queue()
 
         def work():
             import match
-            for p in peaks:
-                if "matches" not in p:
-                    p["matches"] = match.match_all(p, ril_rows, iml_rows)
-                    # We do not compute K0 here (no calibration profile), so mark
-                    # the IMS dimension unavailable → the IMS column reads "—".
-                    p.setdefault("k0_mode", "unavailable")
-            q.put("done")
+            out = []
+            for p in targets:
+                out.append(((p.get("rt_index"), p.get("dt_index")),
+                            match.match_all(p, ril_rows, iml_rows)))
+            q.put(out)
 
         threading.Thread(target=work, daemon=True).start()
-        self._poll_matches(q, peak, select_info)
+        self._poll_match_and_cache(q, refresh, then)
 
-    def _poll_matches(self, q, peak, select_info):
-        """Wait for background matching, refresh the table, open the panel."""
+    def _poll_match_and_cache(self, q, refresh, then):
         try:
-            q.get_nowait()
+            results = q.get_nowait()
         except queue.Empty:
-            self.root.after(100, lambda: self._poll_matches(q, peak, select_info))
+            self.root.after(120, lambda: self._poll_match_and_cache(q, refresh, then))
             return
-        self._refresh_match_columns()
-        self.status_label.config(
-            text="✓ Compound matches ready — GC column shows the closest RI hit")
-        self._render_match_panel(peak, peak.get("matches") or {}, select_info)
+        for key, res in results:
+            self.state.match_cache[key] = res
+        self._apply_cached_matches(self.state.peaks)
+        if refresh:
+            self._refresh_match_columns()
+            self.status_label.config(text="✓ GC (RI) matches ready")
+        if then:
+            then()
 
     def _refresh_match_columns(self):
         """Re-render every table row now that peaks carry `matches`."""
@@ -1814,6 +1847,21 @@ class GCIMSApp:
             p = self._peak_by_id(pid)
             if p is not None:
                 self._refresh_row(item, p)
+
+    def _open_compound_match_panel(self, peak):
+        """Stage 10: list candidate compounds for `peak` in a popup. Matching uses
+        the same cache as the GC column, so this is instant once auto-fill ran."""
+        def show():
+            self._apply_cached_matches([peak])
+            info = self.state.library_rows[2]
+            if "matches" in peak:
+                self._render_match_panel(peak, peak["matches"], info)
+            else:
+                self._match_and_cache([peak], then=lambda: (
+                    self._apply_cached_matches([peak]),
+                    self._render_match_panel(peak, peak.get("matches") or {}, info)))
+
+        self._ensure_libraries_then(show, notify=True)
 
     def _render_match_panel(self, peak, result, select_info):
         """Toplevel listing candidate compounds (combined / GC-only / IMS-only)."""
