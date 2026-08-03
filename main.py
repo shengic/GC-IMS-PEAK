@@ -114,7 +114,7 @@ COORD_LABELS = {
     # Batch 2: identification columns
     "on": "On",
     "gc_ims": "GC×IMS",
-    "gc": "GC match (best, by RI)",
+    "gc": "Matched RI (Δ)",
     "ims": "IMS",
     "trigger": "▶",
 }
@@ -732,7 +732,7 @@ class GCIMSApp:
         col_widths = {
             "peak_id": 30, "drift_ms": 55, "drift_relative": 60,
             "retention_s": 60, "ri": 55, "intensity": 55,
-            "on": 35, "gc_ims": 60, "gc": 210, "ims": 40, "trigger": 25,
+            "on": 35, "gc_ims": 60, "gc": 130, "ims": 40, "trigger": 25,
         }
         for col in PEAK_TABLE_COLUMNS:
             width = col_widths.get(col, 100)
@@ -1616,21 +1616,22 @@ class GCIMSApp:
                 return combined[0].get("Name") or combined[0].get("NAME") or "?"
             return "—"
         if col == "gc":
-            # Show the closest library match (name + the value it matched on) so
-            # the table carries the actual GC hit, not just a count. Full list is
-            # in the ▶ panel. gc_hits are delta-sorted; [0] is the closest.
+            # Show the closest library RI value (with its Δ from the peak's RI) so
+            # the user can compare it against the peak's own RI in the RI column.
+            # Names / the full candidate list live in the ▶ panel. gc_hits are
+            # delta-sorted; [0] is the closest.
             gc_hits = m.get("gc_matches")
             if not gc_hits:
                 return "—"
             best = gc_hits[0]
-            name = best.get("Name") or best.get("NAME") or "?"
             if "rt" in best.get("match_dimensions", []):
-                val, lab = best.get("Rt[sec]"), "Rt"
+                val, delta = best.get("Rt[sec]"), best.get("delta_rt")
             else:
-                val, lab = best.get("RI"), "RI"
-            tail = f" · {lab} {val:g}" if val is not None else ""
-            more = f"  ({len(gc_hits)})" if len(gc_hits) > 1 else ""
-            return f"{name}{tail}{more}"
+                val, delta = best.get("RI"), best.get("delta_ri")
+            if val is None:
+                return "—"
+            d = f" (Δ{delta:.2f})" if delta is not None else ""
+            return f"{val:g}{d}"
         if col == "ims":
             # "—" when the K0 dimension is unavailable (no calibration), which is
             # the current state — peaks are tagged k0_mode="unavailable" at match

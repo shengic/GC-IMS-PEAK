@@ -112,21 +112,21 @@ class TestCellValueLogic:
         peak = {"matches": {"combined_matches": [{"Name": "Diacetyl", "CAS": "C1"}]}}
         assert app._cell_value("gc_ims", peak) == "Diacetyl"
 
-    def test_gc_column_shows_best_match_and_value(self):
+    def test_gc_column_shows_matched_ri_value(self):
         app = self._mock_app()
         # No matches → "—" (not run)
         assert app._cell_value("gc", {}) == "—"
-        # Shows the closest (delta-sorted [0]) hit: name · RI value · (total count)
+        # Shows the closest (delta-sorted [0]) hit's *RI value* + its Δ, so the
+        # user can compare it against the peak's own RI. No compound name.
         peak = {"matches": {"combined_matches": [], "gc_matches": [
-            {"Name": "Ethanol", "CAS": "A", "RI": 720.0, "delta_ri": 0.1,
+            {"Name": "Ethanol", "CAS": "A", "RI": 720.3, "delta_ri": 0.12,
              "match_dimensions": ["ri"]},
             {"NAME": "Acetone", "CAS": "B", "RI": 721.0, "delta_ri": 1.1,
              "match_dimensions": ["ri"]},
         ]}}
         v = app._cell_value("gc", peak)
-        assert v.startswith("Ethanol")     # best match name
-        assert "RI 720" in v               # the matched library value
-        assert "(2)" in v                  # total candidate count
+        assert v == "720.3 (Δ0.12)"        # matched RI value + delta, closest first
+        assert "Ethanol" not in v          # deliberately no compound name
 
     def test_ims_dash_when_k0_unavailable(self):
         app = self._mock_app()
