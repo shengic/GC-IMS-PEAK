@@ -736,7 +736,7 @@ class GCIMSApp:
         col_widths = {
             "peak_id": 30, "drift_ms": 55, "drift_relative": 60,
             "retention_s": 60, "ri": 55, "intensity": 55,
-            "on": 35, "gc_ims": 60, "gc": 78, "ims": 40, "trigger": 25,
+            "on": 35, "gc_ims": 130, "gc": 78, "ims": 78, "trigger": 25,
         }
         for col in PEAK_TABLE_COLUMNS:
             width = col_widths.get(col, 100)
@@ -1643,16 +1643,22 @@ class GCIMSApp:
             d = f" (Δ{delta:.2f})" if delta is not None else ""
             return f"{val:g}{d}"
         if col == "ims":
-            # "—" when the K0 dimension is unavailable (no calibration), which is
-            # the current state — peaks are tagged k0_mode="unavailable" at match
-            # time. "0" is reserved for "K0 available but no hit".
-            if peak.get("k0_mode") == "unavailable":
-                return "—"
+            # Closest IMS (drift) library value + Δ, so it reads against the
+            # peak's own Drift rel. RIP column. Uses the RIPrel drift match (no K0
+            # calibration needed); "—" when no drift hit within tolerance.
             ims_hits = m.get("ims_matches")
-            if ims_hits is None:
+            if not ims_hits:
                 return "—"
-            combined_cas = {c.get("CAS") for c in (m.get("combined_matches") or [])}
-            return str(sum(1 for h in ims_hits if h.get("CAS") not in combined_cas))
+            best = ims_hits[0]
+            val = best.get("Dt[a.u.]")
+            if "drift_rel" in best.get("match_dimensions", []):
+                delta = best.get("delta_drift_rel")
+            else:
+                delta = best.get("delta_k0")
+            if val is None:
+                return "—"
+            d = f" (Δ{delta:.3f})" if delta is not None else ""
+            return f"{val:.3f}{d}"
         if col == "trigger":
             return TRIGGER_ACTIVE if effective_active(peak) else TRIGGER_DIM
 
@@ -1746,6 +1752,7 @@ class GCIMSApp:
 
         def work():
             try:
+                import glob as _glob
                 import identify
                 data_dir = library.resolve_data_dir()
                 if data_dir is None:
@@ -1754,9 +1761,15 @@ class GCIMSApp:
                     return
                 header = (identify.read_mea_header(mea)
                           if mea and os.path.exists(mea) else {})
-                ril_paths, iml_paths, info = identify.select_library_files(data_dir, header)
+                ril_paths, _iml_sel, info = identify.select_library_files(data_dir, header)
+                # GC/RI library (.ril) is column-specific → keep the selection.
+                # IMS drift (.iml) is instrument-relative, not GC-column-specific →
+                # match against ALL .iml; the DtMode filters keep RIPrel vs K0 apart.
+                all_iml = sorted(_glob.glob(os.path.join(data_dir, "*.iml")))
+                info = dict(info)
+                info["iml_strategy"] = "all (IMS drift is instrument-relative)"
                 q.put(("done", (library.load_ril_many(ril_paths),
-                                library.load_iml_many(iml_paths), info)))
+                                library.load_iml_many(all_iml), info)))
             except Exception as e:   # noqa: BLE001 — surface any load failure
                 q.put(("error", str(e)))
 
@@ -1789,7 +1802,6 @@ class GCIMSApp:
             res = cache.get((p.get("rt_index"), p.get("dt_index")))
             if res is not None:
                 p["matches"] = res
-                p.setdefault("k0_mode", "unavailable")
 
     def _autofill_gc_matches(self):
         """Fill the GC (RI) column automatically — no ▶ click needed. Applies any
@@ -1867,6 +1879,7 @@ class GCIMSApp:
         """Toplevel listing candidate compounds (combined / GC-only / IMS-only)."""
         import match
         gc_dim = result.get("gc_dimension")
+        ims_dim = result.get("ims_dimension")
         combined = result.get("combined_matches") or []
         gc_hits = result.get("gc_matches") or []
         ims_hits = result.get("ims_matches") or []
@@ -1883,11 +1896,13 @@ class GCIMSApp:
         ri_txt = "—" if ri is None else f"{ri:.1f}{'*' if peak.get('ri_extrapolated') else ''}"
         dim_txt = {"ri": "Retention Index", "rt": "Retention time (s)",
                    None: "none"}.get(gc_dim, str(gc_dim))
+        ims_txt = {"drift_rel": f"drift vs RIP-relative ({len(ims_hits)} hit(s))",
+                   "k0": f"K0 ({len(ims_hits)} hit(s))",
+                   None: "no drift hit within tolerance"}.get(ims_dim, str(ims_dim))
         head = (f"Peak #{peak.get('peak_id')}   "
                 f"RI={ri_txt}   Rt={peak.get('retention_s', '—')}s   "
                 f"Drift(rel RIP)={peak.get('drift_relative', '—')}\n"
-                f"GC match dimension: {dim_txt}   |   "
-                f"IMS (K0): {'—, no K0 calibration' if not ims_hits else f'{len(ims_hits)} hit(s)'}")
+                f"GC: {dim_txt}   |   IMS: {ims_txt}   |   combined (both axes): {len(combined)}")
         Label(win, text=head, justify="left", anchor="w",
               font=("Georgia", 9), bg="white").pack(fill="x", padx=8, pady=(8, 2))
 
@@ -1899,7 +1914,7 @@ class GCIMSApp:
         # ---- candidates tree ----
         cols = ("match", "name", "cas", "formula", "libval", "delta", "source")
         headers = {"match": "Match", "name": "Compound", "cas": "CAS",
-                   "formula": "Formula", "libval": "Lib RI/Rt", "delta": "Δ",
+                   "formula": "Formula", "libval": "Lib value", "delta": "Δ",
                    "source": "Source file"}
         widths = {"match": 70, "name": 190, "cas": 90, "formula": 80,
                   "libval": 70, "delta": 55, "source": 150}
@@ -1916,11 +1931,14 @@ class GCIMSApp:
 
         def _row(cand, label):
             name = cand.get("Name") or cand.get("NAME") or "?"
-            if "ri" in cand.get("match_dimensions", []):
+            dims = cand.get("match_dimensions", [])
+            if "ri" in dims:            # GC (and GC+IMS combined): show RI
                 libval, delta = cand.get("RI"), cand.get("delta_ri")
-            elif "rt" in cand.get("match_dimensions", []):
+            elif "rt" in dims:
                 libval, delta = cand.get("Rt[sec]"), cand.get("delta_rt")
-            else:
+            elif "drift_rel" in dims:   # IMS via RIP-relative drift
+                libval, delta = cand.get("Dt[a.u.]"), cand.get("delta_drift_rel")
+            else:                        # IMS via K0
                 libval, delta = cand.get("Dt[a.u.]"), cand.get("delta_k0")
             src = (cand.get("source_file") or cand.get("source_file_gc")
                    or cand.get("source_file_ims") or "—")
@@ -1945,6 +1963,7 @@ class GCIMSApp:
         foot = (f"{total} candidate(s) within tolerance{trunc} "
                 f"(RI ±{match.DEFAULT_RI_TOLERANCE:g}, "
                 f"Rt ±{match.DEFAULT_RT_TOLERANCE:g}s, "
+                f"drift ±{match.DEFAULT_DRIFTREL_TOLERANCE:g}, "
                 f"K0 ±{match.DEFAULT_K0_TOLERANCE:g}; sorted by Δ).  "
                 f"GC lib strategy: {select_info.get('ril_strategy', '?')}"
                 + ("" if total else

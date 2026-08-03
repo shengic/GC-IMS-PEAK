@@ -183,7 +183,6 @@ def test_apply_cached_matches_by_coordinate():
              {"rt_index": 999, "dt_index": 9}]    # not cached
     shim._apply_cached_matches(peaks)
     assert peaks[0]["matches"]["gc_matches"][0]["RI"] == 726.0
-    assert peaks[0]["k0_mode"] == "unavailable"    # IMS marked unavailable
     assert "matches" not in peaks[1]               # uncached row untouched
 
 

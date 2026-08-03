@@ -34,6 +34,7 @@ workflow §第三階段第 4 點），不需要在此另外處理。
 DEFAULT_RI_TOLERANCE = 10.0
 DEFAULT_RT_TOLERANCE = 5.0     # 秒
 DEFAULT_K0_TOLERANCE = 0.05
+DEFAULT_DRIFTREL_TOLERANCE = 0.05   # 漂移相對 RIP（RIPrel）；佔位值，未校準
 
 
 # --------------------------------------------------------------------------- #
@@ -140,6 +141,45 @@ def match_k0(peak_k0, library_rows, tolerance=DEFAULT_K0_TOLERANCE):
     return hits
 
 
+def match_drift_rel(peak_drift_rel, library_rows, tolerance=DEFAULT_DRIFTREL_TOLERANCE):
+    """
+    漂移軸（IMS）比對的**免 K0 路線**：直接用峰的 drift_relative（相對 RIP）比對
+    library 中 DtMode == "RIPrel" 的 Dt[a.u.]（同樣是相對 RIP 的漂移值，單位一致、
+    可直接比）。不需要 K0 校準即可運作。
+
+    只在 DtMode 精確為 "RIPrel" 的 row 上比對——其他 DtMode（1/K0、溫度欄位錯位
+    等）單位不同，混比會出錯，一律跳過。
+
+    參數
+    ----
+    peak_drift_rel : float | None   峰的 drift_relative（rip.attach_drift_relative 補上）
+    library_rows : list[dict]       通常為 .iml 讀取結果
+    tolerance : float
+
+    回傳
+    ----
+    list[dict]  依 delta_drift_rel 遞增排序；欄位 delta_drift_rel /
+                match_dimensions=["drift_rel"]。
+    """
+    if peak_drift_rel is None:
+        return []
+    hits = []
+    for row in library_rows:
+        if (row.get("DtMode") or "").strip() != "RIPrel":
+            continue
+        dt = row.get("Dt[a.u.]")
+        if dt is None:
+            continue
+        delta = abs(dt - peak_drift_rel)
+        if delta <= tolerance:
+            m = dict(row)
+            m["delta_drift_rel"] = delta
+            m["match_dimensions"] = ["drift_rel"]
+            hits.append(m)
+    hits.sort(key=lambda x: x["delta_drift_rel"])
+    return hits
+
+
 # --------------------------------------------------------------------------- #
 # 交集：同一 CAS 出現在 GC 命中與 IMS 命中兩邊 → combined
 # --------------------------------------------------------------------------- #
@@ -183,7 +223,7 @@ def combine_by_cas(gc_hits, ims_hits):
         ims_row = ims_by_cas[cas]
         merged = dict(gc_row)   # 從 gc 那邊起 base（多半資訊較豐富）
         # 保留兩邊 delta
-        for k in ("delta_ri", "delta_rt", "delta_k0"):
+        for k in ("delta_ri", "delta_rt", "delta_k0", "delta_drift_rel"):
             if k in ims_row and k not in merged:
                 merged[k] = ims_row[k]
         # 合併 match_dimensions（去重、保序）
@@ -199,7 +239,8 @@ def combine_by_cas(gc_hits, ims_hits):
         combined.append(merged)
 
     def _combined_delta(m):
-        return m.get("delta_ri", 0) + m.get("delta_rt", 0) + m.get("delta_k0", 0)
+        return (m.get("delta_ri", 0) + m.get("delta_rt", 0)
+                + m.get("delta_k0", 0) + m.get("delta_drift_rel", 0))
     combined.sort(key=_combined_delta)
     return combined
 
@@ -210,33 +251,28 @@ def combine_by_cas(gc_hits, ims_hits):
 def match_all(peak, ril_rows, iml_rows,
               ri_tolerance=DEFAULT_RI_TOLERANCE,
               rt_tolerance=DEFAULT_RT_TOLERANCE,
-              k0_tolerance=DEFAULT_K0_TOLERANCE):
+              k0_tolerance=DEFAULT_K0_TOLERANCE,
+              driftrel_tolerance=DEFAULT_DRIFTREL_TOLERANCE):
     """
-    對一顆峰同時跑 RI / RT / K0 三個維度比對，回傳 workflow §第五階段第 3 點
-    的三個候選清單。
+    對一顆峰同時跑 GC（RI/RT）與 IMS（K0 或 RIPrel 漂移）兩個維度比對，回傳
+    workflow §第五階段第 3 點的三個候選清單。
 
-    優先策略：
-      - peak["ri"] 有值時，走 RI 比對（.ril + .iml 合併作為 gc 候選庫）
-      - peak["ri"] 為 None 但 peak["retention_s"] 有值時，走 RT 退路（僅
-        .iml，因為 .ril 沒存 Rt[sec]）
-      - peak["k0_value"] 有值時，走 K0 比對（僅 .iml）
+    GC 分支優先策略：
+      - peak["ri"] 有值 → RI 比對（.ril + .iml 合併作為 gc 候選庫）
+      - 否則 peak["retention_s"] 有值 → RT 退路（僅 .iml 有 Rt[sec]）
 
-    參數
-    ----
-    peak : dict
-        單一峰完整字典（含 retention_s, k0_value, k0_mode, [ri] 等）。
-    ril_rows / iml_rows : list[dict]
-        library.load_ril_many() / load_iml_many() 產出。
-    *_tolerance : float
+    IMS 分支優先策略：
+      - peak["k0_value"] 有值 → K0 比對（library DtMode 含 "K0"，需 K0 校準）
+      - 否則 peak["drift_relative"] 有值 → **RIPrel 漂移比對**（library
+        DtMode == "RIPrel"，與峰的 drift_relative 同為相對 RIP，免 K0 校準）
 
     回傳
     ----
     dict：
       {
-        "gc_matches":       list[dict],
-        "ims_matches":      list[dict],
-        "combined_matches": list[dict],
-        "gc_dimension":     "ri" | "rt" | None    (實際用了哪個維度)
+        "gc_matches", "ims_matches", "combined_matches",
+        "gc_dimension":  "ri" | "rt" | None,
+        "ims_dimension": "k0" | "drift_rel" | None,   (實際用了哪個 IMS 維度)
       }
     """
     # GC 分支：優先 RI
@@ -246,12 +282,19 @@ def match_all(peak, ril_rows, iml_rows,
         gc_hits = match_ri(peak["ri"], ril_rows + iml_rows, ri_tolerance)
         gc_dimension = "ri"
     elif peak.get("retention_s") is not None:
-        # 退路：只有 .iml 有 Rt[sec]
         gc_hits = match_rt(peak["retention_s"], iml_rows, rt_tolerance)
         gc_dimension = "rt" if gc_hits else None
 
-    # IMS 分支：K0
-    ims_hits = match_k0(peak.get("k0_value"), iml_rows, k0_tolerance)
+    # IMS 分支：優先 K0，否則走免校準的 RIPrel 漂移
+    ims_dimension = None
+    if peak.get("k0_value") is not None:
+        ims_hits = match_k0(peak["k0_value"], iml_rows, k0_tolerance)
+        ims_dimension = "k0" if ims_hits else None
+    elif peak.get("drift_relative") is not None:
+        ims_hits = match_drift_rel(peak["drift_relative"], iml_rows, driftrel_tolerance)
+        ims_dimension = "drift_rel" if ims_hits else None
+    else:
+        ims_hits = []
 
     combined = combine_by_cas(gc_hits, ims_hits)
 
@@ -260,4 +303,5 @@ def match_all(peak, ril_rows, iml_rows,
         "ims_matches": ims_hits,
         "combined_matches": combined,
         "gc_dimension": gc_dimension,
+        "ims_dimension": ims_dimension,
     }

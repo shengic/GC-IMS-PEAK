@@ -47,6 +47,11 @@ def fake_iml():
         # DtMode 不是 K0 → K0 比對應跳過
         {"CAS": "C010", "Name": "compY", "RI": 1000, "Rt[sec]": 105.0,
          "Dt[a.u.]": 1.50, "DtMode": "ms", "source_file": "iml_Y.iml"},
+        # RIPrel（相對 RIP 漂移）rows：RI=None 不影響 RI 比對，供 drift_rel 用
+        {"CAS": "C001", "Name": "compA-rip", "RI": None, "Dt[a.u.]": 1.12,
+         "DtMode": "RIPrel", "source_file": "iml_R.iml"},
+        {"CAS": "C077", "Name": "compR", "RI": None, "Dt[a.u.]": 1.15,
+         "DtMode": "RIPrel", "source_file": "iml_R.iml"},
     ]
 
 
@@ -138,6 +143,27 @@ def test_match_smoke():
     assert len(r["gc_matches"]) > 0
     assert r["ims_matches"] == []
     assert r["combined_matches"] == []
+
+    sep("[11] match_drift_rel: drift_relative=1.13, tol=0.05 → 只看 DtMode==RIPrel")
+    hits = match.match_drift_rel(1.13, iml, tolerance=0.05)
+    got = set(h["CAS"] for h in hits)
+    print(f"  {len(hits)} hits: {got}")
+    # C001 RIPrel(1.12, d=0.01)、C077 RIPrel(1.15, d=0.02) 命中；1/K0 與 ms 的不算
+    assert got == {"C001", "C077"}, got
+    assert all("drift_rel" in h["match_dimensions"] for h in hits)
+    assert all(h.get("delta_drift_rel") is not None for h in hits)
+    assert match.match_drift_rel(None, iml, 0.05) == []
+
+    sep("[12] match_all IMS：無 K0 但有 drift_relative → 走 drift_rel，可有 combined")
+    peak = {"ri": 1003, "drift_relative": 1.12, "k0_value": None}
+    r = match.match_all(peak, ril, iml, ri_tolerance=10, driftrel_tolerance=0.05)
+    print(f"  ims_dim={r['ims_dimension']} ims={len(r['ims_matches'])} combined={len(r['combined_matches'])}")
+    assert r["ims_dimension"] == "drift_rel"
+    assert len(r["ims_matches"]) > 0
+    # C001 兩軸都命中（RI 1002 + drift 1.12）→ combined，且 dims 同含 ri 與 drift_rel
+    c001 = [c for c in r["combined_matches"] if c["CAS"] == "C001"]
+    assert c001, "C001 should be a combined GC+IMS match"
+    assert "ri" in c001[0]["match_dimensions"] and "drift_rel" in c001[0]["match_dimensions"]
 
     sep("[10] source_file 溯源：candidate dict 帶 source_file，不需比對邏輯處理")
     # workflow §第三階段第 4 點：source_file 隨 dict 淺拷貝自動傳遞

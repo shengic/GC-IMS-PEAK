@@ -128,18 +128,20 @@ class TestCellValueLogic:
         assert v == "720.3 (Δ0.12)"        # matched RI value + delta, closest first
         assert "Ethanol" not in v          # deliberately no compound name
 
-    def test_ims_dash_when_k0_unavailable(self):
+    def test_ims_dash_when_no_drift_hit(self):
         app = self._mock_app()
-        peak = {"k0_mode": "unavailable",
-                "matches": {"ims_matches": [{"CAS": "X"}], "combined_matches": []}}
-        assert app._cell_value("ims", peak) == "—"
+        assert app._cell_value("ims", {}) == "—"                       # no matches
+        assert app._cell_value("ims", {"matches": {"ims_matches": []}}) == "—"
 
-    def test_ims_zero_vs_dash_distinction(self):
-        """Workflow §第八階段: '—' when unavailable vs '0' when zero real hits."""
+    def test_ims_shows_matched_drift_value(self):
+        """IMS column shows the closest RIP-relative drift library value + Δ, to
+        read against the peak's own Drift rel. RIP column."""
         app = self._mock_app()
-        peak = {"k0_mode": "standard_based",
-                "matches": {"ims_matches": [], "combined_matches": []}}
-        assert app._cell_value("ims", peak) == "0"
+        peak = {"matches": {"combined_matches": [], "ims_matches": [
+            {"Name": "Guaiacol", "CAS": "A", "Dt[a.u.]": 1.139,
+             "delta_drift_rel": 0.026, "match_dimensions": ["drift_rel"]},
+        ]}}
+        assert app._cell_value("ims", peak) == "1.139 (Δ0.026)"
 
     def test_trigger_dims_when_inactive(self):
         from main import TRIGGER_ACTIVE, TRIGGER_DIM
