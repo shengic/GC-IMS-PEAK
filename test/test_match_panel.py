@@ -33,6 +33,7 @@ def _panel_shim(root):
         pass
     shim = _Shim()
     shim.root = root
+    shim._match_windows = {}
     shim._render_match_panel = GCIMSApp._render_match_panel.__get__(shim, _Shim)
     return shim
 
@@ -168,9 +169,92 @@ def test_autofill_populates_gc_column_without_trigger():
         root.destroy()
 
 
+def test_selection_highlight_survives_redraw():
+    """The yellow selection ring is re-applied on every canvas redraw (resize/pan/
+    zoom), so it stays in sync with the highlighted table row instead of vanishing."""
+    tk, root = _tk_root_or_skip()
+    try:
+        from tkinter import Canvas
+        from main import AppState
+
+        class _Shim:
+            pass
+        app = _Shim()
+        app.main_canvas = Canvas(root, width=400, height=400)
+        app.state = AppState()
+        app.state.canvas_geometry = {"png_size": [400, 400],
+                                     "axes_bbox": [0.1, 0.1, 0.8, 0.8],
+                                     "xlim": [0, 4], "ylim": [500, 1100], "y_axis": "ri"}
+        app.state.peaks = [{"peak_id": 1, "drift_relative": 2.0, "ri": 800,
+                            "rule_active": True, "user_active": None}]
+        app.state.highlighted_peak_id = 1
+        app.main_canvas_kind = "bg"
+        app.main_canvas_zoom = 1.0
+        app.main_canvas_pan_x = 0
+        app.main_canvas_pan_y = 0
+        for name in ("_draw_peak_circles", "_reapply_highlight", "_draw_highlight",
+                     "_peak_to_image_xy", "_peak_by_id"):
+            setattr(app, name, getattr(GCIMSApp, name).__get__(app, _Shim))
+
+        app._draw_peak_circles()                       # initial draw
+        assert app.state.highlight_id is not None
+        assert app.main_canvas.find_withtag("highlight")   # ring present
+
+        app.main_canvas.delete("all")                  # what _render_main_canvas does
+        app._draw_peak_circles()                       # redraw (as after pan/zoom)
+        assert app.state.highlight_id is not None       # ring restored
+        assert app.main_canvas.find_withtag("highlight")
+
+        # with nothing selected, no ring is drawn
+        app.state.highlighted_peak_id = None
+        app.main_canvas.delete("all")
+        app._draw_peak_circles()
+        assert not app.main_canvas.find_withtag("highlight")
+    finally:
+        root.destroy()
+
+
+def test_one_match_window_per_peak():
+    """Re-triggering the same peak raises its existing panel instead of stacking a
+    duplicate; closing the panel de-registers it."""
+    tk, root = _tk_root_or_skip()
+    try:
+        from main import AppState
+
+        class _Shim:
+            pass
+        app = _Shim()
+        app.root = root
+        app.state = AppState()
+        app._match_windows = {}
+        app._render_match_panel = GCIMSApp._render_match_panel.__get__(app, _Shim)
+        app._open_compound_match_panel = GCIMSApp._open_compound_match_panel.__get__(app, _Shim)
+
+        result = {"gc_dimension": "ri", "gc_matches": [], "ims_matches": [],
+                  "combined_matches": []}
+        peak = {"peak_id": 1}
+        app._render_match_panel(peak, result, {})      # opens + registers window 1
+        assert 1 in app._match_windows
+        n_before = sum(isinstance(w, tk.Toplevel) for w in root.winfo_children())
+
+        # Re-trigger peak 1: dedup path raises the existing window, no new Toplevel
+        app._open_compound_match_panel(peak)
+        n_after = sum(isinstance(w, tk.Toplevel) for w in root.winfo_children())
+        assert n_after == n_before
+
+        # Closing the window removes it from the registry
+        app._match_windows[1].destroy()
+        root.update()
+        assert 1 not in app._match_windows
+    finally:
+        root.destroy()
+
+
 if __name__ == "__main__":
     test_panel_lists_gc_candidates()
     test_panel_combined_dedups_and_labels()
     test_panel_opens_with_no_candidates()
     test_autofill_populates_gc_column_without_trigger()
-    print("✓ match-panel render + autofill checks passed")
+    test_selection_highlight_survives_redraw()
+    test_one_match_window_per_peak()
+    print("✓ match-panel render + autofill + highlight + dedup checks passed")

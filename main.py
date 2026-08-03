@@ -177,7 +177,8 @@ class AppState:
         self.selected_peak_row = None
         self.heatmap_photo_ref = None
         self.overlay_photo_ref = None
-        self.highlight_id = None
+        self.highlight_id = None          # canvas id of the yellow ring
+        self.highlighted_peak_id = None   # which peak is highlighted (survives redraw)
         self.matrix_shape = None  # (n_rt, n_dt) from JSON
         self.overlay_canvas_size = None  # (width, height) of canvas
         self.overlay_image_size = None  # (width, height) of actual image
@@ -219,6 +220,7 @@ class AppState:
         self.heatmap_photo_ref = None
         self.overlay_photo_ref = None
         self.highlight_id = None
+        self.highlighted_peak_id = None   # clear selection ring on new file
         self.match_cache = {}          # 換檔案 → 比對快取失效
 
 
@@ -566,6 +568,7 @@ class GCIMSApp:
     def __init__(self, root):
         self.root = root
         self.state = AppState()
+        self._match_windows = {}   # peak_id -> open compound-match Toplevel (dedup)
         self.ui_state = UIState.START
         self.root.title("GC-IMS Peak Detection — v2.1 by Albert Sheng")
         # Fit the actual screen instead of a fixed 1700x950: on a smaller
@@ -1449,6 +1452,10 @@ class GCIMSApp:
                     outline="red", width=1, dash=(2, 2), fill="", tags=tags)
             self.state.peak_items[pid] = items
 
+        # Re-apply the yellow selection ring after the redraw so it stays in sync
+        # with the highlighted table row through resize / pan / zoom.
+        self._reapply_highlight()
+
     def toggle_peak(self, peak_id):
         """Flip one peak's selection. The single entry point for every surface.
 
@@ -1868,6 +1875,15 @@ class GCIMSApp:
     def _open_compound_match_panel(self, peak):
         """Stage 10: list candidate compounds for `peak` in a popup. Matching uses
         the same cache as the GC column, so this is instant once auto-fill ran."""
+        # One window per peak: if this peak's panel is already open, raise it
+        # instead of stacking a duplicate.
+        existing = self._match_windows.get(peak.get("peak_id"))
+        if existing is not None and existing.winfo_exists():
+            existing.deiconify()
+            existing.lift()
+            existing.focus_set()
+            return
+
         def show():
             self._apply_cached_matches([peak])
             info = self.state.library_rows[2]
@@ -1895,6 +1911,12 @@ class GCIMSApp:
         win = Toplevel(self.root)
         win.title(f"Peak #{peak.get('peak_id')} — compound candidates")
         win.geometry("720x480")
+        # Register for one-window-per-peak dedup; drop it when the window closes.
+        pid = peak.get("peak_id")
+        self._match_windows[pid] = win
+        win.bind("<Destroy>",
+                 lambda e, w=win, k=pid: (self._match_windows.pop(k, None)
+                                          if e.widget is w else None))
 
         # ---- peak summary header ----
         ri = peak.get("ri")
@@ -2097,33 +2119,44 @@ class GCIMSApp:
         except (ValueError, IndexError, StopIteration):
             pass
 
-    def highlight_peak_on_overlay(self, peak):
-        """Draw yellow circle on main canvas at the peak's zoom-aware position."""
-        # Clear previous highlight
+    def _draw_highlight(self, peak):
+        """Draw (or move) the yellow selection ring at the peak's current
+        zoom/pan-aware position. Called on selection AND after every canvas
+        redraw (resize/pan/zoom), so the ring stays glued to its peak."""
+        # Clear previous ring
         if self.state.highlight_id:
             try:
                 self.main_canvas.delete(self.state.highlight_id)
             except Exception:
                 pass
             self.state.highlight_id = None
-
-        # Uses the recorded plot-area bbox. The previous version mapped
-        # dt_index/n_dt onto the whole PNG, ignoring the matplotlib margins
-        # (~8.5% on the left alone), so the yellow ring never sat on its peak.
         xy = self._peak_to_image_xy(peak)
         if xy is None:
             return
         x_px = self.main_canvas_pan_x + xy[0] * self.main_canvas_zoom
         y_px = self.main_canvas_pan_y + xy[1] * self.main_canvas_zoom
-
         radius = 12
         self.state.highlight_id = self.main_canvas.create_oval(
-            x_px - radius, y_px - radius,
-            x_px + radius, y_px + radius,
-            outline="yellow", width=3, fill=""
-        )
+            x_px - radius, y_px - radius, x_px + radius, y_px + radius,
+            outline="yellow", width=3, fill="", tags=("highlight",))
         self.main_canvas.tag_raise(self.state.highlight_id)
 
+    def _reapply_highlight(self):
+        """Re-draw the selection ring for the tracked peak after a canvas redraw."""
+        pid = self.state.highlighted_peak_id
+        if pid is None:
+            return
+        peak = self._peak_by_id(pid)
+        if peak is not None:
+            self._draw_highlight(peak)
+
+    def highlight_peak_on_overlay(self, peak):
+        """Highlight a peak from a table click: remember it, draw the ring, and
+        report it in the status bar."""
+        self.state.highlighted_peak_id = peak.get("peak_id")
+        self._draw_highlight(peak)
+        if self.state.highlight_id is None:
+            return
         peak_id = peak.get("peak_id", "?")
         self.status_label.config(
             text=f"✓ Peak #{peak_id} highlighted @ (x={peak.get('drift_ms', 0):.2f}ms, "
