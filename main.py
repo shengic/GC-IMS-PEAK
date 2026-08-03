@@ -181,6 +181,8 @@ class AppState:
         # 第四階段：本資料夾的 RT→RI 校準表（選資料夾時背景解析一次，跨檔案共用）
         self.ri_calibration = None
         self.ri_calibration_folder = None
+        # 第十階段：載入一次的比對庫 (ril_rows, iml_rows, select_info)，跨峰共用
+        self.library_rows = None
 
         # Persisted settings (ui_settings.json)
         self.settings = load_settings()
@@ -1699,13 +1701,153 @@ class GCIMSApp:
             self._open_compound_match_panel(peak)
 
     def _open_compound_match_panel(self, peak):
-        """Placeholder for compound-match panel (Batch 5)."""
-        messagebox.showinfo(
-            "Compound match panel — not yet implemented",
-            f"Peak #{peak.get('peak_id')} → the compound-match panel is planned\n"
-            f"for UI Batch 5. It will show the three-strip stacked view with\n"
-            f"confidence dots and source_file trace using data from identify.py."
-        )
+        """Stage 10: match one peak against the .ril/.iml libraries, list candidates.
+
+        Reuses `match.match_all` (the same matcher `identify.py` runs). Libraries
+        are loaded once and cached on `state.library_rows`. GC uses the peak's RI
+        (stage 4) or falls back to retention seconds; the IMS (K0) branch is empty
+        until a K0 calibration profile is available.
+        """
+        if self.state.library_rows is not None:
+            self._show_match_panel(peak)
+            return
+        self.status_label.config(text="Loading compound libraries…")
+        q = queue.Queue()
+        mea = self.state.selected_mea_file
+
+        def work():
+            try:
+                import identify
+                data_dir = library.resolve_data_dir()
+                if data_dir is None:
+                    q.put(("error", "No library folder found (library_data/ is empty "
+                                    "or missing). Add .ril/.iml files first."))
+                    return
+                header = (identify.read_mea_header(mea)
+                          if mea and os.path.exists(mea) else {})
+                ril_paths, iml_paths, info = identify.select_library_files(data_dir, header)
+                ril_rows = library.load_ril_many(ril_paths)
+                iml_rows = library.load_iml_many(iml_paths)
+                q.put(("done", (ril_rows, iml_rows, info)))
+            except Exception as e:   # noqa: BLE001 — surface any load failure to the user
+                q.put(("error", str(e)))
+
+        threading.Thread(target=work, daemon=True).start()
+        self._poll_library_load(q, peak)
+
+    def _poll_library_load(self, q, peak):
+        """Wait for the background library load, then open the match panel."""
+        try:
+            kind, payload = q.get_nowait()
+        except queue.Empty:
+            self.root.after(100, lambda: self._poll_library_load(q, peak))
+            return
+        if kind == "done":
+            ril_rows, iml_rows, _info = payload
+            self.state.library_rows = payload
+            self.status_label.config(
+                text=f"✓ Libraries loaded ({len(ril_rows):,} .ril + "
+                     f"{len(iml_rows):,} .iml rows)")
+            self._show_match_panel(peak)
+        else:
+            messagebox.showwarning("Library load failed", payload)
+            self.status_label.config(text="Compound library load failed")
+
+    def _show_match_panel(self, peak):
+        """Run match_all for `peak` against the cached libraries and render."""
+        import match
+        ril_rows, iml_rows, select_info = self.state.library_rows
+        result = match.match_all(peak, ril_rows, iml_rows)
+        self._render_match_panel(peak, result, select_info)
+
+    def _render_match_panel(self, peak, result, select_info):
+        """Toplevel listing candidate compounds (combined / GC-only / IMS-only)."""
+        import match
+        gc_dim = result.get("gc_dimension")
+        combined = result.get("combined_matches") or []
+        gc_hits = result.get("gc_matches") or []
+        ims_hits = result.get("ims_matches") or []
+        combined_cas = {c.get("CAS") for c in combined}
+        gc_only = [h for h in gc_hits if h.get("CAS") not in combined_cas]
+        ims_only = [h for h in ims_hits if h.get("CAS") not in combined_cas]
+
+        win = Toplevel(self.root)
+        win.title(f"Peak #{peak.get('peak_id')} — compound candidates")
+        win.geometry("720x480")
+
+        # ---- peak summary header ----
+        ri = peak.get("ri")
+        ri_txt = "—" if ri is None else f"{ri:.1f}{'*' if peak.get('ri_extrapolated') else ''}"
+        dim_txt = {"ri": "Retention Index", "rt": "Retention time (s)",
+                   None: "none"}.get(gc_dim, str(gc_dim))
+        head = (f"Peak #{peak.get('peak_id')}   "
+                f"RI={ri_txt}   Rt={peak.get('retention_s', '—')}s   "
+                f"Drift(rel RIP)={peak.get('drift_relative', '—')}\n"
+                f"GC match dimension: {dim_txt}   |   "
+                f"IMS (K0): {'—, no K0 calibration' if not ims_hits else f'{len(ims_hits)} hit(s)'}")
+        Label(win, text=head, justify="left", anchor="w",
+              font=("Georgia", 9), bg="white").pack(fill="x", padx=8, pady=(8, 2))
+
+        if peak.get("ri_assumed_unverified"):
+            Label(win, text="⚠ Peak RI is assumed/borrowed (unverified) — matches are provisional.",
+                  fg="firebrick", anchor="w", font=("Georgia", 8), bg="white"
+                  ).pack(fill="x", padx=8)
+
+        # ---- candidates tree ----
+        cols = ("match", "name", "cas", "formula", "libval", "delta", "source")
+        headers = {"match": "Match", "name": "Compound", "cas": "CAS",
+                   "formula": "Formula", "libval": "Lib RI/Rt", "delta": "Δ",
+                   "source": "Source file"}
+        widths = {"match": 70, "name": 190, "cas": 90, "formula": 80,
+                  "libval": 70, "delta": 55, "source": 150}
+        frame = Frame(win, bg="white")
+        frame.pack(fill="both", expand=True, padx=8, pady=6)
+        tree = Treeview(frame, columns=cols, show="headings", height=14)
+        for c in cols:
+            tree.heading(c, text=headers[c])
+            tree.column(c, width=widths[c], anchor="w", stretch=(c == "name"))
+        vs = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vs.set)
+        tree.pack(side="left", fill="both", expand=True)
+        vs.pack(side="right", fill="y")
+
+        def _row(cand, label):
+            name = cand.get("Name") or cand.get("NAME") or "?"
+            if "ri" in cand.get("match_dimensions", []):
+                libval, delta = cand.get("RI"), cand.get("delta_ri")
+            elif "rt" in cand.get("match_dimensions", []):
+                libval, delta = cand.get("Rt[sec]"), cand.get("delta_rt")
+            else:
+                libval, delta = cand.get("Dt[a.u.]"), cand.get("delta_k0")
+            src = (cand.get("source_file") or cand.get("source_file_gc")
+                   or cand.get("source_file_ims") or "—")
+            return (label, name, cand.get("CAS") or "—", cand.get("Formula") or "—",
+                    "—" if libval is None else f"{libval:g}",
+                    "—" if delta is None else f"{delta:.3g}", src)
+
+        # ±10 RI on a 100k-row library can return hundreds of hits; show the
+        # closest MAX_PER of each branch (already delta-sorted) to stay usable.
+        MAX_PER = 150
+        tree.tag_configure("combined", background="#e7f5e7")
+        for c in combined:
+            tree.insert("", "end", values=_row(c, "GC+IMS"), tags=("combined",))
+        for c in gc_only[:MAX_PER]:
+            tree.insert("", "end", values=_row(c, "GC"))
+        for c in ims_only[:MAX_PER]:
+            tree.insert("", "end", values=_row(c, "IMS"))
+
+        total = len(combined) + len(gc_only) + len(ims_only)
+        shown = len(combined) + min(len(gc_only), MAX_PER) + min(len(ims_only), MAX_PER)
+        trunc = "" if shown == total else f" — showing closest {shown} of {total}"
+        foot = (f"{total} candidate(s) within tolerance{trunc} "
+                f"(RI ±{match.DEFAULT_RI_TOLERANCE:g}, "
+                f"Rt ±{match.DEFAULT_RT_TOLERANCE:g}s, "
+                f"K0 ±{match.DEFAULT_K0_TOLERANCE:g}; sorted by Δ).  "
+                f"GC lib strategy: {select_info.get('ril_strategy', '?')}"
+                + ("" if total else
+                   "  —  nothing matched; widen tolerance or check RI calibration."))
+        Label(win, text=foot, justify="left", anchor="w",
+              font=("Georgia", 8), fg="gray30", bg="white").pack(fill="x", padx=8, pady=(0, 8))
 
     def generate_numbered_overlay(self):
         """Invoke peak_with_number.py to render an overlay with peak-id numbers."""

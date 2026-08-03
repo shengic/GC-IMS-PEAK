@@ -22,8 +22,10 @@ progress tracker, not the design.
 - STD confirmed **C4–C9 methyl ketones**; the 6 RI values are **borrowed**
   (`assumed_unverified` / `borrowed_cross_referenced`, see
   `methyl_ketone_RI_provenance.md`) — upgrade path documented there.
-- UI (`main.py`) rollout: **Batches 1, 2, 3, 4, 6 done** + Stage-4 wiring.
-  Batches 5, 7, 8 pending.
+- UI (`main.py`) rollout: **Batches 1, 2, 3, 4, 5, 6 done** + Stage-4 wiring.
+  Batches 7, 8 pending. (Batch 5 = the ▶ compound-match panel: clicking a peak's
+  ▶ loads the `.ril`/`.iml` libraries and lists candidate compounds via
+  `match.match_all`.)
 - **125** pytest checks passing across `test/` (added `test_calibration.py`).
 - Project uses `.venv` at project root; install with
   `"F:/GC-IMS-PEAK/.venv/Scripts/python.exe" -m pip install -r requirements.txt`.
@@ -153,9 +155,9 @@ in the editor while another process is editing it.
 | 5 | Tolerance-window match | `match.py` | Done | Three lists: `gc_matches` / `ims_matches` / `combined_matches` (intersect by CAS). `match_all()` picks RI vs RT fallback per peak. Default tolerances are placeholders (RI ±10, Rt ±5s, K0 ±0.05). |
 | 6 | Integration | `identify.py` | Done | CLI-runnable. Full pipeline: peaks.json → header → K0 → rules → library → match → `_peaks_identified.json`. Provenance carried through (`k0_mode`, `source_file`, `match_dimensions`, `gc_dimension`). |
 | 7 | Rule engine | `rules.py` | Done | R001–**R006** registered. Three rule types (per_peak / per_peak_with_context / batch) + a `mandatory` flag. `mark_rules()` marks `rule_active` without removing; `apply_rules()` = mark + filter (kept for `identify.py`). R004/R006 are mandatory and applied **before** the prominence gate inside `peaks.py`. |
-| 8 | Interactive UI (main peak view) | `main.py` | Batches 1, 2, 3, 4, 6 done; 5, 7, 8 pending | See "UI batching" below. |
+| 8 | Interactive UI (main peak view) | `main.py` | Batches 1, 2, 3, 4, 5, 6 done; 7, 8 pending | See "UI batching" below. |
 | 9 | Batch conversion | `batch_convert.py` (not yet) | Not started | Optional. |
-| 10 | Compound-match panel | part of `main.py` | Batch 5 | UI face of `identify.py` output. |
+| 10 | Compound-match panel | part of `main.py` | **Done (Batch 5)** | ▶ on a peak loads `.ril`/`.iml` (cached) and lists candidates via `match.match_all` (combined/GC/IMS, Δ-sorted). K0/IMS branch empty until a K0 profile exists. `test/test_match_panel.py`. |
 | 11 | Generate Report | part of `main.py` | Batch 8 | Content spec in `Report_Content_Example.md`; export format still TBD. |
 
 ---
