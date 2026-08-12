@@ -1,6 +1,6 @@
 """
 identify.py  —  GC-IMS Identify Workflow 第六階段：整合輸出
-Version: 3.1 — by Albert Sheng
+Version: 3.2 — by Albert Sheng
 
 依 GC-IMS_Identify_Workflow.md §第六階段：
   輸入：_peaks.json（來自 peaks.py，已含 drift_relative 由 rip 整合）
@@ -166,6 +166,7 @@ def identify(peaks_doc, mea_path,
              library_dir=None,
              ri_calibration=None, resolve_ri=True, ri_series_key=None,
              ri_registry_path="ri_calibration_registry.json", ri_max_days_gap=None,
+             resolve_k0=True, k0_series_key="ketone",
              ri_tolerance=match.DEFAULT_RI_TOLERANCE,
              rt_tolerance=match.DEFAULT_RT_TOLERANCE,
              k0_tolerance=match.DEFAULT_K0_TOLERANCE,
@@ -197,25 +198,38 @@ def identify(peaks_doc, mea_path,
     # ---- 讀表頭 ----
     header = read_mea_header(mea_path)
 
+    # ---- 資料夾層級校正解析（RI 與 K0 一次解出）----
+    # 兩者讀同一支 STD 的同一份 _peaks.json，分開解會掃兩次資料夾，且一旦各自挑到
+    # 不同 STD 就會產生「同批次的 RI 與 K0 出處不一致」這種無徵兆的錯誤。
+    ri_detail, k0_detail, k0_mode = {}, {}, None
+    # 呼叫端自帶的校正一律優先，不被自動解析覆蓋
+    ri_mode = ("provided" if isinstance(ri_calibration, dict) else "unavailable")
+    need_ri = ri_calibration is None and resolve_ri
+    need_k0 = profile is None and resolve_k0
+    if need_ri or need_k0:
+        folder = os.path.dirname(os.path.abspath(mea_path))
+        dims = calibration.extract_registry_dims(header)
+        resolved = calibration.resolve_calibrations_cached(
+            folder, dims=dims, series_key=ri_series_key,
+            registry_path=ri_registry_path, max_days_gap=ri_max_days_gap,
+            k0_series_key=k0_series_key,
+        )
+        if need_ri:
+            ri_calibration, ri_mode, ri_detail = resolved["ri"]
+        if need_k0:
+            profile, k0_mode, k0_detail = resolved["k0"]
+
     # ---- 第二階段：K0 換算 ----
     if profile is None:
         profile = dt_convert.default_profile_unavailable(
-            "no calibration profile provided to identify.py"
+            "資料夾內沒有可用的 STD，且未以 --profile 指定校正檔"
+            if resolve_k0 else "no calibration profile provided to identify.py"
         )
     dt_convert.attach_k0(peaks, header, profile, raw_TP=raw_tp)
 
     # ---- 第四階段：RT→RI 校正 ----
-    ri_detail = {}
-    if ri_calibration is None and resolve_ri:
-        folder = os.path.dirname(os.path.abspath(mea_path))
-        dims = calibration.extract_registry_dims(header)
-        ri_calibration, ri_mode, ri_detail = calibration.resolve_ri_calibration(
-            folder, dims=dims, series_key=ri_series_key,
-            registry_path=ri_registry_path, max_days_gap=ri_max_days_gap,
-        )
-    else:
-        ri_mode = (ri_calibration.get("ri_mode", "provided")
-                   if isinstance(ri_calibration, dict) else "unavailable")
+    if isinstance(ri_calibration, dict):
+        ri_mode = ri_calibration.get("ri_mode", ri_mode)
 
     if ri_calibration is None:
         for p in peaks:

@@ -172,9 +172,9 @@ main.py     → Tkinter UI，串起上面兩支 + peak_with_number.py 疊字顯�
    >
    > `build_k0_profile_from_std()` 把它包成本節定義的 profile 格式。
    >
-   > **尚未完成**：`resolve_ri_calibration()` 的資料夾解析／快取路徑還沒產生 K0
-   > profile，所以 UI 選資料夾時只拿得到 RI 校正、`k0_mode` 仍是 `unavailable`。
-   > 常數已經存在，但還沒接到使用端。
+   > **✅ [v3.2] 已接上使用端。** `resolve_calibrations_cached()` 一次解出 RI 與 K0
+   > （K0 沿用 RI 選中的那支 STD），`identify.py` 與 UI 都改走這條路。實測 STD：
+   > 37 顆峰全部 `k0_mode=standard_based`，IMS 比對維度由 RIPrel 轉為 **k0**。
 
 2. **`"raw_parameters"`（退路）**：沒有校準標準品時，直接讀表頭四個常數代入原公式（即第一版設計）：
    ```python
@@ -990,7 +990,7 @@ peaks.py
 | 模組 | 階段 | 狀態 |
 |---|---|---|
 | `rip.py` | 1 | ✅ 完成 |
-| `dt_convert.py` | 2 | ✅ 完成，T/P 欄位對應已由反編譯確認；**待接**：資料夾快取尚未產生 K0 profile |
+| `dt_convert.py` | 2 | ✅ 完成，T/P 欄位對應已由反編譯確認；v3.2 起已接上資料夾解析路徑，UI 與 CLI 皆走 `standard_based` |
 | `library.py` | 3 | ✅ 完成，含 drift gas 交叉檢查（保守語意） |
 | `calibration.py` + `reference_series.py` | 4 | ✅ 完成，錨點改用 `match_anchors_by_dt()` |
 | `match.py` | 5 | ✅ 完成，2-D（RI × drift_relative） |

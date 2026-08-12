@@ -1,11 +1,14 @@
 """
 main.py  —  GC-IMS Desktop UI (Tk)
-Version: 3.1 — by Albert Sheng
+Version: 3.2 — by Albert Sheng
 
 A desktop application for browsing, reading, and analyzing GC-IMS .mea files.
 Workflow: browse folder → select .mea (auto-read) → show detected peaks → inspect.
 
 Changelog:
+  3.2 — K0 校正接進資料夾解析路徑：選資料夾時與 RI 一次解出並存進 state，
+      峰在比對前由 `_attach_k0_to()` 補上 k0_value，IMS 軸因此從只有
+      RIPrel 一維變成可走 K0。
   3.1 — 熱圖標題列新增「ⓘ 軸說明」按鈕，開窗說明兩軸的正規化（內容全部來自
       calibration.axis_explanation()，UI 端不另寫一份）；修正互動峰視圖的
       標題誤印內部代號 "bg"（kind 對照表漏了這個 key，fallback 直接印出來）。
@@ -197,6 +200,10 @@ class AppState:
         # 第四階段：本資料夾的 RT→RI 校準表（選資料夾時背景解析一次，跨檔案共用）
         self.ri_calibration = None
         self.ri_calibration_folder = None
+        # 第二階段：同一次解析得到的 K0 profile。峰的 k0_value 要靠它補上，
+        # 否則 match_all() 只能退回 RIPrel 漂移那條路。
+        self.k0_profile = None
+        self.k0_mode = "unavailable"
         # 第十階段：載入一次的比對庫 (ril_rows, iml_rows, select_info)，跨峰共用
         self.library_rows = None
         self.library_unavailable = False   # 記住庫載入失敗，避免每次重繪重試
@@ -597,7 +604,7 @@ class GCIMSApp:
         self.state = AppState()
         self._match_windows = {}   # peak_id -> open compound-match Toplevel (dedup)
         self.ui_state = UIState.START
-        self.root.title("GC-IMS Peak Detection — v3.1 by Albert Sheng")
+        self.root.title("GC-IMS Peak Detection — v3.2 by Albert Sheng")
         # Fit the actual screen instead of a fixed 1700x950: on a smaller
         # display that pushed part of the three-pane layout off-screen, and the
         # 1400x800 minsize then made it impossible to shrink back into view.
@@ -903,8 +910,12 @@ class GCIMSApp:
 
         def resolve():
             calibration.clear_session_cache()
-            return calibration.resolve_ri_calibration_cached(
-                folder, series_key=RI_SERIES, use_sidecar=False)
+            # 一次解 RI 與 K0：兩者出自同一支 STD，分開解會有挑到不同 STD 而無徵兆的風險
+            out = calibration.resolve_calibrations_cached(
+                folder, series_key=RI_SERIES, k0_series_key=RI_SERIES,
+                use_sidecar=False)
+            self._pending_k0 = out["k0"]
+            return out["ri"]
 
         def work():
             cal = mode = None
@@ -943,6 +954,13 @@ class GCIMSApp:
         """背景校準完成 → 存 state；若在此期間使用者換了資料夾則丟棄。"""
         if folder != self.state.current_folder:
             return
+        # K0 profile 與 RI 一起解出（見 _start_folder_calibration.resolve）。存進
+        # state 讓峰載入時能補上 k0_value —— 沒有它 match_all() 只能走 RIPrel 那條路。
+        k0_profile, k0_mode, _k0_detail = getattr(self, "_pending_k0",
+                                                  (None, "unavailable", {}))
+        self.state.k0_profile = k0_profile
+        self.state.k0_mode = k0_mode
+
         if isinstance(cal, dict) and cal.get("mode") == "multi_point_loglinear":
             self.state.ri_calibration = cal
             n = cal.get("anchor_selection", {}).get("n_clean_anchors", "?")
@@ -1969,11 +1987,38 @@ class GCIMSApp:
             self._ensure_libraries_then(
                 lambda: self._match_and_cache(uncached, refresh=True), notify=False)
 
+    def _attach_k0_to(self, peaks):
+        """用資料夾解出的 K0 profile 補上每顆峰的 `k0_value` / `k0_mode`。
+
+        沒有 profile 就原封不動——`match_all()` 看不到 `k0_value` 會自己退回 RIPrel
+        漂移比對，那是有意的降級路徑，不需要在這裡塞一個假的 None 進去。
+
+        表頭只讀前幾 KB（`calibration.read_mea_header`），不碰上百 MB 的矩陣。
+        """
+        prof = getattr(self.state, "k0_profile", None)
+        if not prof or not peaks:
+            return
+        mea = getattr(self.state, "selected_mea_file", None)
+        if not mea or not str(mea).lower().endswith(".mea"):
+            return
+        try:
+            import dt_convert
+            header = calibration.read_mea_header(mea)
+            if header:
+                dt_convert.attach_k0(peaks, header, prof)
+        except Exception as e:
+            print(f"[warn] K0 attach skipped ({e})")
+
     def _match_and_cache(self, targets, refresh=False, then=None):
         """Match `targets` (background), store results in the per-file cache by
         coordinate, then optionally refresh the table / run `then`."""
         ril_rows, iml_rows, _info = self.state.library_rows
         q = queue.Queue()
+
+        # 比對前補上 k0_value：match_all() 有 K0 就走 K0、沒有就退回 RIPrel 漂移。
+        # 峰是從 _peaks.json 載入的，那裡沒有 K0（peaks.py 不做第二階段），所以不在
+        # 這裡補的話，UI 永遠只走得到 RIPrel 那一半。
+        self._attach_k0_to(targets)
 
         def work():
             import match

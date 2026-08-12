@@ -77,8 +77,12 @@ def test_identify_smoke():
 
     peaks_doc = _make_peaks_doc()
 
-    sep("[1] identify() 全預設（unavailable K0、default rules）")
-    result = identify.identify(peaks_doc, MEA)
+    # resolve_k0=False 是刻意的：本段鎖的是「**沒有** K0 校準時的行為」，而自從
+    # K0 可從資料夾的 STD 自動解出之後，預設路徑已經拿得到 standard_based。少了這個
+    # 參數，下面那些 k0 斷言測到的就不再是它們原本要守的那件事。
+    # 預設行為（K0 自動解析）由 [1b] 另外驗。
+    sep("[1] identify() 無 K0 校準（resolve_k0=False、default rules）")
+    result = identify.identify(peaks_doc, MEA, resolve_k0=False)
     print(f"  n_in={result['n_peaks_in']}  n_out={result['n_peaks_out']}")
     print(f"  k0_mode_summary={result['k0_mode_summary']}")
     print(f"  ril_files={result['library_summary']['ril_files'][:3]}...")
@@ -108,6 +112,19 @@ def test_identify_smoke():
         assert p["matches"]["ims_dimension"] != "k0", "無 K0 校準時不得走 K0 分支"
         assert all("k0" not in h.get("match_dimensions", [])
                    for h in p["matches"]["ims_matches"])
+
+    sep("[1b] identify() 預設：K0 自資料夾 STD 自動解析")
+    auto = identify.identify(peaks_doc, MEA)
+    print(f"  k0_mode_summary={auto['k0_mode_summary']}")
+    # 這批資料夾裡有可用的 STD，且 reference_series 的 ketone 帶 dt_values +
+    # inv_k0_values，故應解出 standard_based 而非退回 unavailable。
+    assert auto["k0_mode_summary"].get("standard_based"), (
+        "資料夾內有可用 STD 時，K0 應自動解出 standard_based，"
+        f"實得 {auto['k0_mode_summary']}")
+    for p in auto["peaks"]:
+        assert p["k0_mode"] == "standard_based"
+        assert isinstance(p["k0_value"], float) and p["k0_value"] > 0, (
+            "standard_based 模式下每顆峰都應有正的 K0 值")
 
     sep("[2] identify() 用 standard_based profile 模擬有校準常數")
     profile = {"profile_name": "test",

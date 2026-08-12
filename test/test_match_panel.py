@@ -170,6 +170,7 @@ def test_autofill_populates_gc_column_without_trigger():
                 pass
         app.status_label = _L()
         for name in ("_apply_cached_matches", "_autofill_gc_matches", "_match_and_cache",
+                     "_attach_k0_to",
                      "_poll_match_and_cache", "_ensure_libraries_then", "_poll_libraries",
                      "_refresh_match_columns", "_cell_value", "_peak_by_id", "_refresh_row"):
             setattr(app, name, getattr(GCIMSApp, name).__get__(app, _Shim))

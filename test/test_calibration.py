@@ -800,3 +800,37 @@ def test_extract_raw_tp_sums_the_two_pressures():
     # 缺欄位要明確失敗，不猜
     tp2, det2 = dtc.extract_raw_tp({"Start temp 1": "45"})
     assert tp2 is None and det2["missing"]
+
+
+def test_ri_and_k0_resolve_from_the_same_std(tmp_path):
+    """同一批次的 RI 與 K0 必須出自同一支 STD。
+
+    這是分開解析時最容易出現、卻完全沒有徵兆的錯誤：兩邊各自掃資料夾、各自挑 STD，
+    挑到不同支時兩個校正都「成功」，也都不會報錯，只是後續每一次比對都建立在兩組
+    不一致的基準上。`resolve_calibrations_cached()` 因此把 RI 選中的檔名傳給 K0。
+    """
+    folder = tmp_path / "batch"
+    folder.mkdir()
+    # STD 是靠表頭 Sample=='STD' 認的，不是檔名，所以要寫真的表頭
+    for name in ("260101_000000_STD.mea", "260102_000000_STD.mea"):
+        (folder / name).write_text("Sample = STD\nChunk sample rate = 150 [kHz]\n",
+                                   encoding="latin-1")
+
+    good = _STD_K0                       # 六個乾淨錨點
+    def loader(mea_path):
+        base = os.path.basename(mea_path)
+        # 第一支只有兩顆峰（RI 不可用），第二支才是好的 → RI 必然選第二支
+        return (good if base.startswith("260102") else good[:2]), dict(_HDR_K0)
+
+    cal.clear_session_cache()
+    out = cal.resolve_calibrations_cached(
+        str(folder), series_key="ketone", k0_series_key="ketone",
+        std_peaks_loader=loader, use_sidecar=False)
+
+    ri_cal, ri_mode, _ = out["ri"]
+    _, _, k0_detail = out["k0"]
+    assert ri_mode == "batch_own_std"
+    assert ri_cal["std_file"] == "260102_000000_STD.mea"
+    assert k0_detail["std_used"] == ri_cal["std_file"], (
+        "K0 必須沿用 RI 選中的 STD；掃描順序的第一支是 260101，"
+        "若這裡是 260101 就代表 prefer_std 沒生效")

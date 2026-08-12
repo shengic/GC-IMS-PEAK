@@ -1,6 +1,6 @@
 # GC-IMS-PEAK — Status & Session Handoff
 
-**Last updated**: 2026-08-12 (session with Claude) — code tagged **v3.1**
+**Last updated**: 2026-08-12 (session with Claude) — code tagged **v3.2**
 **Project root**: `F:/GC-IMS-PEAK` (was `K:/` in earlier sessions — paths below updated)
 **Purpose**: catch a new session up on where the Identify Workflow implementation
 stands, what has been decided, what is testable now, and what to do next. Pair
@@ -611,10 +611,13 @@ These are things I cannot resolve — user needs to decide or provide data.
    library cannot silently produce a plausible-looking constant.
    `build_k0_profile_from_std()` wraps it as a `dt_convert` profile.
 
-   **Still to wire**: the profile is not yet produced by the folder-resolution /
-   cache path, so selecting a folder in the UI yields an RI calibration but not a
-   K0 one. Until that is done `k0_mode` stays `unavailable` in the UI and
-   K0-based matching still has no input, even though the constant now exists.
+   **✅ Wired 2026-08-12 (v3.2).** `resolve_calibrations_cached()` now resolves RI
+   and K0 in one pass from the same STD, and both `identify.py` and the UI use it.
+   Measured on the STD: `k0_mode=standard_based` on all 37 peaks, and the IMS
+   match dimension flips from RIPrel to **k0** (`ims_dimensions_used={'k0': 37}`).
+   K0 deliberately has **no registry-borrowing tier** — `instrument_constant` is
+   tied to this machine's drift-tube geometry and voltage, so a borrowed value is
+   meaningless, unlike an RI scale.
 
 3. **The two problems the manager's table brought with it** — both block trusting
    any RI number the app prints. Full analysis: `ketone_RI_provenance.md`.
@@ -752,12 +755,13 @@ are done — see the Batch table above.)*
 
 **Code work that can start now:**
 
-4. **Wire K0 into the folder-resolution / cache path** so selecting a folder
-   produces both an RI *and* a K0 profile. The instrument constant exists and is
-   solid (IC = 25.0808, CV 0.133%) but nothing calls
-   `build_k0_profile_from_std()` from the UI flow, so `k0_mode` is still
-   `unavailable` there and `.iml` K0 matching still has no input. This is the
-   single highest-value remaining task — it turns on a whole matching dimension.
+4. ~~Wire K0 into the folder-resolution / cache path~~ — ✅ **done in v3.2.**
+   `resolve_calibrations_cached()` resolves RI and K0 together from the same STD;
+   `identify.py` and the UI both use it. `ims_dimensions_used` on the STD went
+   from RIPrel to `{'k0': 37}`. **Now worth checking**: the K0 dimension produces
+   far more IMS candidates than RIPrel did (673 hits across 37 peaks), so the
+   ±0.05 K0 tolerance is probably too loose — it is still a placeholder
+   (open decision 4) and now has real data to be calibrated against.
 5. **UI Batches 7 and 8.** 7 is cosmetic (translucent labels, already partly
    done via `-stipple`). 8 (Generate Report) is the last unimplemented feature;
    content spec is in `Report_Content_Example.md`, export format still TBD.

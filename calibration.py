@@ -1,8 +1,14 @@
 """
 calibration.py  —  GC-IMS Identify Workflow 第四階段：RT→RI 轉換（保留時間正規化）
-Version: 3.1 — by Albert Sheng
+Version: 3.2 — by Albert Sheng
 
 變更記錄：
+  3.2  — 新增 resolve_k0_profile() 與 resolve_calibrations_cached()：RI 與 K0 由
+         同一次解析、同一支 STD 產出（K0 沿用 RI 選中的 STD，避免同批次兩種
+         校正出處不一致而無徵兆）。K0 不做 registry 借用——instrument_constant
+         綁定這台機器的漂移管幾何與電壓，借來的數字沒有意義。新增
+         read_mea_header() 只讀表頭數 KB，因為 _peaks.json 沒有 K0 需要的欄位。
+         sidecar 升為 v2（RI+K0），舊 sidecar 視同過期重算。
   3.1  — 新增 ri_slope_summary()（RI 軸 dRI/dlog10(RT) 的摘要，一併回報
          「若用單一直線換算的最大偏差」，以免有人拿全域斜率手算而配錯峰）
          與 axis_explanation()（UI「ⓘ 軸說明」的中文說明唯一來源）；
@@ -1186,6 +1192,9 @@ def build_calibration_from_std_files(std_files, std_peaks_loader,
         return None, evaluated
     best = max(usable, key=lambda e: e.get("n_clean_anchors") or 0)
     chosen = dict(best["cal"])
+    # 記下實際選用的是哪一支 STD：K0 校正必須用同一支，否則同一批次的 RI 與 K0
+    # 可能悄悄來自不同 STD，而兩者都不會報錯。
+    chosen["std_file"] = best["std"]
     if len(usable) > 1:
         chosen["bracket_note"] = (f"{len(usable)} 支可用 STD，目前選乾淨錨點最多者"
                                   "（{}）；跨時間 bracket 加權為未來增強".format(best["std"]))
@@ -1245,6 +1254,85 @@ def resolve_ri_calibration(folder_path, dims=None,
     return None, "unavailable", detail
 
 
+def _header_has_k0_fields(header):
+    """K0 需要的表頭欄位是否齊備（用 sample rate 當代表）。"""
+    return bool(header) and any(
+        k.startswith("Chunk sample rate") for k in header)
+
+
+def read_mea_header(mea_path, max_bytes=32768):
+    """只讀 `.mea` 開頭的 ASCII 表頭，不載入後面的強度矩陣。
+
+    存在的理由是成本：整份 `.mea` 有 120 MB 以上，而 K0 只需要表頭裡的幾個數字。
+    `readGAS.read_mea()` 會把整個矩陣讀進記憶體，拿來只為了取表頭並不划算。
+    讀不到就回 None，由呼叫端決定怎麼處理，不在這裡拋例外。
+    """
+    try:
+        import readGAS
+        with open(mea_path, "rb") as f:
+            return readGAS.parse_header(f.read(max_bytes))
+    except Exception:
+        return None
+
+
+def resolve_k0_profile(folder_path, series_key="ketone", std_peaks_loader=None,
+                       prefer_std=None, dt_match_tol=0.01, max_cv=0.02):
+    """從資料夾的 STD 解出 K0 校正 profile，回傳 (profile|None, k0_mode, detail)。
+
+    與 `resolve_ri_calibration()` 對稱，但**刻意不做 registry 借用那一層**：RI 借用
+    別批次的尺標只是換個座標系，K0 的 instrument_constant 卻綁定這台機器的漂移管
+    幾何與電壓，借來的數字沒有意義。所以只有 (a) 本批 STD 與 (c) 無 兩態。
+
+    `prefer_std` 傳入 RI 實際選用的 STD 檔名時，K0 會用同一支——同批次的兩種校正
+    出自不同 STD 是很難察覺的錯誤。找不到該檔才退回掃描結果的第一支。
+
+    k0_mode 的三個值與 `dt_convert` 的模式一致：
+      "standard_based" —— 反推出 instrument_constant，可用於比對
+      "raw_parameters" —— 標稱值退路，實測偏高約 +3.5%，**不足以做鑑定**
+      "unavailable"    —— 連 T/P 都缺
+    """
+    loader = std_peaks_loader or _default_std_peaks_loader
+    std_files = scan_folder_for_std(folder_path)
+    detail = {"std_files": [os.path.basename(f) for f in std_files]}
+    if not std_files:
+        detail["reason"] = "資料夾內無 STD；K0 不做 registry 借用（見 docstring）"
+        return None, "unavailable", detail
+
+    chosen = std_files[0]
+    if prefer_std:
+        for f in std_files:
+            if os.path.basename(f) == prefer_std:
+                chosen = f
+                break
+        else:
+            detail["prefer_std_missing"] = prefer_std
+    detail["std_used"] = os.path.basename(chosen)
+
+    peaks, header = loader(chosen)
+    if peaks is None:
+        detail["reason"] = "STD 尚未偵測（缺 _peaks.json），請先跑 peaks.py"
+        return None, "unavailable", detail
+
+    # `_peaks.json` 只留了 source/machine/sample，沒有 K0 需要的 sample_rate /
+    # 漂移電壓 / 溫壓——那些只在 .mea 表頭裡。直接讀表頭那幾 KB（不碰後面上百 MB
+    # 的矩陣）。RI 不需要這些欄位，所以這個缺口只在接上 K0 之後才會浮現。
+    if not _header_has_k0_fields(header):
+        mea_header = read_mea_header(chosen)
+        if mea_header:
+            header = {**(header or {}), **mea_header}
+            detail["header_from_mea"] = True
+        else:
+            detail["reason"] = f"讀不到 .mea 表頭：{os.path.basename(chosen)}"
+            return None, "unavailable", detail
+
+    profile, k0_detail = build_k0_profile_from_std(
+        peaks, header, series_key=series_key,
+        dt_match_tol=dt_match_tol, max_cv=max_cv)
+    detail["build"] = k0_detail
+    mode = (profile or {}).get("k0_calibration", {}).get("mode", "unavailable")
+    return (profile if mode != "unavailable" else None), mode, detail
+
+
 def stamp_ri_provenance(peaks, cal, ri_mode):
     """attach_ri 之後，把解析層的來源 provenance（ri_mode/ri_confidence_note）也
     蓋到每個峰上（point 12 的 ri_mode 是「來源」，與 attach_ri 寫的『校正方法』
@@ -1261,12 +1349,25 @@ def stamp_ri_provenance(peaks, cal, ri_mode):
 _SESSION_CACHE = {}
 
 
-def resolve_ri_calibration_cached(folder_path, dims=None, use_sidecar=True,
-                                  sidecar_name="_folder_calibration.json", **kw):
-    """
-    §10 資料夾層級快取：session 記憶體 → sidecar 檔（依 .mea mtime 判新鮮）→ 現算。
-    回傳 (calibration_dict|None, ri_mode, detail)。sidecar 寫在資料夾內（GAS/ 已被
-    .gitignore，不會進版控）。
+# sidecar 結構版本。1 = 只有 RI；2 = RI + K0。舊 sidecar 讀進來會缺 K0，視同過期
+# 重算，而不是回一個「K0 不可用」的假結論——後者會讓已經解得出來的常數看起來不存在。
+SIDECAR_VERSION = 2
+
+
+def resolve_calibrations_cached(folder_path, dims=None, use_sidecar=True,
+                                sidecar_name="_folder_calibration.json",
+                                k0_series_key="ketone", **kw):
+    """§10 資料夾層級快取，一次解出 **RI 與 K0 兩種校正**。
+
+    回傳 dict：`{"ri": (cal, ri_mode, detail), "k0": (profile, k0_mode, detail)}`。
+
+    兩者合在同一次解析、同一份 sidecar 的理由：它們讀的是**同一支 STD 的同一份
+    `_peaks.json`**，分開做會掃兩次資料夾，而且一旦各自挑到不同 STD 就會產生同批次
+    RI 與 K0 出處不一致的錯誤——那種錯不會有任何徵兆。K0 因此明確接收 RI 選中的
+    STD 檔名。
+
+    快取順序：session 記憶體 → sidecar（比所有 `.mea` 新才算有效）→ 現算。
+    sidecar 寫在資料夾內（`GAS/` 已 gitignore）。
     """
     if folder_path in _SESSION_CACHE:
         return _SESSION_CACHE[folder_path]
@@ -1275,18 +1376,47 @@ def resolve_ri_calibration_cached(folder_path, dims=None, use_sidecar=True,
     if use_sidecar and os.path.exists(sidecar) and _sidecar_fresh(sidecar, folder_path):
         with open(sidecar, "r", encoding="utf-8") as f:
             saved = json.load(f)
-        result = (saved.get("calibration"), saved.get("ri_mode"), saved.get("detail", {}))
-        _SESSION_CACHE[folder_path] = result
-        return result
+        if saved.get("sidecar_version") == SIDECAR_VERSION:
+            result = {
+                "ri": (saved.get("calibration"), saved.get("ri_mode"),
+                       saved.get("detail", {})),
+                "k0": (saved.get("k0_profile"), saved.get("k0_mode", "unavailable"),
+                       saved.get("k0_detail", {})),
+            }
+            _SESSION_CACHE[folder_path] = result
+            return result
 
     cal, ri_mode, detail = resolve_ri_calibration(folder_path, dims=dims, **kw)
+    # RI 選了哪支 STD，K0 就跟著用哪支
+    prefer = cal.get("std_file") if isinstance(cal, dict) else None
+    k0_profile, k0_mode, k0_detail = resolve_k0_profile(
+        folder_path, series_key=k0_series_key, prefer_std=prefer,
+        std_peaks_loader=kw.get("std_peaks_loader"))
+
     if use_sidecar and os.path.isdir(folder_path):
         with open(sidecar, "w", encoding="utf-8") as f:
-            json.dump({"calibration": cal, "ri_mode": ri_mode, "detail": detail},
+            json.dump({"sidecar_version": SIDECAR_VERSION,
+                       "calibration": cal, "ri_mode": ri_mode, "detail": detail,
+                       "k0_profile": k0_profile, "k0_mode": k0_mode,
+                       "k0_detail": k0_detail},
                       f, ensure_ascii=False, indent=2)
-    result = (cal, ri_mode, detail)
+
+    result = {"ri": (cal, ri_mode, detail),
+              "k0": (k0_profile, k0_mode, k0_detail)}
     _SESSION_CACHE[folder_path] = result
     return result
+
+
+def resolve_ri_calibration_cached(folder_path, dims=None, use_sidecar=True,
+                                  sidecar_name="_folder_calibration.json", **kw):
+    """只取 RI 的既有介面，回傳 (calibration_dict|None, ri_mode, detail)。
+
+    保留是為了不動既有呼叫端；實際工作由 `resolve_calibrations_cached()` 完成，
+    所以走這條路一樣會把 K0 一併算好放進快取與 sidecar，下次要用時不必重算。
+    """
+    return resolve_calibrations_cached(
+        folder_path, dims=dims, use_sidecar=use_sidecar,
+        sidecar_name=sidecar_name, **kw)["ri"]
 
 
 def _sidecar_fresh(sidecar, folder_path):
