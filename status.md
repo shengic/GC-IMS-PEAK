@@ -39,6 +39,9 @@ progress tracker, not the design.
 
 ### What changed on 2026-08-12 (later, tagged v3.1) — RT axis was wrong; K0 solved by decompiling VOCal
 
+*Workflow spec is now **draft.26**. Dated entries below quote the draft number
+current at the time of writing and are left as-is.*
+
 **1. ⚠ The retention-time axis was short by 16.7% — fixed, and versioned.**
 `rt_step_ms` was `averages × trigger_repetition`; it is `(averages + 1) ×
 trigger_repetition`. Four independent confirmations, recorded in full at the top

@@ -1,6 +1,6 @@
 # GC-IMS 化合物比對工作流程 —— 第一版草稿
 
-**Version: draft.25 — by Albert Sheng**
+**Version: draft.26 — by Albert Sheng**
 **狀態：草稿，持續更新中，尚未定案**
 
 > **[實作狀態 2026-07-27 — 程式已 tag v3]** 第一~七階段皆已實作並可端到端執行。
@@ -144,7 +144,37 @@ main.py     → Tkinter UI，串起上面兩支 + peak_with_number.py 疊字顯�
        t_d_s = (dt_raw / sample_rate_khz) / 1000.0
        return instrument_constant / (t_d_s * U)
    ```
-   優勢：完全不需要確認六個 `Start temp` 哪個對應漂移管、`EPC` 壓力是否等於管內實際壓力——這些個別欄位的不確定性被「整體校準」一次吸收掉。**[待決策，卡住這條路的關鍵前提]**：需要使用者提供或執行一次已知 K0 標準品的實測。
+   優勢：完全不需要確認六個 `Start temp` 哪個對應漂移管、`EPC` 壓力是否等於管內實際壓力——這些個別欄位的不確定性被「整體校準」一次吸收掉。
+
+   > **✅ [draft.26 解決] 這條路已經打通，而且不需要新的實測。**
+   >
+   > 卡住的前提原本寫成「需要使用者提供或執行一次已知 K0 標準品的實測」。實際上兩個
+   > 要素早就都在手上，只是沒被放在一起看：
+   >
+   > 1. **已知 K0 值**：`library_data/GAS BASE 3H_IMS K0.iml`（G.A.S. 官方基礎庫，
+   >    `DtMode=1/K0`）本來就帶著這六個酮的 K0 參考值。
+   > 2. **在這台機器上的實測**：本批的 STD 就是。它跑的正是這六個化合物，
+   >    `match_anchors_by_dt()` 已經能把峰對到化合物身上（見第四階段）。
+   >
+   > 於是 `calibration.derive_k0_instrument_constant()` 逐錨解 `IC = K0_ref · t · U`，
+   > 六個錨點各得一個 IC，取平均：
+   >
+   > | | |
+   > |---|---|
+   > | instrument_constant | **25.0808** |
+   > | 六錨的 CV | **0.133%** |
+   > | 各錨殘差 | < 0.25% |
+   >
+   > CV 0.133% 是這個結果可信的關鍵——六個獨立化合物、跨越整個漂移範圍，解出來的
+   > 常數一致到千分之一,代表「把 `ah × L²` 當一個數字整體校準」這個假設在這台機器上
+   > 確實成立。函式在 CV 超過 `max_cv` 時**拒絕回傳**而非給一個看起來合理的數字，
+   > 避免拿錯庫或配錯峰時靜默產生假的常數。
+   >
+   > `build_k0_profile_from_std()` 把它包成本節定義的 profile 格式。
+   >
+   > **尚未完成**：`resolve_ri_calibration()` 的資料夾解析／快取路徑還沒產生 K0
+   > profile，所以 UI 選資料夾時只拿得到 RI 校正、`k0_mode` 仍是 `unavailable`。
+   > 常數已經存在，但還沒接到使用端。
 
 2. **`"raw_parameters"`（退路）**：沒有校準標準品時，直接讀表頭四個常數代入原公式（即第一版設計）：
    ```python
@@ -172,7 +202,30 @@ main.py     → Tkinter UI，串起上面兩支 + peak_with_number.py 疊字顯�
    > `k0_library_value`。換算慣例屬於「這個庫怎麼存」，與「峰的 K0 怎麼算」是兩回事，
    > 混在一起正是本 bug 的成因。由 `test_both_modes_return_the_same_quantity()` 鎖住。
 
-   **[待決策，本輪部分澄清，未解決]**：`T`/`P` 該讀哪個表頭欄位仍不確定——表頭有 `Start temp 1` 到 `Start temp 6` 六個溫度欄位（本輪實測分別為 45/60/80/80/45/off），哪一個對應漂移管本身尚未確認；`'Start pressure EPC IMS'` 是否等於管內實際壓力也未確認。`L`（`nom Drift Tube Length`）、`U`（`nom Drift Potential Difference`）本輪已確認可直接從表頭讀取。此模式算出的 K0 帶有已知但無法量化的殘留誤差。
+   > **✅ [draft.26 解決] `T`/`P` 該讀哪個欄位——反編譯 VOCal 得到答案。**
+   >
+   > 這一項卡了很久，因為六個 `Start temp`（45/60/80/80/45/off）沒有一個標示用途，
+   > 而兩個壓力欄位（`Start ambient pressure` 100.393 kPa、`Start pressure EPC IMS`
+   > 1.45 kPa）數量級差了 70 倍，挑哪個都像是猜的。把儀器隨附的 VOCal `.jar`
+   > 反編譯（使用者自有軟體的互通性還原工程）之後：
+   >
+   > | 參數 | 取法 | 本批數值 |
+   > |---|---|---|
+   > | `T` | `Start temp 1` | 45 °C |
+   > | `P` | **`10 × (Start ambient pressure + Start pressure EPC IMS)`** | 1018.43 mbar |
+   >
+   > 出處 `BufferedMEA.java:313`，已寫進 `dt_convert.extract_raw_tp()` 回傳的
+   > provenance dict 裡。
+   >
+   > **關鍵在於壓力是「和」不是任一個**：EPC 是相對於環境的表壓（gauge），管內絕對
+   > 壓力等於環境壓力加上它。先前所有「該選哪一個」的討論方向本身就錯了——正確答案
+   > 不在選項裡。`compute_k0()` 現在在呼叫端沒給 T/P 時自動導出，不再需要 `--raw-tp`。
+   >
+   > **但這只解決了正確性，沒解決準確度。** 用這條路算出來的 K0 與
+   > `standard_based` 的結果差 **+3.5%**——而相鄰同系物的 K0 間距約 8%，也就是說
+   > 誤差已達一個同系物間距的 **43%**，足以把化合物配到隔壁去。故
+   > `raw_parameters` 仍**不適合用於鑑定**，只適合在完全沒有標準品時當粗略參考。
+   > 這正是本階段開頭「讀對表頭欄位 ≠ 消除機器差異」那個判斷的量化證實。
 
 3. **`"unavailable"`**：兩者皆無時，K0 相關比對（`.iml` 那條路、`R004`）直接跳過，`identify_peak()` 的 `ims` 分支回傳空清單並標注原因，不靜默產生不可信的數字。
 
@@ -187,9 +240,29 @@ identify.py 讀取順序：
      供後續分析區分「這個 K0 是哪種可信度算出來的」，不同 mode 產生的數值不應混為一談比較
 ```
 
-### 明確的未解決狀態聲明
+### 狀態聲明 —— draft.26 改寫
 
-**此問題尚未完全解決**，目前只有架構設計，缺兩個關鍵前提尚未到位：(a) 是否有可行的 K0 校準標準品或方法（決定能否啟用 `standard_based` 模式）；(b) 若暫時只能用 `raw_parameters` 退路，`T`/`P` 對應的表頭欄位仍需人工確認才能定案。在這兩點解決之前，第二階段的輸出（`k0_value`）應視為**暫定值，非最終可信數字**，任何依賴 K0 的下游判斷（`R004`、`.iml` 比對）都應該連帶標注同樣的不確定性。
+**原本卡住的兩個前提都已解決**，此處保留原文的判斷結構以便對照：
+
+| | 原本的未決項 | 現況 |
+|---|---|---|
+| (a) | 是否有可行的 K0 校準標準品或方法 | ✅ **已解決**——不需新測量。`GAS BASE 3H_IMS K0.iml` 的已知 K0 ＋ 本批 STD ＝ `IC = 25.0808`，CV 0.133% |
+| (b) | `raw_parameters` 的 `T`/`P` 欄位對應 | ✅ **已解決**——反編譯 VOCal：`Start temp 1`；壓力為 ambient 與 EPC 之**和** |
+
+**但 `k0_value` 目前仍然是 `None`，原因換了一個**：不再是「不知道怎麼算」，而是
+「算得出來卻還沒接上」——`resolve_ri_calibration()` 的資料夾解析／快取路徑只產生 RI
+profile，沒有產生 K0 profile，所以 `identify.py` 與 UI 拿到的 `k0_mode` 依然是
+`unavailable`。**這是目前整條鏈路上單一價值最高的待辦**：接上之後 `.iml` 的 K0 維度
+（本專案 `library_data/` 裡 203 筆 `1/K0` 資料）就能參與比對，IMS 軸從只有 RIPrel
+一個維度變成兩個。
+
+在接上之前，第二階段的輸出維持 `unavailable`，下游（`R004`、`.iml` 比對）照舊只用
+`drift_relative`——這一點沒有變化，也不影響現有結果的可信度：`R004` 本來就用
+`drift_relative` 而非 K0。
+
+**兩個模式的可信度不對等，不應混用**：`standard_based` 可用於鑑定；`raw_parameters`
+偏 +3.5%（≈ 同系物間距的 43%）僅供粗略參考。`k0_mode` 這個 provenance 標記存在的
+理由就是讓下游能分辨，切勿把兩種模式產生的數值放在一起比較。
 
 ---
 
@@ -910,35 +983,54 @@ peaks.py
 | 2 | `peaks.py` `write_overlay()` | ✅ 已修復並驗證（draft.11） |
 | 3 | `peak_with_number.py` `write_overlay_numbered()` | ✅ 已修復（draft.12 發現，ver.02 修復）——重用 `peaks._downsample_for_display()`，不另建第三份複製 |
 
-### 已設計但尚未寫成程式碼的新模組（第一～七、十階段）
+### 新模組（第一～七、十階段）—— ✅ **全部已實作（draft.26 更新）**
 
-`rip.py`／`dt_convert.py`／`library.py`／`calibration.py`／`match.py`／`rules.py`——邏輯設計、公式、資料格式皆已確認（部分已有對應 QC 測試骨架，見 `test/` 資料夾），但檔案本身都還不存在。`identify.py` 有骨架（早期版本），但**尚未更新**以下本輪新增的設計：`source_file` 溯源欄位（第三、六階段）、雙模式 K0 校準（`calibration_profile.json`，第二階段）。
+本節原文寫「檔案本身都還不存在」，那是 draft.13 時的狀態，早已不成立。現況：
 
-### 已設計但尚未寫成程式碼的 UI（`main.py`）
+| 模組 | 階段 | 狀態 |
+|---|---|---|
+| `rip.py` | 1 | ✅ 完成 |
+| `dt_convert.py` | 2 | ✅ 完成，T/P 欄位對應已由反編譯確認；**待接**：資料夾快取尚未產生 K0 profile |
+| `library.py` | 3 | ✅ 完成，含 drift gas 交叉檢查（保守語意） |
+| `calibration.py` + `reference_series.py` | 4 | ✅ 完成，錨點改用 `match_anchors_by_dt()` |
+| `match.py` | 5 | ✅ 完成，2-D（RI × drift_relative） |
+| `identify.py` | 6 | ✅ 完成，`source_file` 溯源已串接；CLI 與 UI 共用 `load_libraries()` |
+| `rules.py` | 7 | ✅ 完成，R001–R006，強制規則於突出度門檻前套用 |
 
-- 工具列重新設計（按鈕改名、順序、取消 Read File 獨立按鈕）
-- 主畫面改為 Canvas 原生物件（PIL 背景 + `create_oval` + `create_text`），取代現有的 matplotlib 靜態圖顯示
-- 峰表擴充四欄（`On`／`GC×IMS`／`GC`／`IMS`）與 ▶ 觸發鈕
-- 圈／表格列／核取方塊三方雙向同步（`toggle_peak()`）
-- 半透明數字標示（本輪確認用顏色模擬版，即方案 (a)，效果未經驗證）
-- 規則管理面板（第七階段 mockup 已定案）
+原文提到 `identify.py` 尚未更新的兩項設計：`source_file` 溯源**已完成**；雙模式 K0
+校準的**架構已完成**，但如第二階段末所述，profile 還沒由資料夾解析路徑產生。
+
+### UI（`main.py`）—— draft.26 更新：僅剩 Batch 8
+
+- ✅ 工具列重新設計（按鈕改名、順序、取消 Read File 獨立按鈕）
+- ✅ 主畫面改為 Canvas 原生物件（PIL 背景 + `create_oval` + `create_text`），取代 matplotlib 靜態圖顯示。實測圈位中位偏差 **1.2 px**
+- ✅ 峰表擴充四欄（`On`／`GC×IMS`／`GC`／`IMS`）與 ▶ 觸發鈕
+- ✅ 圈／表格列／核取方塊三方雙向同步（`toggle_peak()`），狀態以 `(rt_index, dt_index)` 為鍵持久化
+- ◐ 半透明數字標示——數字用 Tk `-stipple` 達成；圈只能改用顏色模擬，因為 `-outlinestipple` 在 Windows 上被靜默忽略
+- ✅ 規則管理面板（第七階段 mockup 已定案），改動後約 4 ms 重算整條漏斗
+- ✅ **[draft.26 新增] 「ⓘ 軸說明」對話框**：說明兩軸的正規化，文字唯一來源為 `calibration.axis_explanation()`，故不可能與實際校正值不一致。RIP 數值取自 `_bg.json`（`rip_index` / `rip_drift_ms`）而非重算，確保講的就是畫面上這張圖
 - 化合物比對面板（第十階段 mockup 已定案：單一 ▶、三段堆疊、信心圓點、來源檔案顯示）
 - 「Generate Report」按鈕（位置已定案，內容格式範例見 `Report_Content_Example.md`，實際匯出格式仍待決）
 
-### 卡住整條鏈路的三個關鍵決策
+### 卡住整條鏈路的三個關鍵決策 —— draft.26：三項全部解決
 
-| # | 問題 | 卡住哪個階段 |
+| # | 問題 | 現況 |
 |---|---|---|
-| 1 | 儀器常數（L/U/T/P）從哪來？ | 第二階段（K0 換算）——`L`/`U` 本輪已可從表頭取得，`T`/`P` 仍不確定 |
-| 2 | ~~STD 標準品的化合物身分~~ | ✅ **已解決（draft.24）**——經理對照表 `kintonemixed-C4-C9.xlsx` 帶 CAS，確認為 2-alkanone C4–C9。**但衍生兩個新的未決項**：(a) 對照表 RI 的管柱極性未確認（疑為極性，本批為非極性，差約 +302）；(b) 錨點碳數指派錯位一格，程式尚未修正 → 峰的 RI 輸出暫不可信。見 `ketone_RI_provenance.md` |
-| 3 | 有沒有 K0 校準標準品資料？ | 第二階段（`standard_based` 模式），沒有的話只能用帶殘留誤差的 `raw_parameters` 退路 |
+| 1 | ~~儀器常數（L/U/T/P）從哪來？~~ | ✅ **已解決（draft.26）**——`L`/`U` 早已可從表頭取得；`T`/`P` 由反編譯 VOCal 確認：`Start temp 1`，壓力為 ambient 與 EPC 之**和**。見第二階段 |
+| 2 | ~~STD 標準品的化合物身分~~ | ✅ **已解決（draft.24）**——經理對照表帶 CAS，確認為 2-alkanone C4–C9。衍生項：(a) 對照表 RI 的**管柱極性未確認**（疑為極性，本批為非極性，差約 +302）**← 唯一仍未解的項目**；(b) ~~錨點碳數指派錯位一格~~ ✅ 已由 `match_anchors_by_dt()` 修正（draft.24 同日），6/6 命中、平均 \|Δ\|=0.00273 |
+| 3 | ~~有沒有 K0 校準標準品資料？~~ | ✅ **已解決（draft.26）**——有，且不必新測：`GAS BASE 3H_IMS K0.iml` 的已知 K0 ＋ 本批 STD ＝ IC 25.0808、CV 0.133% |
 
-這些不是技術問題，是需要先盤點手上實際擁有的資料才能回答。
+原文寫「這些不是技術問題，是需要先盤點手上實際擁有的資料才能回答」——這句話後來被證明
+是對的，而且**比預期更對**。三項裡有兩項（1 和 3）的答案完全不需要新資料：一項在儀器
+隨附軟體的位元組碼裡，一項在已經放在 `library_data/` 裡的官方庫檔加上早就跑過的 STD。
+真正需要外部輸入的只剩 2(a) 管柱極性，而那必須由產出對照表的人回答。
 
 ---
 
 ## 修訂記錄
 
+- **draft.26**：**第二階段 K0 兩個卡了很久的未決項同時解決，且都不是靠新測量。**(1) **`raw_parameters` 的 `T`/`P` 欄位對應**——把儀器隨附的 VOCal `.jar` 反編譯（使用者自有軟體的互通性還原工程）後確認：`T` 取 `Start temp 1`（45 °C）；`P` 是 **`10 × (Start ambient pressure + Start pressure EPC IMS)`** ＝ 1018.43 mbar，出處 `BufferedMEA.java:313`。**壓力是「和」而非任一個**，因為 EPC 記的是相對環境的表壓，管內絕對壓力等於環境壓力加上它——這代表先前所有「六個 temp 挑哪個、兩個壓力挑哪個」的討論方向本身就錯了，正確答案不在選項裡。已寫進 `dt_convert.extract_raw_tp()`，`compute_k0()` 在未給 T/P 時自動導出。**但這只解決正確性，未解決準確度**：此路徑與標準品校準結果差 +3.5%，而相鄰同系物 K0 間距約 8%，誤差達一個間距的 43%，故 `raw_parameters` 仍不適合用於鑑定——這正是本階段開頭「讀對表頭欄位 ≠ 消除機器差異」該判斷的量化證實。(2) **`standard_based` 的校準標準品**——不需使用者提供。`library_data/GAS BASE 3H_IMS K0.iml`（G.A.S. 官方基礎庫，`DtMode=1/K0`）本就帶著這六個酮的已知 K0，而本批 STD 就是這六個化合物在這台機器上的實測；兩者早就都在手上，只是沒被放在一起看。`calibration.derive_k0_instrument_constant()` 逐錨解 `IC = K0_ref · t · U`，得 **IC = 25.0808、六錨 CV = 0.133%**、各錨殘差 < 0.25%。CV 千分之一是可信的關鍵：六個獨立化合物跨越整個漂移範圍仍一致，代表「把 `ah × L²` 整體校準」的假設在這台機器上成立。CV 超出 `max_cv` 時拒絕回傳，避免拿錯庫時靜默產生假常數。**尚未完成**：`resolve_ri_calibration()` 的資料夾／快取路徑還沒產生 K0 profile，故 UI 的 `k0_mode` 仍是 `unavailable`——常數已存在但未接上使用端，這是目前單一價值最高的待辦（接上後 IMS 軸從 RIPrel 一維變兩維）。(3) **保留時間軸公式更正**：`rt_step_ms` 應為 `(averages + 1) × trigger_repetition`，舊式少了 +1 使整條 RT 軸短 16.7%。四條獨立佐證：方法總長（新式落在整數分鐘）、經理對照表 `Rt[sec]` 殘差由 −16.7% 降到 ±1%、`gc-ims-tools` 0.1.10 的 `read_mea()`、VOCal `BufferedMEA.java:316`。強度矩陣、漂移軸、找峰、**RI 皆不受影響**（錨點與查詢值同時平移 `log10(7/6)`，分段線性內插對 x 平移不變，實測差 ~1e-13）。新增 `readGAS.RT_AXIS_VERSION`，隨產物寫入並在載入舊產物時警告——真正的風險是新舊靜默混用。(4) **修正一個靜默失效**：`peaks.load_surface()` 從 `.npz` 載入時把 `meta["source"]` 設成 `.npz` 自己，導致 RI 校正解析到 `results/`（沒有 STD）而退回保留時間軸卻不報錯，產出的圖與有 RI 的那批外觀無異、座標系卻不同。改由 `export_npz()` 存 `mea_source`。(5) **UI 新增「ⓘ 軸說明」**，見待實作清單 UI 段。
+- **draft.25**：版號同步（隨程式碼 v3.1 一併調整），內容無變更。
 - **draft.24**：**經理提供 `kintonemixed-C4-C9.xlsx`，一次解決一個舊缺口、揭露一個新錯誤。** (1) **化合物身分確認**——六列各帶 CAS，核對無誤，組成確為 2-alkanone（甲基酮）C4–C9；第四階段第 7 點「整條鏈路唯一真正卡住的缺口」就此解決（如當初所判定，不是靠專案自身資料解決的，而是靠外部文件）。draft.23 撤回的結構指派因此恢復，成員標籤改回具體化合物名並補 CAS/Formula/MW，系列 key 維持 `ketone`。(2) **RI 數值改用對照表**（916.8372…1392.9），取代借自鱸魚專案的 589.4…1095.6；兩組差值 +289~+327（均值 +302，跨六點高度一致），而 2-butanone 的 916.84 幾乎正中 NIST 的**極性管柱** 917–950，本批管柱卻是非極性 SE-54——**管柱極性疑慮未解**，使用者知悉後裁決採用，`assumed=True` 保留、`confidence` 改為 `supplier_table_column_polarity_unverified`。(3) **[重要] 用對照表的 `Dt` 發現 `select_homolog_ladder()` 挑錯錨點**：拿 Dt 去全部 37 個偵測峰配對，六個化合物全部命中（平均 |Δ|=0.0027，RT/DT 皆嚴格遞增），正確錨點集為 `[389.7, 467.0, 609.5, 813.4, 1107.2, 1523.4]`（新軸）；修正前挑的 `[329.6, 389.7, 467.0, 609.5, 813.4, 1107.2]` 多納入了不屬於此序列的最強峰、漏掉 RT 1523.4 s 的 C9。連帶更正第四階段第 5 點「訊號只落在 RT 258–949s、其外為平坦背景」的實測記錄（RT>1000s 實有 3 個峰）。**啟發式失效的診斷**：錯誤組合的間距 std 0.0034 反而優於正確組合的 0.0046，且突出度總和更大——兩個準則都指向錯誤答案，故 draft.18 用間距均勻度定案碳數的方法論不足以支撐該結論。**已修正**：新增 `calibration.match_anchors_by_dt()` 取代間距啟發式，`build_from_std_peaks()` 在系列帶 `dt_values` 時優先走 Dt 配對（無則退回啟發式），`anchor_selection.mode` 新增 `dt_matched`。實測 6/6 命中、平均 |Δ|=0.00273。既有 `_peaks.json` 的 `ri` 需重跑。完整分析見 `ketone_RI_provenance.md`。**(4) 另補一項外部佐證**：反編譯 `gc-ims-tools` 0.1.10（Food Chemistry 2022）的 `Spectrum.calc_reduced_mobility()`，其公式為 `K0 = L²·T₀·p /(dt·Ud·T·p₀)`（預設 L=5.3 cm，與本專案表頭讀值一致），展開與本專案 `dt_convert.k0_from_raw_params()` 的 `ah·L²/(t·U)` 同形——**該函式回傳 K0 本身，而我們回傳其倒數**，佐證第二階段那個左右不對稱是實作瑕疵（見 status.md open decision 5）。其 `riprel()` 取第 0 列 argmax，亦與本專案 `rip.find_rip()` 一致。
 - **draft.23**：**化合物身分更正——標準品是「酮」，不是「甲基酮」。** 使用者指出 draft.19 記錄的「C4–C9 甲基酮同系物（2-butanone→2-nonanone）」超出了他實際確認的範圍：他確認的只有「酮 + C4–C9」，2-alkanone 這個結構指派是本專案自己從 DT_rel 等差階梯推出來的猜測，予以撤回。連帶修改：`reference_series.py` 系列名 `methyl_ketone` → `ketone`、成員標籤改為不宣稱結構的 `C4 ketone`…`C9 ketone`、借用 RI 的來源化合物移入獨立欄位 `ri_source_compounds`（數值溯源與身分宣告分離，由 `test_ketone_labels_do_not_claim_a_structural_subtype()` 鎖住）；`methyl_ketone_RI_provenance.md` 更名為 `ketone_RI_provenance.md` 並補上**第二層假設**的說明——借來的六個 RI 是在 2-alkanone 上量的，套到只確認到「酮」的本批 STD 上，等於跨批次借用之外再疊一層跨結構亞型借用，而這個誤差**不會**在 DT_rel 階梯均勻度上顯現（階梯只證明每多一個 CH₂，不辨官能基位置），現有自動錨點機制偵測不到。不受影響：碳數範圍、同系物性質、`select_homolog_ladder()` 的挑錨點邏輯、六個實測 RT/DT_rel。
 - **draft.22（對應程式 tag v3）**：第四階段由「最大缺口」改標為**已實作**，章節開頭新增「已實作」摘要（設計 1–14 點與逆向調查全數保留）。實際落地：`calibration.py` + `reference_series.py`——`select_homolog_ladder()` 自動挑 6 個酮的錨點（DT_rel 階梯，免模板；另有 `pin_anchors()` 模板釘定）；`ketone` 借用 6 個 RI 值（`assumed_unverified`，見 `ketone_RI_provenance.md`）；`make_rt_to_ri()` 為唯一共用 RT→RI 函式（外插+標記）；`resolve_ri_calibration()` 三態 + `_folder_calibration.json` 快取；串進 `identify.py` 與桌面 UI（RI 欄、`warp_rows_to_ri()` 線性 RI 熱圖軸，x 軸 drift 正規化不動）。測試 `test/test_calibration.py`（全套 125 項通過）。同步更新 `status.md`/`README.md`/`GC-IMS_Pipeline_Implementation.md`/`UI.md`。
