@@ -31,10 +31,102 @@ progress tracker, not the design.
   Batches 7, 8 pending. (Batch 5 = the ▶ compound-match panel: clicking a peak's
   ▶ loads the `.ril`/`.iml` libraries and lists candidate compounds via
   `match.match_all`.)
-- **145** pytest checks passing across `test/` (~8 s; added `test_calibration.py`).
+- **165** pytest checks passing across `test/` (~9 s; added `test_calibration.py`,
+  `test_rt_axis.py`).
 - Project uses `.venv` at project root; install with
   `"F:/GC-IMS-PEAK/.venv/Scripts/python.exe" -m pip install -r requirements.txt`.
   VS Code auto-detects this venv.
+
+### What changed on 2026-08-12 (later, tagged v3.1) — RT axis was wrong; K0 solved by decompiling VOCal
+
+**1. ⚠ The retention-time axis was short by 16.7% — fixed, and versioned.**
+`rt_step_ms` was `averages × trigger_repetition`; it is `(averages + 1) ×
+trigger_repetition`. Four independent confirmations, recorded in full at the top
+of `readGAS.py`:
+
+| evidence | result |
+|---|---|
+| method total length | STD 42.87 → **50.01 min**; reference FM_1 25.70 → **29.9985 min** — both land on whole minutes only with the +1 |
+| manager's table `Rt[sec]` | systematic −16.7% → residuals **−0.48%…+0.97%** |
+| `gc-ims-tools` 0.1.10 `Spectrum.read_mea()` | uses `chunk_averages + 1`; same `.mea` gives a bit-identical 20413×3150 intensity matrix and identical drift axis — **only RT differed, by exactly 7/6** |
+| VOCal `BufferedMEA.java:316` (decompiled) | same `+1` |
+
+Because this changes what `retention_s` *means*, `readGAS.RT_AXIS_VERSION = 2`
+now travels into `.npz` and `_peaks.json`, and `peaks.warn_if_stale_rt_axis()`
+warns when an old artefact is loaded. Silent old/new mixing was the real hazard:
+RT off by 16.7% with nothing anywhere raising. **RI is unaffected** — anchors and
+query shift together by `log10(7/6)` and piecewise-linear interpolation is
+invariant under an x-shift (measured difference ~1e-13). All anchor RTs quoted in
+the 2026-08-12 entry below are already on the new axis.
+
+**2. K0 — both open decisions closed by decompiling VOCal.** The `.jar`s that
+ship with the instrument software were decompiled (interoperability RE of
+software the user owns) and answered decision 1 outright:
+
+- Drift-tube temperature is **`Start temp 1`** (45 °C).
+- Pressure is the **sum**: `P_mbar = 10 × (Start ambient pressure + Start
+  pressure EPC IMS)` = 10 × (100.393 + 1.45) = **1018.43 mbar**. Neither field
+  alone — which is why picking one had looked arbitrary.
+  Source recorded in the returned provenance dict: `BufferedMEA.java:313`.
+
+Decision 2 is closed too, from data already on disk. `GAS BASE 3H_IMS K0.iml`
+(G.A.S. official base library, `DtMode=1/K0`) supplies known K0 for the six
+ketones, so **the instrument constant can be solved from our own STD**:
+`calibration.derive_k0_instrument_constant()` solves `IC = K0_ref · t · U` per
+anchor and rejects the result if the spread is too wide.
+
+| | value |
+|---|---|
+| instrument constant | **25.0808** |
+| CV across 6 anchors | **0.133%** |
+| residual vs `raw_parameters` | that path is **+3.5%** off — 43% of one homolog's spacing, i.e. unusable for matching |
+
+That last row is the point: `raw_parameters` is arithmetically correct now but
+still not accurate enough to identify a compound, whereas the standard-based
+constant is. `build_k0_profile_from_std()` returns a `dt_convert`-compatible
+profile.
+
+**3. Anchor matching now uses the table's `Dt`.** `match_anchors_by_dt()` gives
+6/6 with mean |Δ| 0.00273 and verifies RT stays monotonic with carbon number,
+falling back rather than silently accepting a table that doesn't fit. See the
+entry below for why the spacing heuristic it replaced was untrustworthy.
+
+**4. Bug: RI calibration was silently lost whenever a `.npz` was the input.**
+`peaks.load_surface()` set `meta["source"]` to whatever path it was handed, so
+starting from a `.npz` resolved the batch folder to `results/` — which contains
+no STD — and RI came back `unavailable`. The y axis fell back to retention time
+**with no error**, producing images indistinguishable from RI-calibrated ones but
+in a different coordinate system. `read_mea()` now records the original `.mea` in
+`axes["source"]`, `export_npz()` stores it as `mea_source`, `load_surface()`
+prefers it, and a missing calibration under an explicit `--ri-series` warns on
+stderr. Older `.npz` lack the field and keep the old behaviour.
+
+**5. UI.** Heatmap header gains an **ⓘ 軸說明** button opening a Chinese
+explanation of both axes; its text comes solely from
+`calibration.axis_explanation()`, so it cannot drift from the actual calibration.
+An earlier attempt in this session baked the same summary into the PNG — removed,
+because it covered data and matplotlib's default font restricts it to ASCII.
+`calibration.ri_slope_summary()` backs the RI half: it reports the global slope
+(**804 RI per 10× RT**), the per-segment range (**716–894**, the five segments
+differ by 22%), *and* the error a single straight line would cause (**14.5 RI**,
+~3× the ±5 match tolerance) — so the summary figure cannot be mistaken for a
+usable conversion factor. Also fixed: the interactive peak view was titled `bg`
+(the caption table had no key for that `kind`, so the fallback printed the
+internal code name); circles now clear when the file changes; the peak view is
+the default on selecting a `.mea`; the peak popup shows the real
+`peak["ri_caveat"]` instead of a hardcoded string; sub-windows re-raise on
+re-click.
+
+**6. Verified circle placement against the real renderer.** Circle positions had
+only ever been unit-tested. Binding the real `_peak_to_image_xy()` to a shim and
+measuring against `_bg.png` gives a **median offset of 1.2 px**; the apparent
+outliers were the ±14 px search window catching neighbouring monomer/dimer peaks,
+not misplacement.
+
+**7. Housekeeping.** `results/` cleaned (62 files / 374 MB; the seven
+`_peaks_state.json` kept), then the whole batch re-detected on the new RT axis.
+`kintonemixed-C4-C9.xlsx` and `Gemini.pdf` are now tracked — the xlsx is the
+authoritative source for RI values and anchors and had been sitting untracked.
 
 ### What changed on 2026-08-12 — supplier table lands; identity solved, calibration found to be wrong
 
@@ -311,9 +403,9 @@ in the editor while another process is editing it.
 | # | Stage | Module | Status | Notes |
 |---|---|---|---|---|
 | 1 | RIP normalization | `rip.py` | Done | `find_rip()` + `attach_drift_relative()`. Integrated into `peaks.py` ver.03. RIP found at dt_index=680 (4.53 ms) on the test .mea. |
-| 2 | K0 conversion | `dt_convert.py` | Done — architecture; two decisions still open | Three modes: `standard_based` / `raw_parameters` / `unavailable`. `raw_parameters` refuses to run unless caller passes `raw_TP={T_C, P_mbar}` (workflow explicitly wants no silent assumption). `L`/`U`/`sample_rate_khz` confirmed extractable from header; `T`/`P` field mapping still ambiguous. |
+| 2 | K0 conversion | `dt_convert.py` | **Done — constant derived; not yet wired into the folder cache** | Three modes: `standard_based` / `raw_parameters` / `unavailable`. T/P field mapping **resolved** via VOCal decompilation (`extract_raw_tp()`: `Start temp 1`; pressure = 10×(ambient + EPC)), so `raw_parameters` now runs unaided — but lands +3.5% off, unusable for matching. `standard_based` is the usable path: `calibration.derive_k0_instrument_constant()` gives **IC = 25.0808, CV 0.133%** from the STD against `GAS BASE 3H_IMS K0.iml`. Remaining gap: the profile is not produced by `resolve_ri_calibration()`'s folder/cache path, so the UI still reports `k0_mode=unavailable`. |
 | 3 | Library readers | `library.py` | Done | `.ril` 21 cols / `.iml` 16 cols. `source_file` provenance auto-propagates via dict copy. `resolve_data_dir()` priority chain: explicit arg → `GCIMS_LIBRARY_DIR` env → `<PROJECT>/library_data/` → legacy VOCal folder → None. **Selection is deliberately asymmetric**: `.ril` is column-specific (RI depends on the stationary phase), `.iml` is not (RIPrel drift is instrument-level) → all `.iml` are loaded. Drift-gas cross-check applied row-level, conservatively (only rows tagged as another gas are dropped; untagged kept — 39 of 201 RIPrel rows carry no tag). Both CLI and UI go through `identify.load_libraries()`. |
-| 4 | RT→RI conversion | `calibration.py` + `reference_series.py` | **Done — values borrowed** | Auto-selects 6 STD anchors (DT_rel homolog ladder), `log10(RT)` piecewise-linear interp (extrapolate+flag), 3-tier folder resolution + cache. STD = C4–C9 methyl ketones; 6 RI values **borrowed** (`assumed_unverified`, see `ketone_RI_provenance.md`). Wired into `identify.py` + UI; heatmaps show a linear RI y-axis. Upgrade to verified still pending. |
+| 4 | RT→RI conversion | `calibration.py` + `reference_series.py` | **Done — values from the supplier table; column polarity unverified** | Anchors selected by **`match_anchors_by_dt()`** against the table's `Dt` (6/6, mean \|Δ\| 0.00273, RT-vs-carbon monotonicity checked), replacing the DT_rel spacing heuristic which picked the wrong six. `log10(RT)` piecewise-linear interp (extrapolate+flag), 3-tier folder resolution + cache. STD = C4–C9 2-alkanones (CAS-confirmed). RI values are the manager's table; `assumed_unverified` now flags **column polarity**, not identity (see `ketone_RI_provenance.md`). Wired into `identify.py` + UI; heatmaps show a linear RI y-axis; `axis_explanation()` backs the UI's ⓘ dialog. |
 | 5 | Tolerance-window match | `match.py` | Done — **now 2-D** | `gc_matches` / `ims_matches` / `combined_matches` (intersect by CAS). GC = RI (or Rt fallback). **IMS now works without K0**: `match_drift_rel()` compares `peak.drift_relative` vs library `Dt[a.u.]` where `DtMode=="RIPrel"` (drift relative to RIP — same quantity peaks carry). `match_all` prefers K0 if `k0_value` present, else RIPrel; reports `ims_dimension`. Combined = agree on both axes → collapses hundreds of RI-only hits to a few. Tolerances placeholder (RI ±5, Rt ±5s, drift ±0.05, K0 ±0.05); `identify.py --drift-tol` overrides the drift one. |
 | 6 | Integration | `identify.py` | Done | CLI-runnable. Full pipeline: peaks.json → header → K0 → rules → library → match → `_peaks_identified.json`. Provenance carried through (`k0_mode`, `source_file`, `match_dimensions`, `gc_dimension`). |
 | 7 | Rule engine | `rules.py` | Done | R001–**R006** registered. Three rule types (per_peak / per_peak_with_context / batch) + a `mandatory` flag. `mark_rules()` marks `rule_active` without removing; `apply_rules()` = mark + filter (kept for `identify.py`). R004/R006 are mandatory and applied **before** the prominence gate inside `peaks.py`. |
@@ -339,7 +431,7 @@ batches. Each batch: I code, user runs `python main.py` and reports visually.
 | — | Bonus: toolbar reordered / renamed to `Browse mea folder / Show Detected Peak Heatmap / Show Original Heatmap / Rules / Generate Report`; indeterminate progress bar during read (~13 s) and detect (~83 s); main_canvas now handles in-place zoom (wheel toward cursor) + pan (left-drag), no popup on click; "Show Original Heatmap" swaps main_canvas back to raw heatmap; "Show Detected Peak Heatmap" swaps to overlay if already computed, else triggers detection | Done |
 | 3 | Sync: circle ↔ On checkbox via `toggle_peak()`; rule-rejected and hand-deselected peaks look identical (grey); manual pick overrides the rule (dashed ring); state saved to `_peaks_state.json` keyed by coordinates | **Done** |
 | 4 | Rules management panel (independent Toplevel; based on `rules_config.json`) | **Done** — live toggle + params + funnel (~4 ms via `_maxima.npz`); mandatory rules locked; invalid params refused on save |
-| 5 | Compound-match panel (reads `_peaks_identified.json`; three-strip stacked layout with confidence dots + source_file trace); wire `identify.py` into main.py flow so peaks table shows real match counts | Not started |
+| 5 | Compound-match panel (reads `_peaks_identified.json`; three-strip stacked layout with confidence dots + source_file trace); wire `identify.py` into main.py flow so peaks table shows real match counts | **Done** — ▶ opens the candidate list; table's GC×IMS / GC / IMS columns auto-fill; both CLI and UI load libraries through `identify.load_libraries()` |
 | 6 | Main canvas rewrite: matplotlib PNG → native `Canvas.create_oval / create_text` on PIL background | **Done** — `_bg.png` backdrop + `_bg.json` geometry; per-peak Canvas items keyed by `peak_id`; fixed the old margin-ignoring offset |
 | 7 | Translucent number labels (colour-simulated per draft.13) | **Partly done** — numbers use Tk `-stipple`; circles use colour because `-outlinestipple` is ignored on Windows |
 | 8 | Generate Report button — content assembly + export format | Not started |
@@ -406,7 +498,7 @@ Flow:
    screen greyed. R004/R006 are shown locked (`always on`).
 9. **Generate Report** still a placeholder (Batch 8).
 
-Verified by 145 passing tests plus a scratch smoke script that drives the real Tk
+Verified by 165 passing tests plus a scratch smoke script that drives the real Tk
 app (circle click, drag-vs-click, table sync, state round-trip). Full visual QA
 by the user still pending.
 
@@ -415,7 +507,7 @@ by the user still pending.
 ## Key files (this session's additions in **bold**)
 
 ```
-K:/GC-IMS-PEAK/
+F:/GC-IMS-PEAK/
 ├── main.py                   # Tk UI (Batch 1 applied)
 ├── peaks.py                  # ver.03 (integrates rip.py)
 ├── readGAS.py                # unchanged this session
@@ -446,7 +538,7 @@ K:/GC-IMS-PEAK/
     └── (existing tests)      # test_file_operations / test_peak_table / test_subprocess / test_ui_validators
 ```
 
-Total test count: **145 pass in ~8 s** (all under `pytest test/`).
+Total test count: **165 pass in ~9 s** (all under `pytest test/`).
 
 Recent tests added this session:
 - `test/test_state_machine.py`: `TestSettingsPersistence` (Batch 1 settings I/O)
@@ -477,18 +569,32 @@ Recent tests added this session:
 
 These are things I cannot resolve — user needs to decide or provide data.
 
-1. **K0 raw_parameters mode: which `Start temp` and pressure field?**
-   Header has `Start temp 1..6` (45/60/80/80/45/off) — which one is the drift
-   tube? `Start pressure EPC IMS` (1.45 kPa) vs `Start ambient pressure`
-   (100.4 kPa) — which is the drift-tube gas pressure? Until decided,
-   `dt_convert.compute_k0()` returns `(None, "raw_parameters_missing_TP", ...)`
-   for that mode.
+1. ~~**K0 raw_parameters mode: which `Start temp` and pressure field?**~~ —
+   ✅ **RESOLVED 2026-08-12** by decompiling VOCal. Temperature is `Start temp 1`;
+   pressure is the **sum** `10 × (Start ambient pressure + Start pressure EPC
+   IMS)` = 1018.43 mbar, not either field alone — which is why every attempt to
+   pick one had felt arbitrary. `dt_convert.extract_raw_tp(header)` derives both
+   and returns provenance naming `BufferedMEA.java:313`; `compute_k0()` calls it
+   automatically when T/P are not supplied.
 
-2. **K0 standard_based mode: is a calibration standard available?**
-   If yes, need one run of a known-K0 compound on this instrument to derive
-   `instrument_constant`. If no, we stay stuck on `unavailable` for anything
-   requiring reliable K0, which means R004 works (uses `drift_relative`, not
-   K0) but K0-based matching (.iml Dt column) has no trustworthy input.
+   **But accuracy, not correctness, is now the limit**: this path lands **+3.5%**
+   off the standard-based value — 43% of one homolog's spacing — so it stays
+   unusable for identification. Use decision 2's route.
+
+2. ~~**K0 standard_based mode: is a calibration standard available?**~~ —
+   ✅ **RESOLVED 2026-08-12.** No new measurement was needed: `GAS BASE 3H_IMS
+   K0.iml` (G.A.S. official base library, `DtMode=1/K0`) already carries known K0
+   for the six ketones, and the STD is already run on this instrument.
+   `calibration.derive_k0_instrument_constant()` solves `IC = K0_ref · t · U` per
+   anchor: **IC = 25.0808, CV = 0.133% across 6 anchors**, residuals < 0.25%. It
+   refuses to return a value when the spread exceeds `max_cv`, so a mismatched
+   library cannot silently produce a plausible-looking constant.
+   `build_k0_profile_from_std()` wraps it as a `dt_convert` profile.
+
+   **Still to wire**: the profile is not yet produced by the folder-resolution /
+   cache path, so selecting a folder in the UI yields an RI calibration but not a
+   K0 one. Until that is done `k0_mode` stays `unavailable` in the UI and
+   K0-based matching still has no input, even though the constant now exists.
 
 3. **The two problems the manager's table brought with it** — both block trusting
    any RI number the app prints. Full analysis: `ketone_RI_provenance.md`.
@@ -602,27 +708,35 @@ Working style preferences the user reinforced this session:
 4. If CLI: check the three open decisions; if user has resolved any, wire
    that into the corresponding module.
 
-**Immediate expected next action**: user runs `python main.py` to visually
-accept Batch 6 (native circles + numbers, zoom/pan tracking) and Batch 4 (Rules
-panel: toggling R001/R003/R005 or editing params must re-circle instantly;
-R004/R006 shown locked as "always on").
+*(Batches 3, 4 and 6 were listed here as "next" in earlier revisions; all three
+are done — see the Batch table above.)*
 
-**Next batch**: Batch 3 — `toggle_peak(peak_id)` shared by two surfaces:
-- click a circle on the canvas → that peak's circle turns semi-transparent red
-  and its table row greys out
-- tick/untick the On checkbox in the table → the circle follows
-- clicking again toggles back; the two directions stay in sync
+### Immediate next actions (as of v3.1)
 
-Design constraints already settled that Batch 3 must respect:
-- Tk Canvas has no true alpha. "Semi-transparent red" has to be simulated —
-  either a lighter red or `-outlinestipple`. Same limitation the workflow noted
-  for `create_text` (draft.12/13, which chose colour simulation).
-- Left-drag already pans the canvas, so a click must be distinguished from a
-  drag by press/release distance.
-- `active` state should key off `(rt_index, dt_index)`, **not** `peak_id`, so a
-  saved selection survives a baseline renumber (changing `R004.half_width` or
-  `R006.boundary` reassigns every `peak_id`).
-- Persist state to `_peaks.json` or a sidecar (workflow §第八階段 point 5).
+**Blocked on the manager — none of these can be answered from our own data:**
+
+1. **Which column were the `kintonemixed-C4-C9.xlsx` RI values measured on**
+   (polar vs non-polar)? This is the last factor that shifts RI *absolutely*, by
+   ~300 units across the board. Everything downstream — every match, every
+   report — carries that uncertainty until answered. See open decision 3a.
+2. **Which solvent was used?** May explain the unidentified strongest peak in the
+   STD (RT 329.6 s, DT_rel 1.104 — open decision 3c).
+3. **Can an n-alkane mix be run on this instrument?** That is the only route to a
+   genuinely `self_calibrated` RI rather than an adopted external scale.
+
+**Code work that can start now:**
+
+4. **Wire K0 into the folder-resolution / cache path** so selecting a folder
+   produces both an RI *and* a K0 profile. The instrument constant exists and is
+   solid (IC = 25.0808, CV 0.133%) but nothing calls
+   `build_k0_profile_from_std()` from the UI flow, so `k0_mode` is still
+   `unavailable` there and `.iml` K0 matching still has no input. This is the
+   single highest-value remaining task — it turns on a whole matching dimension.
+5. **UI Batches 7 and 8.** 7 is cosmetic (translucent labels, already partly
+   done via `-stipple`). 8 (Generate Report) is the last unimplemented feature;
+   content spec is in `Report_Content_Example.md`, export format still TBD.
+6. **Open decision 6** — `R001` vs `prom_frac`, two prominence gates in series.
+   Needs a decision before either can be documented as intended behaviour.
 
 **Key files touched in current session (recent → earlier)**:
 - `peaks.py` / `rules.py` / `main.py`: draft.14 — mandatory rules R004/R006

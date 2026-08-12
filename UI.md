@@ -2,10 +2,37 @@
 
 Version: **v3.1** (Stage 4 RT→RI in the UI; axis info moved to the ⓘ dialog)
 
-**Status**: ✅ **COMPLETE & TESTED** — 145 unit tests passing.
+**Status**: ✅ **COMPLETE & TESTED** — 165 unit tests passing.
 
 This document defines the user interface behavior for the GC-IMS peak-finding desktop app.
 It is a design/specification document with concrete implementation guidance for a Tk/PIL-based desktop application.
+
+> ### What's new in v3.1
+> **Axis information lives in a dialog, not on the image.** The heatmap header row
+> carries an **ⓘ 軸說明** button; it opens a Tk window explaining both axes in
+> Chinese — what the RI anchors are, why interpolation is done on `log10(RT)`,
+> what the drift/RIP ratio means, and the RI scale caveat. All of its text comes
+> from `calibration.axis_explanation()`, so the dialog cannot disagree with the
+> calibration actually in use. RIP values are read from `_bg.json`
+> (`rip_index`, `rip_drift_ms`) rather than recomputed, so the dialog always
+> describes the image on screen.
+>
+> *A previous iteration of v3.1 baked the same summary into the PNG's upper-right
+> corner. It was removed: it covered data, and matplotlib's default font limits it
+> to ASCII, which cannot express the explanation properly.*
+>
+> Also in v3.1:
+> - Selecting a `.mea` now shows the **detected-peak view by default** rather than
+>   the raw heatmap.
+> - Circles are cleared when the file changes (they used to linger over the blank
+>   canvas while the new heatmap loaded).
+> - The peak popup shows the calibration's real `ri_caveat` text instead of a
+>   hardcoded "assumed/borrowed" string.
+> - Sub-windows re-raise and take focus when their table row is clicked again.
+> - **Fixed**: the interactive peak view was captioned `bg`. Its caption table had
+>   keys for `heatmap` and `overlay` but not `bg` — the kind the peak view
+>   actually uses — so the `.get(kind, kind)` fallback printed the internal code
+>   name as a title.
 
 > ### What's new in v3 (read this first)
 > **Stage 4 (RT→RI) is wired into the UI.** Selecting a folder spawns a background
@@ -1373,11 +1400,16 @@ objects, not pixels baked into a PNG.
 - The backdrop is `<name>_bg.png`, a **circle-free** heatmap written by
   `peaks.py`. Circles and peak numbers are `create_oval` / `create_text` items,
   one addressable pair per `peak_id`, redrawn on every zoom/pan.
-- Placement uses `<name>_bg.json` (`png_size`, `axes_bbox`, `xlim`, `ylim`),
-  recorded by whoever renders the PNG. **This fixed a long-standing offset**:
-  the previous code mapped `dt_index / n_dt` onto the whole image, ignoring
-  matplotlib's margins (8.5 % on the left alone), so markers never sat on their
-  peaks.
+- Placement uses `<name>_bg.json` (`png_size`, `axes_bbox`, `xlim`, `ylim`,
+  `y_axis`, and — since v3.1 — `rip_index` / `rip_drift_ms`), recorded by whoever
+  renders the PNG. **This fixed a long-standing offset**: the previous code
+  mapped `dt_index / n_dt` onto the whole image, ignoring matplotlib's margins
+  (8.5 % on the left alone), so markers never sat on their peaks.
+  Measured accuracy of the current path: binding the real `_peak_to_image_xy()`
+  against the rendered `_bg.png` gives a **median offset of 1.2 px**.
+  The two RIP fields exist so the ⓘ dialog can quote the same normalization basis
+  as the image being displayed, instead of reloading the `.npz` and recomputing
+  a value that might not match.
 - `peak_with_number.py` is no longer generated automatically after every table
   refresh — it is a static export for the Batch 8 report, and the canvas does
   not display it. An explicit button will trigger it later.

@@ -146,7 +146,7 @@ than `peak_id`, which is reassigned whenever the baseline moves.
 | `peak_with_number.py` | static numbered image for the report (not the canvas) |
 | `gas_utils.py` | file-picker helpers |
 | `rules_config.json` | per-rule `enabled` + params |
-| `test/` | pytest suite (145 tests) |
+| `test/` | pytest suite (165 tests) |
 
 ### Output files (per `.mea`, written to `results/`)
 
@@ -179,11 +179,12 @@ so measurement data never gets committed.
 pytest test/ -q
 ```
 
-145 tests cover the rule engine and mandatory-rule enforcement, the selection
+165 tests cover the rule engine and mandatory-rule enforcement, the selection
 funnel and its ordering constraint, peak selection state and its coordinate
 keying, the state machine, file I/O, peak-table rendering, UI validators, and the
 Stage-4 RT→RI calibration (anchor selection, log-linear interp, extrapolate+flag,
-pinning, folder resolution/cache, and the linear-RI axis resampling).
+pinning, folder resolution/cache, and the linear-RI axis resampling), plus the
+retention-time axis formula and its version marker (`test_rt_axis.py`).
 
 ---
 

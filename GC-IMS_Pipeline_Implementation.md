@@ -132,6 +132,23 @@ It is:
   > the query shift by the same `log10(7/6)`, which piecewise-linear interpolation
   > cancels (measured difference ~1e-13).
 
+#### The `.npz` also carries `mea_source` (v3.1)
+
+`export_npz()` stores the originating `.mea`'s absolute path, and
+`peaks.load_surface()` returns it as `meta["source"]`.
+
+This is not bookkeeping — it is load-bearing for Stage 4. RI calibration is
+resolved from *the folder containing the `.mea`*, because that is where the STD
+lives. Before v3.1, `load_surface()` set `meta["source"]` to whatever path it was
+handed, so any run starting from a `.npz` resolved the folder to `results/` —
+which holds no STD — and calibration came back `unavailable`. **The y axis then
+fell back to retention time with no error**, producing images visually
+indistinguishable from RI-calibrated ones but in a different coordinate system.
+
+A `.npz` written before v3.1 has no `mea_source`; the old path-echo behaviour is
+kept for those, but `peaks.py` now warns on stderr when `--ri-series` was asked
+for and no calibration could be resolved.
+
 ### Display convention (matches VOCal images and the design doc)
 - **X axis = Drift time (DT)**, **Y axis = Retention time (RT)**.
 - Heatmaps use `origin="lower"` so retention increases upward.
