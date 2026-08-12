@@ -1,6 +1,12 @@
 """
 calibration.py  —  GC-IMS Identify Workflow 第四階段：RT→RI 轉換（保留時間正規化）
-Version: 3.0 — by Albert Sheng
+Version: 3.1 — by Albert Sheng
+
+變更記錄：
+  3.1  — 新增 ri_slope_summary()（RI 軸 dRI/dlog10(RT) 的摘要，一併回報
+         「若用單一直線換算的最大偏差」，以免有人拿全域斜率手算而配錯峰）
+         與 axis_explanation()（UI「ⓘ 軸說明」的中文說明唯一來源）；
+         移除 axis_scale_lines()——熱圖上的軸標註已取消，該函式無呼叫者。
 
 依 GC-IMS_Identify_Workflow.md §第四階段（本輪定案）。VOCal 校準表存
 {ColNormY=RI, ColNormX=log10(Rt)}、ColNormisLog=true —— 即 RI 對 log10(Rt) 做
@@ -21,7 +27,8 @@ Version: 3.0 — by Albert Sheng
                          assumed_unverified 依系列而定（n_alkane=True）
   unavailable            STD 不可用或錨點 < 2 → ri=None + reason，不靜默造假
 
-**錨點偵測不寫死數量（§第四階段第 5 點）**：141215 實測 7 個候選，其中 334.3/347.9
+**錨點偵測不寫死數量（§第四階段第 5 點）**：以下 RT 為 draft.16/18 當時的**舊保留時間軸**
+  （見 readGAS.RT_AXIS_VERSION；新軸為 7/6 倍）。141215 實測 7 個候選，其中 334.3/347.9
   這組雙峰無法判定 monomer/dimer，維持排除 → 5 個乾淨錨點（282/400.3/521.8/697/949）。
   select_anchor_peaks() 動態挑錨點、把 RT 過近的相鄰峰歸為 ambiguous_groups。
 
@@ -176,8 +183,8 @@ def resolve_anchor_doublets(clean_anchors, ambiguous_groups,
 def template_from_series(rts, series_key, ri_values=None):
     """
     把一組已知錨點 RT 配上某系列的身分標籤（與 RI，若有），組成 pin_anchors 用的
-    expected 模板。標籤/碳數取自 reference_series（如 methyl_ketone 的
-    2-butanone…2-nonanone）；ri 優先用傳入的 ri_values，其次系列內建的。
+    expected 模板。標籤/碳數取自 reference_series（如 ketone 的
+    C4 ketone…C9 ketone）；ri 優先用傳入的 ri_values，其次系列內建的。
 
     回傳 [{"rt_s":.., "label":.., "carbon":.., "ri":..|None}, ...]（依 RT 遞增）
     """
@@ -201,7 +208,7 @@ def pin_anchors(peaks, expected, tol_s=20.0, key="retention_s"):
     把偵測到的 STD 峰「釘」到已知錨點模板：對每個 expected 錨點，在容差 tol_s 內
     找最靠近、且尚未被別的錨點用掉的偵測峰，配成一對。
 
-    解決「偵測器找到 N 個峰（實測 9），但 STD 只有 M 個已知化合物（甲基酮 6 個）」
+    解決「偵測器找到 N 個峰（實測 9），但 STD 只有 M 個已知化合物（酮 6 個）」
     的問題——多出來的峰自動忽略，容差內找不到的錨點明確標 missing（不會靜默變少）。
 
     參數
@@ -246,10 +253,90 @@ def pin_anchors(peaks, expected, tol_s=20.0, key="retention_s"):
     return pinned, report
 
 
+def match_anchors_by_dt(peaks, dt_values, tol=0.01, dt_rel_key="drift_relative",
+                        require_active=True):
+    """
+    用外部對照表的漂移值（相對 RIP）直接指派錨點——**碳數指派因此有外部依據，不是推論**。
+
+    為什麼需要這條路（draft.24，見 ketone_RI_provenance.md 第 3 節）：
+      select_homolog_ladder() 靠「DT_rel 間距最均勻 + 突出度總和最大」推論碳數，是純
+      內部啟發式。實測在 141215_STD 上，它的**兩個準則都指向錯誤答案**——錯誤組合
+      [329.6,389.7,467.0,609.5,813.4,1107.2] 的間距 std 0.0034 反而優於正確組合
+      [389.7,467.0,609.5,813.4,1107.2,1523.4] 的 0.0046，且含全圖最強峰故突出度總和更大。
+      間距均勻度分不出「真正的同系物階梯」與「恰好等距的混合物」。
+      改用本函式後六個化合物全中，平均 |Δ| = 0.0027。
+
+    與 pin_anchors() 的差別：pin_anchors 用**保留時間**模板釘定（RT 會隨管柱狀態漂移），
+    本函式用**漂移相對值**（無因次比值，不受取樣率/管長/溫壓影響，跨批次穩定得多）。
+
+    參數
+    ----
+    peaks : list[dict]      STD 偵測峰，需含 dt_rel_key 與 retention_s
+    dt_values : list[float] 對照表漂移值，依碳數遞增（＝依 RT 遞增）
+    tol : float             配對容差 |Δ(DT_rel)| ≤ tol
+    require_active : bool   True → 只用 active!=False 的峰
+
+    回傳
+    ----
+    (matched, report)
+        matched : list[dict] 命中峰的複本，附 _dt_index（對照表序位）/_dt_expected/
+                  _dt_delta，依 retention_s 遞增
+        report  : dict       逐項命中明細、未命中清單、單調性檢查，供 provenance
+    """
+    def strength(p):
+        v = p.get("intensity")
+        return v if v is not None else (p.get("prominence") or 0.0)
+
+    cands = [p for p in peaks
+             if p.get(dt_rel_key) is not None and p.get("retention_s") is not None]
+    if require_active:
+        cands = [p for p in cands if p.get("active", True)]
+
+    used, matched, entries = set(), [], []
+    for i, dt_exp in enumerate(dt_values):
+        pool = [(j, p) for j, p in enumerate(cands)
+                if j not in used and abs(p[dt_rel_key] - dt_exp) <= tol]
+        if not pool:
+            entries.append({"index": i, "expected_dt": dt_exp, "matched_rt": None,
+                            "note": f"容差 ±{tol} 內無峰"})
+            continue
+        # 同一個 Dt 可能同時抓到單體/二聚體以外的雜訊峰，取最強者
+        j, p = max(pool, key=lambda jp: strength(jp[1]))
+        used.add(j)
+        a = dict(p)
+        a["_dt_index"] = i
+        a["_dt_expected"] = dt_exp
+        a["_dt_delta"] = round(abs(p[dt_rel_key] - dt_exp), 5)
+        matched.append(a)
+        entries.append({"index": i, "expected_dt": dt_exp,
+                        "matched_rt": round(p["retention_s"], 2),
+                        "matched_dt": p[dt_rel_key], "delta": a["_dt_delta"],
+                        "intensity": p.get("intensity")})
+
+    matched.sort(key=lambda p: p["retention_s"])
+    rts = [p["retention_s"] for p in matched]
+    # 同系物：碳數遞增 → RT 遞增。若排序後的 _dt_index 不遞增，代表配對互相打結，
+    # 這是「對照表與這支 STD 對不起來」的訊號，必須讓上層看到而不是靜默採用。
+    idx_order = [p["_dt_index"] for p in matched]
+    monotonic = all(idx_order[i] < idx_order[i + 1] for i in range(len(idx_order) - 1))
+    report = {
+        "tol": tol,
+        "n_expected": len(dt_values),
+        "n_matched": len(matched),
+        "entries": entries,
+        "missing_indices": [e["index"] for e in entries if e.get("matched_rt") is None],
+        "mean_abs_delta": (round(sum(p["_dt_delta"] for p in matched) / len(matched), 5)
+                           if matched else None),
+        "rt_monotonic_with_carbon": monotonic,
+        "matched_rt_s": [round(r, 2) for r in rts],
+    }
+    return matched, report
+
+
 def select_homolog_ladder(peaks, n_expected, dt_rel_key="drift_relative",
                           prominence_frac=0.05, max_candidates=14):
     """
-    自動從 STD 偵測峰中挑出 n_expected 個「同系物階梯」錨點（如 6 個甲基酮），
+    自動從 STD 偵測峰中挑出 n_expected 個「同系物階梯」錨點（如 6 個酮），
     不需使用者提供模板 RT。用同系物的物理性質：碳數遞增 → RT 遞增且 DT_rel 嚴格
     遞增、間距近乎等差。
 
@@ -294,6 +381,136 @@ def select_homolog_ladder(peaks, n_expected, dt_rel_key="drift_relative",
                   "selected_rt_s": [round(p["retention_s"], 1) for p in best],
                   "dt_rel_spacing_std": round(_spacing_std(
                       [p[dt_rel_key] for p in best]), 4)}
+
+
+# --------------------------------------------------------------------------- #
+# K0 校準：用 STD 的已知化合物反推 instrument_constant（Stage 2 standard_based）
+# --------------------------------------------------------------------------- #
+def derive_k0_instrument_constant(std_peaks, dt_values, inv_k0_values,
+                                  sample_rate_khz, drift_voltage_v,
+                                  dt_match_tol=0.01, max_cv=0.02):
+    """
+    拿 STD 裡身分已確認、且**已知 K0** 的化合物，反推本台儀器的 instrument_constant。
+    這就是 workflow §第二階段 `standard_based` 模式所需的那次「現場校準」。
+
+    為什麼需要（2026-08-12 量化）：`raw_parameters` 用表頭標稱值算出的 K0，對照原廠庫
+    系統性偏高 **+3.5%**；而相鄰同系物的 1/K0 間距僅 ~0.061，偏差 0.026 是間距的 43%
+    ——容許窗開到能吸收偏差，就會同時收進隔壁碳數的化合物。**K0 比對因此必須校準。**
+
+    數學：K0 = IC / (t_d · U)  ⟹  IC = K0_ref · t_d · U
+    對每個已知化合物各解一次，取平均；六個解出同一個常數（實測 CV=0.13%）正是
+    「偏差是單一乘法因子、不是雜訊」的證據。校準後殘差 <0.25%。
+
+    參數
+    ----
+    std_peaks : list[dict]      STD 偵測峰（需含 drift_relative / dt_index）
+    dt_values : list[float]     各化合物的漂移相對值（用來認峰），依碳數遞增
+    inv_k0_values : list[float] 各化合物的**已知 1/K0**（如原廠庫值），順序同上
+    sample_rate_khz : float     逐檔案讀取，禁止全域快取
+    drift_voltage_v : float     'nom Drift Potential Difference'
+    dt_match_tol : float        認峰容差
+    max_cv : float              各點解出的 IC 離散度上限；超過視為校準不可信
+
+    回傳
+    ----
+    dict：{"usable", "instrument_constant", "sd", "cv", "n_anchors",
+           "per_anchor":[...], "reason"}
+    """
+    if not (dt_values and inv_k0_values and len(dt_values) == len(inv_k0_values)):
+        return {"usable": False, "reason": "dt_values / inv_k0_values 缺失或長度不符"}
+    if not sample_rate_khz or not drift_voltage_v:
+        return {"usable": False, "reason": "缺 sample_rate_khz 或 drift_voltage_v"}
+
+    matched, report = match_anchors_by_dt(std_peaks, dt_values, tol=dt_match_tol)
+    per, ics = [], []
+    for a in matched:
+        i = a["_dt_index"]
+        inv_k0 = inv_k0_values[i]
+        if not inv_k0:
+            continue
+        t_s = (a["dt_index"] / sample_rate_khz) / 1000.0
+        k0_ref = 1.0 / inv_k0                       # 庫存 1/K0 → K0
+        ic = k0_ref * t_s * drift_voltage_v
+        ics.append(ic)
+        per.append({"index": i, "dt_index": a["dt_index"],
+                    "inv_k0_ref": inv_k0, "k0_ref": round(k0_ref, 5),
+                    "instrument_constant": round(ic, 5)})
+
+    if len(ics) < 2:
+        return {"usable": False, "n_anchors": len(ics), "per_anchor": per,
+                "dt_match": report,
+                "reason": f"可用已知 K0 的錨點只有 {len(ics)} 個，至少需 2 個"}
+
+    mean_ic = sum(ics) / len(ics)
+    var = sum((x - mean_ic) ** 2 for x in ics) / (len(ics) - 1)
+    sd = var ** 0.5
+    cv = sd / mean_ic if mean_ic else float("inf")
+    out = {"usable": cv <= max_cv, "instrument_constant": mean_ic,
+           "sd": sd, "cv": cv, "n_anchors": len(ics), "per_anchor": per,
+           "dt_match": report, "reason": None}
+    if not out["usable"]:
+        # 離散大代表「這些峰不是同一組物理條件下量的」——認錯峰、STD 有問題、
+        # 或參考 K0 與本儀器不同源。這時給出一個平均值只會製造假的精確度。
+        out["reason"] = (f"各錨點解出的 instrument_constant 離散過大 "
+                         f"(CV={cv:.3%} > {max_cv:.1%})，校準不可信")
+    return out
+
+
+def build_k0_profile_from_std(std_peaks, header, series_key="ketone",
+                              dt_match_tol=0.01, max_cv=0.02):
+    """
+    從 STD 峰 + 表頭直接產出 `dt_convert` 吃得下的 calibration_profile。
+
+    成功 → mode="standard_based" + instrument_constant（K0 比對可信）
+    失敗 → mode="raw_parameters"（標稱值退路，帶已量化的 +3.5% 偏差警語），
+           表頭連 T/P 都缺才會退到 unavailable。**不靜默升級可信度。**
+    """
+    import dt_convert as dtc            # 無循環：dt_convert 不 import calibration
+
+    series = rs.REFERENCE_SERIES.get(series_key or "", {})
+    dt_values = series.get("dt_values")
+    inv_k0 = series.get("inv_k0_values")
+    params = dtc.extract_confirmed_params(header or {})
+    detail = {"series": series_key, "inv_k0_source": series.get("inv_k0_source")}
+
+    if dt_values and inv_k0:
+        der = derive_k0_instrument_constant(
+            std_peaks, dt_values, inv_k0,
+            params.get("sample_rate_khz"), params.get("U_V"),
+            dt_match_tol=dt_match_tol, max_cv=max_cv)
+        detail["derivation"] = der
+        if der.get("usable"):
+            return {
+                "profile_name": f"derived_from_std_{series_key}",
+                "k0_calibration": {
+                    "mode": "standard_based",
+                    "instrument_constant": der["instrument_constant"],
+                    "calibrated_from": {
+                        "n_anchors": der["n_anchors"],
+                        "cv": round(der["cv"], 5),
+                        "series": series_key,
+                        "known_k0_source": series.get("inv_k0_source"),
+                    },
+                },
+            }, detail
+    else:
+        detail["derivation"] = {"usable": False,
+                                "reason": f"系列 {series_key!r} 無 dt_values/inv_k0_values"}
+
+    raw_tp, tp_detail = dtc.extract_raw_tp(header or {})
+    detail["raw_tp"] = tp_detail
+    if raw_tp is None:
+        return {"profile_name": "unavailable",
+                "k0_calibration": {"mode": "unavailable",
+                                   "reason": "無法反推 IC，且表頭缺 T/P"}}, detail
+    return {
+        "profile_name": "raw_parameters_fallback",
+        "k0_calibration": {
+            "mode": "raw_parameters",
+            "warning": "標稱值退路：對照原廠庫實測系統性偏高約 +3.5%，"
+                       "為相鄰同系物間距的 43%，不足以做可信的 K0 比對",
+        },
+    }, detail
 
 
 # --------------------------------------------------------------------------- #
@@ -362,7 +579,7 @@ def build_calibration(anchor_rts, series_key=None,
     anchor_rts : list[float]  乾淨錨點保留時間（秒）；內部會排序
     series_key : str|None      reference_series 的系列；None=不假設、走相對模式
     start_carbon : int|None    n_alkane 用；覆寫 assumed_start_carbon（第二層假設）
-    ri_values : list|None      table 類（custom/methyl_ketone）用；直接給各錨點 RI
+    ri_values : list|None      table 類（custom/ketone）用；直接給各錨點 RI
     """
     anchor_rts = sorted(float(r) for r in anchor_rts)
     n = len(anchor_rts)
@@ -406,6 +623,7 @@ def build_calibration(anchor_rts, series_key=None,
     cal["assumed_unverified"] = rs.series_is_assumed(series_key)
     cal["provenance_note"] = rs.REFERENCE_SERIES.get(series_key, {}).get("note")
     cal["ri_confidence"] = rs.series_confidence(series_key)
+    cal["ri_caveat"] = rs.series_caveat(series_key)      # 給 UI 顯示的白話警語
     cal["ri_values"] = list(ris)
     cal["log_rt"] = [math.log10(r) for r in anchor_rts]
     cal["reference_rt_s"] = anchor_rts[-1]
@@ -521,6 +739,126 @@ def ri_yticks(cal, rt_min, rt_max, step=None, max_ticks=8, extrap_margin_steps=1
     return [float(x) for x in rt_pos], labels
 
 
+def ri_slope_summary(cal):
+    """RI 軸的「縮放倍率」摘要：dRI / d(log10 RT)，即每十倍保留時間對應多少 RI。
+
+    x 軸的 drift 正規化是單純線性（drift_relative = dt_index / rip_index），一個
+    純量就講完；RI 不是——它是 log10(RT) 上的分段線性，每段斜率各自不同。所以這裡
+    同時回報三個數，缺一都會誤導：
+
+      global      —— 首錨到末錨拉一條直線的斜率，最接近直覺上的「那個比例」
+      min/max     —— 各分段實際斜率的範圍，顯示分段之間差多少
+      max_abs_err —— **關鍵**：若真的用 global 這條單一直線取代分段內插，各錨點
+                     上的最大偏差。本批算出來約 14.5 RI，而比對容差是 ±5
+                     （match.DEFAULT_RI_TOLERANCE），約 3 倍 —— 足以把峰配到隔壁
+                     同系物去。所以 global 只能當「圖上的摘要數字」，換算一律走
+                     make_rt_to_ri() 的分段內插。
+
+    回傳 dict 或 None（錨點不足兩點、RT 非正、log10 間距為 0 時）。
+    """
+    if not isinstance(cal, dict):
+        return None
+    a = cal.get("anchor_rts") or []
+    r = cal.get("ri_values") or []
+    if len(a) < 2 or len(a) != len(r):
+        return None
+    try:
+        pts = sorted((float(t), float(v)) for t, v in zip(a, r) if float(t) > 0)
+    except (TypeError, ValueError):
+        return None
+    if len(pts) < 2:
+        return None
+
+    logs = [math.log10(t) for t, _ in pts]
+    ris = [v for _, v in pts]
+    if logs[-1] == logs[0]:
+        return None
+
+    slopes = [(ris[i + 1] - ris[i]) / (logs[i + 1] - logs[i])
+              for i in range(len(pts) - 1)
+              if logs[i + 1] != logs[i]]
+    if not slopes:
+        return None
+
+    g = (ris[-1] - ris[0]) / (logs[-1] - logs[0])
+    max_err = max(abs((ris[0] + g * (L - logs[0])) - v)
+                  for L, v in zip(logs, ris))
+    return {"global": g, "min": min(slopes), "max": max(slopes),
+            "slopes": slopes, "max_abs_err": max_err}
+
+
+def axis_explanation(rip_drift_ms=None, rip_index=None, cal=None):
+    """熱圖兩軸的完整中文說明——供 UI 的「ⓘ 軸說明」視窗。
+
+    軸的正規化資訊一律只在這裡呈現。曾經有一版把摘要烤進 PNG 右上角，已移除——
+    那些字會擋住資料，而且受 matplotlib 預設字型限制只能用 ASCII，講不清楚。
+    Tk 視窗沒有這兩個問題：能顯示中文，也不佔畫面。
+
+    回傳 list[section]，section = {"title": str, "rows": [(詞, 解釋), ...]}。
+    UI 只負責排版，不決定內容——換句話說，這裡是唯一要維護說明文字的地方。
+    """
+    secs = []
+
+    # 容差跟 match.py 拿，不在這裡另抄一份數字——說明文字與實際比對用的門檻若各寫
+    # 各的，改了一邊忘了另一邊，圖上就會理直氣壯地印錯。lazy import：match 沒有
+    # top-level import，不會循環，但仍晚綁以免拖慢 calibration 的載入。
+    try:
+        import match as _m
+        ri_tol = float(_m.DEFAULT_RI_TOLERANCE)
+    except Exception:
+        ri_tol = None
+
+    # 先講 y 軸：RI 是本專案最容易搞混的一項（RI 屬 GC＝縱軸，drift 屬 IMS＝橫軸）。
+    rows = []
+    if isinstance(cal, dict) and cal.get("mode") == "multi_point_loglinear":
+        a = [float(x) for x in (cal.get("anchor_rts") or [])]
+        r = [float(x) for x in (cal.get("ri_values") or [])]
+        if a and r:
+            n = len(a)
+            rows.append((f"{n} 錨點",
+                         f"用 STD 裡 {n} 個已知化合物定尺（本批為 C4–C9 的酮）"))
+            rows.append(("log10(RT)",
+                         "內插做在 log10(保留時間) 上，不是在 RT 上。同系物每多一個"
+                         "碳，RT 大致乘上固定倍率而非加上固定秒數，取 log 後才等距"))
+            rows.append((f"{min(a):.1f}–{max(a):.1f} s",
+                         "這些錨點涵蓋的保留時間範圍。落在此範圍外的峰是外插，"
+                         "程式會標記但不夾住（不 clamp）"))
+            rows.append((f"→ RI {min(r):.0f}–{max(r):.0f}",
+                         "這些錨點被指定的 RI 值範圍"))
+
+            sl = ri_slope_summary(cal)
+            if sl:
+                vs_tol = (f"，已超過比對容差 ±{ri_tol:.0f}，會把峰配到隔壁同系物"
+                          if ri_tol and sl["max_abs_err"] > ri_tol else "")
+                rows.append((f"約 {sl['global']:.0f} RI / 10×RT",
+                             f"縮放倍率：保留時間每變成 10 倍，RI 約上升 "
+                             f"{sl['global']:.0f}。這是摘要值——實際是分段內插，"
+                             f"各段斜率 {sl['min']:.0f}–{sl['max']:.0f} 不等；若真用"
+                             f"單一直線換算，最大偏差 {sl['max_abs_err']:.1f} RI"
+                             f"{vs_tol}。故僅供閱讀，不可拿來手算"))
+            if cal.get("assumed_unverified"):
+                rows.append(("⚠ 未驗證", cal.get("ri_caveat") or
+                             "此 RI 尺標尚未經本批資料驗證"))
+    else:
+        rows.append(("未校正", "找不到可用的 STD 錨點，縱軸維持原始保留時間（秒）"))
+    secs.append({"title": "縱軸 Y ＝ 保留指數 RI（GC 方向）", "rows": rows})
+
+    # 再講 x 軸：單純線性，一句話講完，放後面免得淹掉上面的重點。
+    rows = []
+    if rip_drift_ms:
+        rows.append(("1.000 = RIP",
+                     f"橫軸除以 RIP（反應離子峰）位置做正規化，故為無因次比值。"
+                     f"本圖 1.000 對應 {rip_drift_ms:.4f} ms"
+                     + (f"（dt_index {rip_index}）" if rip_index is not None else "")))
+        rows.append(("為何正規化",
+                     "漂移時間會隨溫度、壓力、電壓漂移；除以同一張圖的 RIP 之後，"
+                     "不同天、不同機台量到的同一物質才會落在同一個橫軸位置"))
+    else:
+        rows.append(("未正規化", "找不到 RIP 位置，橫軸為原始漂移時間（ms）"))
+    secs.append({"title": "橫軸 X ＝ drift / RIP（IMS 方向）", "rows": rows})
+    return secs
+
+
 def warp_rows_to_ri(img, row_rts, cal, n_out=None):
     """
     把顯示影像沿 y（列）從「均勻於 RT」重採樣成「均勻於 RI」，讓熱圖 RI 軸**線性
@@ -608,6 +946,7 @@ def attach_ri(peaks, cal):
         assumed = cal.get("assumed_unverified", False)
         series = cal.get("series_used")
         confidence = cal.get("ri_confidence")
+        caveat = cal.get("ri_caveat")
         for p in peaks:
             rt = p.get("retention_s")
             # 決策（draft.20/21）：錨點外「外插 + 標記」——值與旗標兩份資訊都保留
@@ -621,6 +960,7 @@ def attach_ri(peaks, cal):
             p["ri_series_used"] = series
             p["ri_assumed_unverified"] = assumed
             p["ri_confidence"] = confidence
+            p["ri_caveat"] = caveat
         return peaks
 
     raise ValueError(f"未知校正模式：{mode!r}")
@@ -634,13 +974,14 @@ def build_from_std_peaks(std_peaks, header=None, series_key=None,
                          reference_n_anchors=None,
                          prominence_frac=0.05, doublet_gap_s=20.0,
                          resolve_doublets=True, min_top_intensity=2000,
-                         expected_anchors=None, pin_tol_s=20.0):
+                         expected_anchors=None, pin_tol_s=20.0,
+                         use_dt_match=True, dt_match_tol=0.01):
     """
     串起 錨點選取 → assess_std → build_calibration，回傳 (calibration_dict, sel)。
 
     兩種錨點取得方式：
       - expected_anchors 給定 → **釘定模式**：pin_anchors() 把偵測峰對齊到已知的 M
-        個錨點模板（如 6 個甲基酮），多的峰忽略、缺的標 missing，錨點數固定為模板數。
+        個錨點模板（如 6 個酮），多的峰忽略、缺的標 missing，錨點數固定為模板數。
         模板每格帶 ri 時直接產生絕對 RI；否則走 single_point_relative。
       - expected_anchors 為 None → **動態模式**：select_anchor_peaks + （可選）
         resolve_anchor_doublets 自行挑錨點（數量隨資料而定）。
@@ -649,6 +990,7 @@ def build_from_std_peaks(std_peaks, header=None, series_key=None,
     """
     pin_report = None
     ladder_report = None
+    dt_report = None
     series_ri = (rs.REFERENCE_SERIES.get(series_key, {}).get("ri_values")
                  if series_key else None)
 
@@ -664,14 +1006,31 @@ def build_from_std_peaks(std_peaks, header=None, series_key=None,
             build_series = None                       # 缺 RI → 相對（釘定的 6 點）
             build_ri_values = None
     elif series_ri is not None and ri_values is None:
-        # 系列已有固定 N 點 RI（如 methyl_ketone 6 點）→ 自動挑 N 個同系物階梯錨點，
-        # 不需使用者提供模板 RT（呼應「選資料夾即自動找 6 峰」的流程）。
-        clean, ladder_report = select_homolog_ladder(
-            std_peaks, len(series_ri), prominence_frac=prominence_frac)
+        # 系列已有固定 N 點 RI（如 ketone 6 點）→ 自動挑 N 個錨點，不需使用者提供模板。
+        #
+        # 優先走 Dt 配對（draft.24）：系列若帶 dt_values（外部對照表的漂移值），碳數指派
+        # 就有外部依據。退回間距啟發式只在「沒有 dt_values」或「配對到的點太少」時發生
+        # ——因為該啟發式已被證實會在本批資料上挑錯（見 match_anchors_by_dt 的說明）。
+        series_dt = (rs.REFERENCE_SERIES.get(series_key, {}).get("dt_values")
+                     if series_key else None)
+        clean, dt_report, ladder_report = None, None, None
+        build_ri_values = None
+        if use_dt_match and series_dt and len(series_dt) == len(series_ri):
+            cand, dt_report = match_anchors_by_dt(std_peaks, series_dt, tol=dt_match_tol)
+            if len(cand) >= 2 and dt_report["rt_monotonic_with_carbon"]:
+                clean = cand
+                # 只取實際配到的那幾個化合物的 RI，順序跟著 clean（已依 RT 遞增）走，
+                # 所以部分命中也不會讓 RI 錯位——這比「湊不滿六點就整組放棄」有用。
+                build_ri_values = [series_ri[a["_dt_index"]] for a in clean]
+            else:
+                dt_report["fallback_reason"] = (
+                    "配對數 < 2" if len(cand) < 2 else "配對後 RT 與碳數不單調（對照表與此 STD 對不起來）")
+        if clean is None:
+            clean, ladder_report = select_homolog_ladder(
+                std_peaks, len(series_ri), prominence_frac=prominence_frac)
         sel = {"clean_anchors": clean, "ambiguous_groups": []}
         resolution_log = []
-        build_series = series_key                     # assign_ri 從系列取 RI 值
-        build_ri_values = None
+        build_series = series_key                     # provenance 仍取自系列
     else:
         sel = select_anchor_peaks(std_peaks, prominence_frac, doublet_gap_s)
         clean = list(sel["clean_anchors"])
@@ -700,7 +1059,10 @@ def build_from_std_peaks(std_peaks, header=None, series_key=None,
 
     cal["std_quality"] = quality
     cal["anchor_selection"] = {
-        "mode": "pinned" if expected_anchors else "dynamic",
+        "mode": ("pinned" if expected_anchors
+                 else "dt_matched" if dt_report and dt_report.get("n_matched")
+                 and not dt_report.get("fallback_reason")
+                 else "dynamic"),
         "n_clean_anchors": len(clean),
         "clean_rt_s": [round(p["retention_s"], 3) for p in clean],
         "n_ambiguous_groups": len(sel["ambiguous_groups"]),
@@ -710,6 +1072,7 @@ def build_from_std_peaks(std_peaks, header=None, series_key=None,
         "top_intensity": top_intensity,
         "pinned": pin_report,
         "ladder": ladder_report,
+        "dt_match": dt_report,
     }
     return cal, sel
 

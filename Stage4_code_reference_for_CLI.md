@@ -1,5 +1,7 @@
 # Stage 4（RT→RI 校準）程式碼片段彙整 —— 供 Claude Code CLI 參考
 
+**Version: 3.1 — by Albert Sheng**
+
 **性質聲明**：以下都是 claude.ai 對話中討論、驗證過邏輯的**片段/雛型**，不是完整可直接執行的模組——變數命名、錯誤處理、與既有 `readGAS.py`/`peaks.py` 的實際介面銜接，都還需要 CLI 依專案現況調整。請配合 `Stage4_RT-RI_briefing_for_CLI.md` 跟 `GC-IMS_Identify_Workflow.md`（draft.18）第四階段一起讀，後者是設計權威版本，這份只是程式碼骨架集中存放。
 
 ---
@@ -114,7 +116,7 @@ REFERENCE_SERIES = {
         "assumed_start_carbon": 6,
         "note": "假設正構烷烴，起始碳數未知暫定C6，兩項皆未經化合物身分驗證",
     },
-    "methyl_ketone": {"assumed": False, "ri_values": None, "note": "待對照表"},
+    "ketone": {"assumed": False, "ri_values": None, "note": "待對照表"},
     "custom":        {"assumed": False, "ri_values": None, "note": "使用者直接指定"},
 }
 
@@ -266,6 +268,8 @@ class FolderCalibrationCache:
 ---
 
 ## 本次實測得到的具體數字（141215_STD.mea，draft.18 版本）
+
+> **⚠ 以下 RT 為修正前的舊保留時間軸**（`averages×trigger`，是實際值的 6/7）。2026-08-12 已修正為 `(averages+1)×trigger`；換算表見 `ketone_RI_provenance.md` §0.0。`RT_STEP_S = 0.126` 應為 **0.147**，`ANCHORS_RT_SECONDS` 的新軸值為 `[389.7, 467.0, 609.5, 813.4, 1107.2, 1523.4]`（且 C9 已確認在 1523.4，非原本以為的缺席）。本節保留原值作為當時的紀錄。
 
 ```python
 RIP_IDX = 680

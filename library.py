@@ -1,6 +1,6 @@
 """
 library.py  —  GC-IMS Identify Workflow 第三階段：.ril / .iml 資料庫讀取
-Version: 3.0 — by Albert Sheng
+Version: 3.1 — by Albert Sheng
 
 依 GC-IMS_Identify_Workflow.md §第三階段（draft.13 定案）：
   - .ril（21 欄，Tab-separated，CAS/NAME/Formula/RI/...）
@@ -382,17 +382,45 @@ def select_iml_paths(data_dir, column_name=None, polarity=None):
     return [], "none"
 
 
-def filter_iml_rows_by_drift_gas(rows, drift_gas):
+# 載流氣體標記的別名表。key 為正規化後的氣體名，value 為該氣體在 .iml row 裡
+# 可能出現的標記字串。用於「這一列是不是別種氣體量的」這個判斷。
+_DRIFT_GAS_ALIASES = {
+    "nitrogen":      ("[n2]", "[nitrogen]"),
+    "n2":            ("[n2]", "[nitrogen]"),
+    "air":           ("[air]",),
+    "synthetic air": ("[air]",),
+}
+
+
+def _gas_aliases(drift_gas):
+    """回傳某氣體名對應的標記別名 tuple（未登記者退回 '[<名稱>]'）。"""
+    gas = drift_gas.strip().lower()
+    return _DRIFT_GAS_ALIASES.get(gas, (f"[{gas}]",))
+
+
+def _row_gas_blob(row):
+    """把一列裡可能藏氣體標記的兩個欄位合成小寫字串。
+
+    workflow 文件說標記在 `Command` 欄，但實測真實檔案（GAS BASE 3H_IMS K0.iml、
+    002 TST GAS 2020.iml）實際存於 `DeviceTimestamp` 欄，故兩欄都看。
     """
-    Row-level 篩選：保留載流氣體標記符合的 .iml row。
+    return ((row.get("Command") or "") + " " + (row.get("DeviceTimestamp") or "")).lower()
 
-    workflow §第三階段第 3 點：.mea 表頭 `Drift Gas: nitrogen` 應與 .iml
-    row 的 `[+][N2]` / `[+][nitrogen]` 標記交叉核對，避免載入不同載流氣體
-    下量出的 K0 值做比對。
 
-    **實測校正**：workflow 文件說標記在 `Command` 欄，但真實檔案（GAS BASE
-    3H_IMS K0.iml）標記實際存於 `DeviceTimestamp` 欄。此函式同時檢查兩欄，
-    兼容不同檔案變體。
+def filter_iml_rows_by_drift_gas(rows, drift_gas, keep_untagged=True):
+    """
+    Row-level 篩選：排除「明確標記為其他載流氣體」的 .iml row。
+
+    workflow §第三階段第 3 點：.mea 表頭 `Drift Gas: nitrogen` 應與 .iml row 的
+    `[+][N2]` / `[+][nitrogen]` 標記交叉核對，避免拿不同載流氣體下量出的漂移值
+    做比對。
+
+    **`keep_untagged=True`（預設）是刻意的保守語意，不是漏寫**：實測 library_data/
+    的 1003 筆 .iml row 中，201 筆 `DtMode=="RIPrel"` 只有 162 筆帶氣體標記——其餘
+    39 筆來自欄位會偏移的舊格式檔（見本模組檔頭「已知 caveat」），它們是「沒有記錄
+    氣體」而不是「記錄了別種氣體」。若採嚴格語意（只留標記相符者），這 39 筆漂移候選
+    會被靜默丟掉，等於用缺漏的 metadata 去否定實際可用的資料，正是本專案一貫要避免的
+    false negative。故預設只擋「有標記且標記為別種氣體」者；要嚴格模式再顯式關掉。
 
     參數
     ----
@@ -401,26 +429,31 @@ def filter_iml_rows_by_drift_gas(rows, drift_gas):
     drift_gas : str
         .mea 表頭 'Drift Gas' 欄位值，e.g. 'nitrogen' / 'air'。若為 None
         或空字串則不篩選，原樣回傳。
+    keep_untagged : bool
+        True（預設）→ 無任何已知氣體標記的 row 予以保留（保守）。
+        False           → 只保留標記與 drift_gas 相符者（嚴格，會丟掉未標記者）。
 
     回傳
     ----
     list[dict]
-        篩選後的 rows。兩個候選欄位都不含相關標記者被排除。
+        篩選後的 rows。
     """
     if not drift_gas:
         return list(rows)
-    gas = drift_gas.strip().lower()
-    aliases = {
-        "nitrogen": ("[n2]", "[nitrogen]"),
-        "n2":       ("[n2]", "[nitrogen]"),
-        "air":      ("[air]",),
-        "synthetic air": ("[air]",),
-    }.get(gas, (f"[{gas}]",))
+    wanted = _gas_aliases(drift_gas)
+    # 「別種氣體」= 所有已登記別名扣掉本次要的那些
+    known = {a for aliases in _DRIFT_GAS_ALIASES.values() for a in aliases}
+    other = known - set(wanted)
+
     out = []
     for r in rows:
-        blob = ((r.get("Command") or "") + " " + (r.get("DeviceTimestamp") or "")).lower()
-        if any(a in blob for a in aliases):
-            out.append(r)
+        blob = _row_gas_blob(r)
+        if any(a in blob for a in wanted):
+            out.append(r)                      # 明確相符 → 一定留
+        elif not keep_untagged:
+            continue                           # 嚴格模式：沒相符就丟
+        elif not any(a in blob for a in other):
+            out.append(r)                      # 保守模式：沒標到別種氣體 → 留
     return out
 
 

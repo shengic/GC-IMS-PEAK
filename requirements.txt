@@ -16,3 +16,24 @@ scipy>=1.11
 scikit-image>=0.22
 matplotlib>=3.8
 pillow>=10.0
+
+# ---------------------------------------------------------------------------
+# Optional — NOT needed to run anything in this project.
+#
+# These were installed only to read source documents handed over by hand:
+#   openpyxl : read kintonemixed-C4-C9.xlsx (the ketone standard's compound
+#              table). Its contents are hardcoded in reference_series.py
+#              (KETONE_STD_TABLE, verified cell-for-cell), so the pipeline does
+#              not read the .xlsx at runtime and does not import openpyxl.
+#   pypdf    : read Gemini.pdf (a write-up shared by the manager).
+#
+# Install them only if you need to re-verify the hardcoded table against the
+# original spreadsheet, or read those documents again:
+#   python -m pip install openpyxl pypdf
+#
+# Deliberately NOT a dependency: gc-ims-tools. Evaluated 2026-08-12 and not
+# adopted — see status.md. It pulls 24 packages (scikit-learn, pandas, xarray,
+# numba, opencv, h5py, seaborn …) for capabilities this project either already
+# has (own .mea parser, own prominence/watershed flood) or deliberately excludes
+# (PCA/PLS-DA chemometrics, per GC-IMS_Peak_Finding_Workflow.md §9).
+# ---------------------------------------------------------------------------

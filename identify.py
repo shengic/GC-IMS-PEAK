@@ -1,6 +1,6 @@
 """
 identify.py  —  GC-IMS Identify Workflow 第六階段：整合輸出
-Version: 3.0 — by Albert Sheng
+Version: 3.1 — by Albert Sheng
 
 依 GC-IMS_Identify_Workflow.md §第六階段：
   輸入：_peaks.json（來自 peaks.py，已含 drift_relative 由 rip 整合）
@@ -33,6 +33,7 @@ Usage:
 
 import argparse
 import datetime
+import glob
 import json
 import os
 import sys
@@ -82,11 +83,23 @@ def select_library_files(data_dir, header):
     """
     依 .mea 表頭的 GC Column / Drift Gas 從 data_dir 挑 .ril 與 .iml 檔。
 
+    **兩個維度的選檔規則刻意不同**：
+      - `.ril`（GC/RI 維度）**綁 GC 管柱**——RI 是管柱相依的量，拿別的固定相量出的
+        RI 來比對沒有意義，故走 column_name 精確匹配、退路依極性。
+      - `.iml`（IMS 漂移維度）**不綁 GC 管柱**——`DtMode=="RIPrel"` 的漂移值是相對
+        RIP 的無因次比值，屬儀器層級的量，與樣品跑哪根管柱無關。用管柱名去篩 `.iml`
+        會把大量可用的漂移候選誤擋掉，所以一律載入全部 `.iml`；單位混用的風險由
+        `match.match_drift_rel()` / `match_k0()` 的 `DtMode` 過濾擋住，不靠檔名。
+
+    這個規則以前只實作在 UI（main.py 自己 glob 全部 `.iml`），CLI 走的卻是
+    `select_iml_paths()` 的管柱/極性篩選——同一批資料兩條路徑得到不同的 IMS 候選。
+    現在統一在這裡，兩邊共用同一份決策。
+
     回傳
     ----
     (ril_paths, iml_paths, strategy_dict)
         strategy_dict 含各分支的 strategy 標籤（"column_name"/"polarity_fallback"/
-        "none"），供輸出 provenance。
+        "none"/"all"），供輸出 provenance。
     """
     gc_col = header.get("GC Column", "")
     drift_gas = header.get("Drift Gas", "")
@@ -97,9 +110,10 @@ def select_library_files(data_dir, header):
     ril_paths, ril_strategy = library.select_ril_paths(
         data_dir, column_name=parsed["column_name"], polarity=parsed["polarity"],
     )
-    iml_paths, iml_strategy = library.select_iml_paths(
-        data_dir, column_name=parsed["column_name"], polarity=parsed["polarity"],
-    )
+    # IMS 漂移不綁管柱 → 全載（見上方 docstring）
+    iml_paths = sorted(glob.glob(os.path.join(data_dir, "*.iml")))
+    iml_strategy = "all (IMS drift is instrument-relative, not GC-column-specific)"
+
     return ril_paths, iml_paths, {
         "gc_column_header": gc_col,
         "drift_gas_header": drift_gas,
@@ -108,6 +122,40 @@ def select_library_files(data_dir, header):
         "ril_strategy": ril_strategy,
         "iml_strategy": iml_strategy,
     }
+
+
+def load_libraries(data_dir, header):
+    """
+    選檔 + 讀檔 + 載流氣體交叉核對，一次做完。**CLI 與 UI 共用這一份**，避免兩邊
+    的比對候選集悄悄分歧。
+
+    載流氣體核對（workflow §第三階段第 3 點）採保守語意：只排除「明確標記為別種
+    氣體」的 row，未標記者保留——實測 library_data/ 有 39 筆 RIPrel row 因舊格式
+    欄位偏移而沒有氣體標記，嚴格篩選會把它們靜默丟掉（見
+    `library.filter_iml_rows_by_drift_gas` 的說明）。
+
+    回傳
+    ----
+    (ril_rows, iml_rows, info)
+        info 為 select_library_files() 的 strategy_dict 再加上載入/篩選後的計數。
+    """
+    ril_paths, iml_paths, info = select_library_files(data_dir, header)
+    ril_rows = library.load_ril_many(ril_paths)
+    iml_rows_all = library.load_iml_many(iml_paths)
+
+    drift_gas = header.get("Drift Gas", "")
+    iml_rows = library.filter_iml_rows_by_drift_gas(iml_rows_all, drift_gas)
+
+    info = dict(info)
+    info["ril_files"] = [os.path.basename(p) for p in ril_paths]
+    info["iml_files"] = [os.path.basename(p) for p in iml_paths]
+    info["n_iml_rows_before_gas_filter"] = len(iml_rows_all)
+    info["n_iml_rows_after_gas_filter"] = len(iml_rows)
+    info["drift_gas_filter"] = (
+        f"excluded rows explicitly tagged as a gas other than {drift_gas!r}"
+        if drift_gas else "not applied (no 'Drift Gas' in header)"
+    )
+    return ril_rows, iml_rows, info
 
 
 # --------------------------------------------------------------------------- #
@@ -120,7 +168,8 @@ def identify(peaks_doc, mea_path,
              ri_registry_path="ri_calibration_registry.json", ri_max_days_gap=None,
              ri_tolerance=match.DEFAULT_RI_TOLERANCE,
              rt_tolerance=match.DEFAULT_RT_TOLERANCE,
-             k0_tolerance=match.DEFAULT_K0_TOLERANCE):
+             k0_tolerance=match.DEFAULT_K0_TOLERANCE,
+             driftrel_tolerance=match.DEFAULT_DRIFTREL_TOLERANCE):
     """
     對 peaks_doc（load_peaks_json 產物）跑整套第一~五階段管線。
 
@@ -195,21 +244,21 @@ def identify(peaks_doc, mea_path,
             "找不到 library 資料夾（library_data/ 空或不存在，"
             "且未指定 --library-dir）；先放入 .ril/.iml 或明確指定路徑"
         )
-    ril_paths, iml_paths, select_info = select_library_files(resolved_lib_dir, header)
-    ril_rows = library.load_ril_many(ril_paths)
-    iml_rows = library.load_iml_many(iml_paths)
+    ril_rows, iml_rows, select_info = load_libraries(resolved_lib_dir, header)
 
     # ---- 第五階段：逐峰比對 ----
-    gc_dims = []
+    gc_dims, ims_dims = [], []
     for p in filtered_peaks:
         r = match.match_all(
             p, ril_rows, iml_rows,
             ri_tolerance=ri_tolerance,
             rt_tolerance=rt_tolerance,
             k0_tolerance=k0_tolerance,
+            driftrel_tolerance=driftrel_tolerance,
         )
         p["matches"] = r
         gc_dims.append(r["gc_dimension"])
+        ims_dims.append(r["ims_dimension"])
 
     # ---- 彙總 ----
     def _tally(key):
@@ -244,15 +293,17 @@ def identify(peaks_doc, mea_path,
         "rules_summary": rules_report,
         "library_summary": {
             "resolved_data_dir": resolved_lib_dir,
-            "ril_files": [os.path.basename(p) for p in ril_paths],
-            "iml_files": [os.path.basename(p) for p in iml_paths],
+            "ril_files": select_info["ril_files"],
+            "iml_files": select_info["iml_files"],
             "n_ril_rows": len(ril_rows),
             "n_iml_rows": len(iml_rows),
             "selection": select_info,
             "gc_dimensions_used": {d: gc_dims.count(d) for d in set(gc_dims)},
+            "ims_dimensions_used": {d: ims_dims.count(d) for d in set(ims_dims)},
         },
         "match_tolerances": {
             "ri": ri_tolerance, "rt": rt_tolerance, "k0": k0_tolerance,
+            "drift_rel": driftrel_tolerance,
         },
         "peaks": filtered_peaks,
     }
@@ -262,7 +313,23 @@ def identify(peaks_doc, mea_path,
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
+def _use_utf8_stdout():
+    """Windows 主控台預設 cp950，印不出 µ / 中文以外的字元就整支崩掉（實際發生過：
+    print_summary 的 'µs' 讓 readGAS.py 在 cp950 下 UnicodeEncodeError）。
+
+    同時修掉一個更隱蔽的問題：main.py 以 encoding="utf-8" 讀子行程的 stdout，子行程
+    卻用 cp950 寫，狀態列的中文訊息因此一直是亂碼。兩邊統一成 utf-8。
+    calibration.py 與 test/ 早就用這個慣用法，這裡補齊。
+    """
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass                      # 舊版 Python 或已被重導向 → 沿用原設定
+
+
 def main():
+    _use_utf8_stdout()
     ap = argparse.ArgumentParser(description="GC-IMS Identify pipeline（第一～五階段整合）")
     ap.add_argument("peaks_json", help="peaks.py 產出的 <name>_peaks.json 路徑")
     ap.add_argument("--mea", default=None,
@@ -286,6 +353,8 @@ def main():
     ap.add_argument("--ri-tol", type=float, default=match.DEFAULT_RI_TOLERANCE)
     ap.add_argument("--rt-tol", type=float, default=match.DEFAULT_RT_TOLERANCE)
     ap.add_argument("--k0-tol", type=float, default=match.DEFAULT_K0_TOLERANCE)
+    ap.add_argument("--drift-tol", type=float, default=match.DEFAULT_DRIFTREL_TOLERANCE,
+                    help="IMS 漂移（RIPrel）容許窗半寬；K0 休眠時實際用的就是這個")
     ap.add_argument("--out", default=None,
                     help="輸出 JSON 路徑（省略 → results/<name>_peaks_identified.json）")
     args = ap.parse_args()
@@ -318,6 +387,7 @@ def main():
         ri_tolerance=args.ri_tol,
         rt_tolerance=args.rt_tol,
         k0_tolerance=args.k0_tol,
+        driftrel_tolerance=args.drift_tol,
     )
 
     # 決定輸出路徑

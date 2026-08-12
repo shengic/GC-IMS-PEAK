@@ -1,8 +1,11 @@
 """
 readGAS.py  —  G.A.S. FlavourSpec® .mea 解析 + 繪製 2D 熱圖
-Version: 3.0 — by Albert Sheng
+Version: 3.1 — by Albert Sheng
 
 變更記錄：
+  3.1  — axes 新增 source（原始 .mea 絕對路徑），export_npz() 存成 mea_source，讓
+         下游只拿到 .npz 時仍能回頭找同資料夾的 STD 做 RI 校正；移除熱圖
+         右上角的軸標註。
   2.1  — 全解析度 CSV 改為可選（--write-csv）。真實尺寸每檔 0.8–1.5 GB，而管線
          裡沒有任何程式讀它——同樣的資料在 .npz 裡無損且只有約 30 MB。
   ver.02 — 修復 plot_heatmap() 在真實尺寸矩陣（如 20413x3150）上 fig.savefig()
@@ -42,6 +45,7 @@ Version: 3.0 — by Albert Sheng
 
 import argparse
 import os
+import sys
 import re
 import time
 
@@ -50,6 +54,33 @@ import numpy as np
 from gas_utils import PROJECT_DIR, resolve_input_path
 
 RESULTS_DIR = os.path.join(PROJECT_DIR, "results")
+
+# --------------------------------------------------------------------------- #
+# 保留時間軸公式的版本號。**只有在 retention_s 的物理意義改變時才 +1**，用途是讓
+# 舊版寫出的產物能被偵測到，而不是跟新版靜默混用——RT 差 16.7% 卻沒有任何錯誤訊息，
+# 是最難察覺的一種資料污染。
+#
+#   1 : rt_step_ms = averages × trigger_repetition        （**錯誤**，2026-08-12 之前）
+#   2 : rt_step_ms = (averages + 1) × trigger_repetition  （現行）
+#
+# 為什麼是 +1（三條獨立證據，2026-08-12）：
+#   (a) 方法總長：STD（avg=6, trig=21ms, 20413 chunks）舊式算出 42.87 min，新式
+#       50.01 min；參考檔 FM_1（avg=6, trig=30ms, 8571 chunks）舊式 25.70 min，
+#       新式 1799.91 s = 29.9985 min。兩個不同方法，新式都落在整數分鐘上。
+#   (b) 經理提供的標準品對照表 kintonemixed-C4-C9.xlsx 的 Rt[sec]：舊式與其系統性
+#       差 16.7%，新式殘差降到 −0.48%~+0.97%（峰頂判定差異的量級）。
+#   (c) 獨立實作 gc-ims-tools 0.1.10（Food Chemistry 2022）的 Spectrum.read_mea()
+#       用的是 (chunk_averages + 1)。同一支 .mea 實測交叉比對：強度矩陣
+#       20413×3150 逐格完全相同、漂移軸一致，**只有保留時間軸差 7/6**。
+#
+# 推測的物理意義：`Chunk averages` 記的是「首次之外額外平均幾次」，故每個 chunk
+# 實際佔 (N+1) 個 trigger 週期。**此為推測**——只有 2 個檔案佐證，不排除某些韌體
+# 版本語意不同；若日後發現反例，改的是這裡並把版本號推到 3。
+#
+# 不受影響：強度矩陣、漂移軸、找峰、以及 **RI**（RI 在 log10(RT) 空間內插，錨點與
+# 查詢值同時平移 log10(7/6)，分段線性內插對 x 平移不變——實測差 ~1e-13）。
+# --------------------------------------------------------------------------- #
+RT_AXIS_VERSION = 2
 
 
 def log(msg):
@@ -153,7 +184,9 @@ def read_mea(path):
     averages = hnum(header, "Chunk averages", 1.0)                  # 次
 
     dt_step_ms = 1.0 / sample_rate_khz                 # 每漂移取樣點時間 (ms)
-    rt_step_ms = averages * trig_rep_ms                # 每個 chunk 的保留時間間隔 (ms)
+    # (averages + 1)：見檔頭 RT_AXIS_VERSION 的三條證據。舊版少了 +1，使整條
+    # 保留時間軸被壓縮成實際的 6/7（差 16.7%）。
+    rt_step_ms = (averages + 1.0) * trig_rep_ms         # 每個 chunk 的保留時間間隔 (ms)
 
     axes = {
         "drift_ms": np.arange(n_dt) * dt_step_ms,              # 0..~30 ms
@@ -163,6 +196,15 @@ def read_mea(path):
         "header_size": header_size,
         "dt_step_ms": dt_step_ms,
         "rt_step_ms": rt_step_ms,
+        # 供下游把「這份資料用哪一版 RT 軸算的」一路帶進 .npz / _peaks.json
+        "rt_axis_version": RT_AXIS_VERSION,
+        "sample_rate_khz": sample_rate_khz,
+        "trig_rep_ms": trig_rep_ms,
+        "averages": averages,
+        # 原始 .mea 的絕對路徑。第四階段的 RI 校正是靠「這個檔所在資料夾裡的 STD」
+        # 解析的，所以下游只拿到 .npz 時仍必須知道它是從哪個 .mea 來的，否則資料夾
+        # 會被解析成 results/（那裡沒有 STD），RI 校正就靜默失效。
+        "source": os.path.abspath(path),
     }
     return data, header, axes
 
@@ -256,6 +298,10 @@ def export_npz(data, axes, path):
         intensity=data,
         drift_ms=axes["drift_ms"],
         retention_s=axes["retention_s"],
+        # 沒有這個欄位的 .npz 一律視為版本 1（舊的、錯的 RT 軸）——見 RT_AXIS_VERSION
+        rt_axis_version=np.int32(axes.get("rt_axis_version", RT_AXIS_VERSION)),
+        # 原始 .mea 路徑，供下游回頭找同資料夾的 STD 做 RI 校正（見 read_mea 的註解）
+        mea_source=np.array(str(axes.get("source", ""))),
     )
     log(f"已存無損矩陣（{time.time()-t0:.1f}s）：{path}  dtype={data.dtype}")
 
@@ -311,6 +357,7 @@ def plot_heatmap(data, axes, header, cmap="viridis", clip=(1.0, 99.5),
     # 原始 drift_ms）。以 RT=0 這列的 RIP 位置作為 x=1 的基準。此為顯示層
     # 決策，不改資料本身；drift_ms 仍存進 .npz 供下游模組使用。
     import rip as _rip
+    rip_index = None
     try:
         rip_index, _ = _rip.find_rip(data)
         drift_norm = drift / drift[rip_index]
@@ -375,6 +422,7 @@ def plot_heatmap(data, axes, header, cmap="viridis", clip=(1.0, 99.5),
     ax.xaxis.set_major_locator(MultipleLocator(0.5))
     ax.xaxis.set_minor_locator(MultipleLocator(0.1))
     ax.xaxis.set_major_formatter(FormatStrFormatter("%.1f"))
+
     sample = _ascii(header.get("Sample", ""))
     machine = _ascii(header.get("Machine type", ""))
     ax.set_title(f"GC-IMS  {sample}  ({machine})")
@@ -393,7 +441,23 @@ def plot_heatmap(data, axes, header, cmap="viridis", clip=(1.0, 99.5),
 # --------------------------------------------------------------------------- #
 # main
 # --------------------------------------------------------------------------- #
+def _use_utf8_stdout():
+    """Windows 主控台預設 cp950，印不出 µ / 中文以外的字元就整支崩掉（實際發生過：
+    print_summary 的 'µs' 讓 readGAS.py 在 cp950 下 UnicodeEncodeError）。
+
+    同時修掉一個更隱蔽的問題：main.py 以 encoding="utf-8" 讀子行程的 stdout，子行程
+    卻用 cp950 寫，狀態列的中文訊息因此一直是亂碼。兩邊統一成 utf-8。
+    calibration.py 與 test/ 早就用這個慣用法，這裡補齊。
+    """
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass                      # 舊版 Python 或已被重導向 → 沿用原設定
+
+
 def main():
+    _use_utf8_stdout()
     ap = argparse.ArgumentParser(description="G.A.S. .mea 解析 + 2D 熱圖（無需 gc-ims-tools）")
     ap.add_argument("path", nargs="?", default=None,
                     help=".mea 檔路徑（省略則跳出檔案總管選檔）")

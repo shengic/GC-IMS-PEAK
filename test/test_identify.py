@@ -98,8 +98,16 @@ def test_identify_smoke():
         assert "gc_matches" in p["matches"]
         assert "ims_matches" in p["matches"]
         assert "combined_matches" in p["matches"]
-        # unavailable → ims 空
-        assert p["matches"]["ims_matches"] == []
+        # k0_mode=unavailable 鎖住的是「K0 那條路不准被走」，**不是**「IMS 維度沒結果」。
+        # match_drift_rel()（免 K0 的 RIPrel 漂移路線）加入後，沒有 K0 校準的峰仍可
+        # 靠 drift_relative 在 IMS 軸上命中——這正是該功能存在的目的。
+        # 本斷言先前寫成 ims_matches == []，那是把「K0 不可用」誤當成「IMS 不可用」；
+        # 它當時會過只是因為 CLI 的 .iml 被管柱/極性篩掉、沒載到會命中的檔案，
+        # 而 UI 早就載入全部 .iml——同一批資料兩條路徑結果不同。兩邊統一之後這個
+        # 誤解就浮出來了。
+        assert p["matches"]["ims_dimension"] != "k0", "無 K0 校準時不得走 K0 分支"
+        assert all("k0" not in h.get("match_dimensions", [])
+                   for h in p["matches"]["ims_matches"])
 
     sep("[2] identify() 用 standard_based profile 模擬有校準常數")
     profile = {"profile_name": "test",
@@ -120,11 +128,14 @@ def test_identify_smoke():
         assert p["k0_value"] is not None
     print(f"  raw_parameters k0 values: {[round(p['k0_value'], 4) for p in result3['peaks']]}")
 
-    sep("[4] identify() 缺 raw_tp 時 raw_parameters 應標記 missing_TP")
+    sep("[4] identify() 未給 raw_tp → 自動由表頭抽 T/P（2026-08-12 起）")
+    # T/P 欄位對應已由 VOCal 反編譯確認（Start temp 1；壓力 = ambient + EPC 之和），
+    # 所以呼叫端不必再手動指定。缺欄位才會退回 raw_parameters_missing_TP。
     result4 = identify.identify(peaks_doc, MEA, profile=profile_raw)  # no raw_tp
     modes = set(p["k0_mode"] for p in result4["peaks"])
     print(f"  k0 modes seen: {modes}")
-    assert "raw_parameters_missing_TP" in modes
+    assert modes == {"raw_parameters"}
+    assert all(p["k0_value"] is not None for p in result4["peaks"])
 
     sep("[5] rules_config 覆寫（關 R004、開 R001 threshold=2000）→ RIP 帶 peak 存活但弱峰被剔")
     my_rules = [

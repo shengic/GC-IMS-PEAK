@@ -1,8 +1,8 @@
 # GC-IMS Tk UI Specification
 
-Version: **v3** (Stage 4 RT→RI in the UI)
+Version: **v3.1** (Stage 4 RT→RI in the UI; axis info moved to the ⓘ dialog)
 
-**Status**: ✅ **COMPLETE & TESTED** — 125 unit tests passing.
+**Status**: ✅ **COMPLETE & TESTED** — 145 unit tests passing.
 
 This document defines the user interface behavior for the GC-IMS peak-finding desktop app.
 It is a design/specification document with concrete implementation guidance for a Tk/PIL-based desktop application.
@@ -1325,8 +1325,11 @@ The peak table's identification columns are now live and auto-filled (no ▶ cli
 Matching runs `match.match_all` for every peak once (background, cached per file by
 coordinate) after the libraries load; ▶ opens the full candidate list. All `.iml`
 files are loaded for the drift dimension (drift is instrument-relative, not
-GC-column-specific). Caveats surfaced: peak RI is borrowed/assumed, and the
-tolerances (RI ±10, drift ±0.05) are placeholders.
+GC-column-specific), with a conservative drift-gas cross-check. Library selection
+and loading go through `identify.load_libraries()`, shared with the CLI — the UI
+used to keep its own copy of that logic and the two had drifted apart. Caveats
+surfaced: peak RI is borrowed/assumed, and the tolerances (RI ±5, drift ±0.05)
+are placeholders.
 
 ### v3 — Stage 4 RT→RI in the UI
 
@@ -1336,12 +1339,14 @@ normalization is unchanged.
 
 **Folder-level calibration (silent, cached).**
 - On folder select, `_start_folder_calibration()` runs a background thread that
-  calls `calibration.resolve_ri_calibration_cached(folder, series_key="methyl_ketone")`.
+  calls `calibration.resolve_ri_calibration_cached(folder, series_key="ketone")`.
   If the STD's `_peaks.json` is missing it detects the STD first
   (`peaks.py <std.mea>`, ~90 s), then resolves — stopping at the first usable STD.
 - The result is stored in `state.ri_calibration` and reused for every `.mea` in
   the folder (no recompute). Status line reports readiness (and the
-  `assumed/borrowed` provenance).
+  provenance caveat, which is read from the series definition
+  (`reference_series` → `caveat_short`) rather than hardcoded — the flag's
+  *meaning* changes as provenance changes, and a hardcoded string goes stale.)
 
 **Peak table.** A new **RI** column (after `retention_s`) shows each peak's RI;
 `*` suffix marks an extrapolated value (out of the anchor range). `—` when no

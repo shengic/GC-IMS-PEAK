@@ -1,11 +1,14 @@
 """
 main.py  —  GC-IMS Desktop UI (Tk)
-Version: 3.0 — by Albert Sheng
+Version: 3.1 — by Albert Sheng
 
 A desktop application for browsing, reading, and analyzing GC-IMS .mea files.
 Workflow: browse folder → select .mea (auto-read) → show detected peaks → inspect.
 
 Changelog:
+  3.1 — 熱圖標題列新增「ⓘ 軸說明」按鈕，開窗說明兩軸的正規化（內容全部來自
+      calibration.axis_explanation()，UI 端不另寫一份）；修正互動峰視圖的
+      標題誤印內部代號 "bg"（kind 對照表漏了這個 key，fallback 直接印出來）。
   2.1 (Identify Workflow Batches 3, 4, 6)
       - Batch 6: peak circles and numbers are native Canvas objects drawn over a
         circle-free _bg.png, placed via the recorded plot-area geometry. This
@@ -46,8 +49,8 @@ import threading
 from enum import Enum
 from pathlib import Path
 from tkinter import (
-    filedialog, messagebox, ttk, Canvas, Checkbutton, Frame, Label, Tk, Text, END,
-    Toplevel, Menu, BooleanVar, StringVar, TclError,
+    filedialog, messagebox, ttk, Button, Canvas, Checkbutton, Frame, Label, Tk,
+    Text, END, Toplevel, Menu, BooleanVar, StringVar, TclError,
 )
 from tkinter.ttk import Treeview, PanedWindow
 
@@ -57,15 +60,24 @@ from PIL import Image, ImageTk
 import calibration
 import library
 import peaks as peaks_mod
+import readGAS
 import rip as rip_mod
 import rules
 
-# 第四階段 RT→RI：整批 STD 校準的參照系列（本專案 STD 已確認為 C4–C9 甲基酮，
-# RI 值為借用（見 methyl_ketone_RI_provenance.md），provenance 全程帶 assumed_unverified）
-RI_SERIES = "methyl_ketone"
+# 第四階段 RT→RI：整批 STD 校準的參照系列。本專案 STD 確認為 C4–C9 的**酮**
+# （draft.23 更正：先前寫成「甲基酮」是本專案的推論，非使用者提供，已撤回）。
+# RI 值為借用（見 ketone_RI_provenance.md），provenance 全程帶 assumed_unverified。
+RI_SERIES = "ketone"
 
-RULES_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "rules_config.json")
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+RULES_CONFIG = os.path.join(PROJECT_DIR, "rules_config.json")
+
+# Absolute, so the app finds its artefacts regardless of the process cwd. Every
+# derived-file path below is built from this: the UI used to say "results/..."
+# relative, which silently resolved against wherever python was launched from
+# (double-clicked shortcut, IDE run config, another drive) and then reported the
+# file as missing rather than as looked-for-in-the-wrong-place.
+RESULTS_DIR = os.path.join(PROJECT_DIR, "results")
 
 
 # ============================================================================== #
@@ -351,6 +363,19 @@ def is_rule_override(peak):
     return peak.get("user_active") is True and not peak.get("rule_active", True)
 
 
+def _npz_rt_axis_version(npz_path):
+    """Retention-axis formula version recorded in a .npz. Missing → 1 (the old,
+    16.7 %-short axis); unreadable → current, so a corrupt file is reported by the
+    normal load path rather than as a spurious version warning."""
+    try:
+        with np.load(npz_path) as z:
+            if "rt_axis_version" in z.files:
+                return int(z["rt_axis_version"])
+        return 1
+    except Exception:
+        return readGAS.RT_AXIS_VERSION
+
+
 def outputs_are_fresh(source_path, *outputs):
     """True when every output exists and is newer than the source .mea.
 
@@ -533,6 +558,9 @@ class ImageViewerDialog:
         self.pan_y += dy
         self.pan_start_x = event.x
         self.pan_start_y = event.y
+        # Without this the pan offsets moved but nothing repainted, so dragging
+        # did nothing on screen until the next zoom forced a redraw.
+        self.display_image()
 
     def on_mouse_wheel(self, event, delta=None):
         """Zoom in/out on scroll; keep the image pixel under the cursor pinned.
@@ -555,7 +583,6 @@ class ImageViewerDialog:
         self.pan_y = event.y - img_y * zoom_new
         self.zoom_level = zoom_new
         self.display_image()
-        self.display_image()
 
 
 # ============================================================================== #
@@ -570,7 +597,7 @@ class GCIMSApp:
         self.state = AppState()
         self._match_windows = {}   # peak_id -> open compound-match Toplevel (dedup)
         self.ui_state = UIState.START
-        self.root.title("GC-IMS Peak Detection — v2.1 by Albert Sheng")
+        self.root.title("GC-IMS Peak Detection — v3.1 by Albert Sheng")
         # Fit the actual screen instead of a fixed 1700x950: on a smaller
         # display that pushed part of the three-pane layout off-screen, and the
         # 1400x800 minsize then made it impossible to shrink back into view.
@@ -696,10 +723,20 @@ class GCIMSApp:
         center_frame = Frame(main_pane, bg="white")
         main_pane.add(center_frame, weight=2)
 
+        # 標題列改成 Frame：右邊要塞「ⓘ 軸說明」。烤進 PNG 的標註受 matplotlib
+        # 預設字型限制只能 ASCII 且要短，看不懂的人在這裡點開完整中文說明。
+        header_row = Frame(center_frame, bg="white")
+        header_row.pack(side="top", fill="x", pady=5)
         self.main_canvas_label = Label(
-            center_frame, text="(no file loaded)", bg="white", font=("Georgia", 9),
+            header_row, text="(no file loaded)", bg="white", font=("Georgia", 9),
         )
-        self.main_canvas_label.pack(side="top", pady=5)
+        self.main_canvas_label.pack(side="left", expand=True)
+        self.axis_help_btn = Button(
+            header_row, text="ⓘ 軸說明", font=("Microsoft JhengHei", 8),
+            relief="flat", bg="white", activebackground="#e8e8e8",
+            cursor="hand2", command=self._show_axis_help,
+        )
+        self.axis_help_btn.pack(side="right", padx=(0, 8))
         self.main_canvas = Canvas(
             center_frame, bg="white", width=600, height=550, cursor="fleur",
             highlightthickness=0,
@@ -844,14 +881,14 @@ class GCIMSApp:
         self.populate_file_list(folder)
         self.ui_state = UIState.FOLDER_SELECTED
         self.update_button_state()
-        # 第四階段：選資料夾即在背景「默默」解一次 RT→RI 校準（找 STD → 6 甲基酮
+        # 第四階段：選資料夾即在背景「默默」解一次 RT→RI 校準（找 STD → 6 個酮的
         # 錨點 → log-linear 內插常數），存進 state 供之後每個 .mea 共用、不重算。
         self._start_folder_calibration(folder)
 
     def _start_folder_calibration(self, folder):
         """背景解析本資料夾的 RT→RI 校準（第四階段），不阻塞 UI。
 
-        流程呼應使用者描述：選資料夾 → 默默找 STD → 取 6 個甲基酮峰 → 算內插常數
+        流程呼應使用者描述：選資料夾 → 默默找 STD → 取 6 個酮的峰 → 算內插常數
         → 存 state。之後同資料夾換不同 .mea 檔時直接沿用（resolve_*_cached 有
         session/sidecar 快取，不重算 STD）。STD 尚未偵測（缺 _peaks.json）時會回
         unavailable，UI 就維持保留時間軸，不會卡住。
@@ -881,7 +918,7 @@ class GCIMSApp:
                         if folder != self.state.current_folder:
                             return                    # 使用者已換資料夾，放棄
                         base = Path(std).stem
-                        if os.path.exists(os.path.join("results", base + "_peaks.json")):
+                        if os.path.exists(os.path.join(RESULTS_DIR, base + "_peaks.json")):
                             continue
                         post(f"Detecting STD {base} for RI calibration (~90 s)…")
                         subprocess.run(
@@ -909,7 +946,10 @@ class GCIMSApp:
         if isinstance(cal, dict) and cal.get("mode") == "multi_point_loglinear":
             self.state.ri_calibration = cal
             n = cal.get("anchor_selection", {}).get("n_clean_anchors", "?")
-            flag = " (assumed/borrowed)" if cal.get("assumed_unverified") else ""
+            # 警語文字取自系列定義（reference_series 的 caveat_short），不寫死在這裡：
+            # 旗標的意義會隨 provenance 改變，寫死就會留下已經不成立的理由。
+            caveat = cal.get("ri_caveat") if cal.get("assumed_unverified") else None
+            flag = f" — ⚠ {caveat}" if caveat else ""
             self.status_label.config(
                 text=f"✓ RI calibration ready ({mode}, {n} ketone anchors){flag} — "
                      f"heatmap & table now in Retention Index")
@@ -929,6 +969,28 @@ class GCIMSApp:
         for mea_file in mea_files:
             self.file_tree.insert("", "end", text=mea_file.name, values=(str(mea_file),))
 
+    def _clear_main_canvas(self):
+        """Wipe the canvas back to empty while the next file loads.
+
+        `AppState.reset_after_file_selection()` drops `overlay_photo_ref`, so the
+        backdrop *image* vanishes as soon as the PhotoImage is collected — but the
+        circles and peak numbers are `create_oval` / `create_text` **canvas
+        items**, which do not hang off that reference and therefore survived,
+        leaving the previous file's peaks floating over an empty canvas.
+
+        Clearing the view state too (not just the items) matters: a stray
+        `main_canvas_kind == "bg"` would let `_draw_peak_circles()` paint again on
+        the next resize/`<Configure>` event, before the new file has loaded.
+        """
+        self.main_canvas.delete("all")
+        self.main_canvas_original = None
+        self.main_canvas_kind = None
+        self.main_canvas_zoom = 1.0
+        self.main_canvas_pan_x = self.main_canvas_pan_y = 0
+        self.state.peak_items = {}
+        self.state.highlight_id = None
+        self.main_canvas_label.config(text="(loading…)")
+
     def on_file_selected(self, event):
         """User selected a file → auto-trigger background read (workflow §第八階段)."""
         selection = self.file_tree.selection()
@@ -938,6 +1000,9 @@ class GCIMSApp:
         file_path = self.file_tree.item(item, "values")[0]
         self.state.selected_mea_file = file_path
         self.state.reset_after_file_selection()
+        self._clear_main_canvas()
+        self.peak_tree.delete(*self.peak_tree.get_children())
+        self.update_peaks_header()
         self.status_label.config(text=f"Selected: {Path(file_path).name}")
         self.ui_state = UIState.FILE_SELECTED
         self.update_button_state()
@@ -962,6 +1027,19 @@ class GCIMSApp:
                             # .npz is then the only copy, so don't scare the user
         warning = ("\n\n⚠ The .mea is NEWER than this .npz, so the cache may not "
                    "match the current file." if stale else "")
+
+        # A .npz written before the retention-axis fix has retention_s ~16.7 %
+        # short. Reusing it silently is the one way new and old RT end up mixed in
+        # the same results/ folder with nothing to show for it, so say so here —
+        # this dialog is the only place the choice is actually made.
+        if _npz_rt_axis_version(npz) < readGAS.RT_AXIS_VERSION:
+            stale = True
+            warning += (
+                "\n\n⚠ This .npz predates the retention-time axis fix "
+                "(2026-08-12): its retention times are ~16.7 % too short.\n"
+                "Intensities, the drift axis, peak detection and RI are all "
+                "unaffected — only retention time is wrong.\n"
+                "Choose No to re-read the .mea and correct it.")
         return messagebox.askyesno(
             "Use the existing .npz?",
             f"A previously converted matrix already exists for this file:\n\n"
@@ -975,7 +1053,7 @@ class GCIMSApp:
 
     def _finish_npz_load(self, base):
         """Display the background rebuilt from / kept alongside the .npz."""
-        bg = f"results/{base}_bg.png"
+        bg = f"{RESULTS_DIR}/{base}_bg.png"
         self.load_heatmap(bg)
         self.state.heatmap_path = bg
         self.state.bg_img_path = bg
@@ -985,7 +1063,9 @@ class GCIMSApp:
         self.ui_state = UIState.READ_DONE
         self.status_label.config(text=f"✓ Loaded from existing .npz: {base}")
         self.update_button_state()
-        self._load_existing_peaks(base)
+        # 峰圖是主畫面（原始熱圖有工具列按鈕可切回去），所以已有偵測結果就直接顯示，
+        # 不要停在沒有圈的背景圖上等使用者再按一次。
+        self._show_peaks_if_available(base)
 
     def _render_bg_from_npz(self, base, npz):
         """Rebuild the display background from the .npz — no .mea needed.
@@ -1015,7 +1095,7 @@ class GCIMSApp:
                 self.root.after(100, lambda: self._poll_bg_render(q, base))
             elif msg_type == "done":
                 self._progress_stop()
-                if os.path.exists(f"results/{base}_bg.png"):
+                if os.path.exists(f"{RESULTS_DIR}/{base}_bg.png"):
                     self._finish_npz_load(base)
                 else:
                     messagebox.showerror(
@@ -1043,9 +1123,9 @@ class GCIMSApp:
         # .npz needs to be present for the shortcut to be offered.
         mea = self.state.selected_mea_file
         base = Path(mea).stem
-        npz = f"results/{base}.npz"
+        npz = f"{RESULTS_DIR}/{base}.npz"
         if os.path.exists(npz) and self._ask_use_cached_npz(mea, npz):
-            if os.path.exists(f"results/{base}_bg.png"):
+            if os.path.exists(f"{RESULTS_DIR}/{base}_bg.png"):
                 self._finish_npz_load(base)
             else:
                 self._render_bg_from_npz(base, npz)
@@ -1085,12 +1165,14 @@ class GCIMSApp:
             elif msg_type == "done":
                 self._progress_stop()
                 base = Path(self.state.selected_mea_file).stem
-                heatmap = f"results/{base}_heatmap.png"
+                heatmap = f"{RESULTS_DIR}/{base}_heatmap.png"
                 if os.path.exists(heatmap):
                     self.load_heatmap(heatmap)
                     self.state.heatmap_path = heatmap
                     self.ui_state = UIState.READ_DONE
                     self.status_label.config(text=f"✓ Read complete: {base}")
+                    # 有現成的偵測結果就直接顯示峰圖，取代剛載入的原始熱圖
+                    self._show_peaks_if_available(base)
                 else:
                     messagebox.showerror("Error", "Heatmap PNG not found after read.")
                     self.ui_state = UIState.ERROR
@@ -1176,20 +1258,20 @@ class GCIMSApp:
             elif msg_type == "done":
                 self._progress_stop()
                 base = Path(self.state.selected_mea_file).stem
-                overlay = f"results/{base}_overlay.png"
-                json_path = f"results/{base}_peaks.json"
-                csv_path = f"results/{base}_peaks.csv"
+                overlay = f"{RESULTS_DIR}/{base}_overlay.png"
+                json_path = f"{RESULTS_DIR}/{base}_peaks.json"
+                csv_path = f"{RESULTS_DIR}/{base}_peaks.csv"
 
                 # _overlay.png keeps its baked-in circles for CLI/report use;
                 # the interactive canvas uses the circle-free _bg.png so the
                 # circles can be individual Canvas objects (Batch 6).
                 self.state.overlay_path = overlay if os.path.exists(overlay) else None
-                bg = f"results/{base}_bg.png"
+                bg = f"{RESULTS_DIR}/{base}_bg.png"
                 self.state.bg_img_path = bg if os.path.exists(bg) else None
                 self._load_canvas_geometry(base)
                 self._load_maxima(base)
                 self.state.peak_state = load_peak_state(
-                    f"results/{base}_peaks_state.json")
+                    f"{RESULTS_DIR}/{base}_peaks_state.json")
 
                 peaks, err = load_peaks_from_json(json_path)
                 if err and os.path.exists(csv_path):
@@ -1268,10 +1350,60 @@ class GCIMSApp:
         self.main_canvas_pan_y = 0
         self._render_main_canvas()
         # Update the header label to reflect what's showing
+        # "bg" 是互動峰視圖：背景用無圈的 _bg.png，圈是 Canvas 原生物件畫上去的，
+        # 對使用者而言跟 "overlay" 是同一件事，所以共用同一句說明。漏掉這個 key 時
+        # 舊的 .get(kind, kind) 會把內部代號 "bg" 兩個字直接當標題印出來。
         self.main_canvas_label.config(text={
             "heatmap": "Original heatmap (wheel = zoom, drag = pan)",
             "overlay": "Detected-peaks heatmap (wheel = zoom, drag = pan)",
+            "bg":      "Detected-peaks heatmap (wheel = zoom, drag = pan)",
         }.get(kind, kind or ""))
+
+    def _show_axis_help(self):
+        """「ⓘ 軸說明」視窗：把熱圖兩軸的正規化講清楚。
+
+        圖上烤進 PNG 的標註受 matplotlib 預設字型限制只能 ASCII、又得短到不遮資料，
+        對非開發者不夠。文字內容一律由 calibration.axis_explanation() 供應，這裡只
+        排版——說明與實際校正值因此不可能各說各話。
+
+        RIP 取自 _bg.json 的 canvas_geometry 而非重算：那份 sidecar 是跟現在畫面上
+        這張 PNG 一起寫出來的，重算有可能得到跟畫面不一致的值。
+        """
+        g = self.state.canvas_geometry or {}
+        secs = calibration.axis_explanation(
+            rip_drift_ms=g.get("rip_drift_ms"),
+            rip_index=g.get("rip_index"),
+            cal=self.state.ri_calibration,
+        )
+
+        win = getattr(self, "_axis_help_win", None)
+        if win is not None and win.winfo_exists():
+            win.destroy()          # 重開以帶入換檔後的新校正值
+        win = Toplevel(self.root)
+        self._axis_help_win = win
+        win.title("軸說明")
+        win.geometry("620x520")
+
+        txt = Text(win, wrap="word", font=("Microsoft JhengHei", 10),
+                   bg="white", relief="flat", padx=14, pady=12, spacing1=2,
+                   spacing3=6, cursor="arrow")
+        txt.pack(fill="both", expand=True)
+        txt.tag_configure("h", font=("Microsoft JhengHei", 11, "bold"),
+                          foreground="#1a4d80", spacing1=10, spacing3=8)
+        txt.tag_configure("term", font=("Consolas", 10, "bold"),
+                          foreground="#8a4b00")
+        txt.tag_configure("body", lmargin1=18, lmargin2=18)
+
+        for s in secs:
+            txt.insert(END, s["title"] + "\n", "h")
+            for term, meaning in s["rows"]:
+                txt.insert(END, f"  {term}\n", "term")
+                txt.insert(END, f"{meaning}\n", "body")
+        txt.config(state="disabled")
+
+        Button(win, text="關閉", font=("Microsoft JhengHei", 9),
+               command=win.destroy).pack(pady=(0, 10))
+        self._raise_window(win)
 
     def _render_main_canvas(self):
         """Re-blit main_canvas_original at current zoom/pan (called after wheel/drag)."""
@@ -1303,20 +1435,20 @@ class GCIMSApp:
         of them to be newer than the .mea.
         """
         mea = self.state.selected_mea_file
-        json_path = f"results/{base}_peaks.json"
-        bg = f"results/{base}_bg.png"
-        maxima = f"results/{base}_maxima.npz"
+        json_path = f"{RESULTS_DIR}/{base}_peaks.json"
+        bg = f"{RESULTS_DIR}/{base}_bg.png"
+        maxima = f"{RESULTS_DIR}/{base}_maxima.npz"
         if not outputs_are_fresh(mea, json_path, bg, maxima):
             return False
 
         peaks, err = load_peaks_from_json(json_path)
         if err:
             return False
-        self.state.overlay_path = f"results/{base}_overlay.png"
+        self.state.overlay_path = f"{RESULTS_DIR}/{base}_overlay.png"
         self.state.bg_img_path = bg
         self._load_canvas_geometry(base)
         self._load_maxima(base)
-        self.state.peak_state = load_peak_state(f"results/{base}_peaks_state.json")
+        self.state.peak_state = load_peak_state(f"{RESULTS_DIR}/{base}_peaks_state.json")
         self.state.detection_meta, _ = load_detection_meta(json_path)
         try:
             with open(json_path, "r", encoding="utf-8") as f:
@@ -1324,13 +1456,27 @@ class GCIMSApp:
         except Exception:
             pass
         self.state.peaks_json_path = json_path
-        self.state.peaks_csv_path = f"results/{base}_peaks.csv"
+        self.state.peaks_csv_path = f"{RESULTS_DIR}/{base}_peaks.csv"
         self.populate_peak_table(peaks)
         self.ui_state = UIState.PEAKS_DETECTED
         self.update_button_state()
         self.status_label.config(
-            text=f"✓ Loaded {len(peaks)} peaks from a previous run — "
-                 f"click Show Detected Peak Heatmap to view")
+            text=f"✓ {base}：載入既有偵測結果 {len(peaks)} 個峰")
+        return True
+
+    def _show_peaks_if_available(self, base):
+        """已有偵測結果就切到峰圖（背景 + 圈），否則維持原始熱圖。
+
+        使用者的預期是「點任何 .mea，主畫面就是帶圈的峰圖」；原始熱圖是輔助視圖，
+        工具列另有按鈕可切回。這裡只在**結果已存在且比 .mea 新**時才顯示——
+        沒有結果時不自動觸發偵測，那是 workflow §第八階段的既有決策（找峰約 90 秒，
+        選檔就默默背景跑會讓人以為程式當掉），改由狀態列明確提示要按哪個按鈕。
+        """
+        if not self._load_existing_peaks(base):
+            self.status_label.config(
+                text=f"✓ {base} 已載入（尚未找峰）— 按 Show Detected Peak Heatmap（約 90 秒）")
+            return False
+        self._show_peak_canvas()
         return True
 
     def _load_canvas_geometry(self, base):
@@ -1342,8 +1488,8 @@ class GCIMSApp:
         rebuilt from the .npz without re-detecting).
         """
         self.state.canvas_geometry = None
-        for path, key in ((f"results/{base}_bg.json", None),
-                          (f"results/{base}_peaks.json", "canvas_geometry")):
+        for path, key in ((f"{RESULTS_DIR}/{base}_bg.json", None),
+                          (f"{RESULTS_DIR}/{base}_peaks.json", "canvas_geometry")):
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
@@ -1363,7 +1509,7 @@ class GCIMSApp:
         """
         self.state.maxima = None
         try:
-            self.state.maxima = peaks_mod.load_maxima_npz(f"results/{base}_maxima.npz")
+            self.state.maxima = peaks_mod.load_maxima_npz(f"{RESULTS_DIR}/{base}_maxima.npz")
         except Exception as e:
             print(f"maxima cache unavailable: {e}")
 
@@ -1488,7 +1634,7 @@ class GCIMSApp:
             return
         base = Path(self.state.selected_mea_file).stem
         try:
-            save_peak_state(f"results/{base}_peaks_state.json", self.state.peaks)
+            save_peak_state(f"{RESULTS_DIR}/{base}_peaks_state.json", self.state.peaks)
         except Exception as e:
             print(f"could not save peak state: {e}")
 
@@ -1764,24 +1910,19 @@ class GCIMSApp:
 
         def work():
             try:
-                import glob as _glob
                 import identify
-                data_dir = library.resolve_data_dir()
+                data_dir = library.resolve_data_dir(explicit=self.state.library_dir)
                 if data_dir is None:
                     q.put(("error", "No library folder found (library_data/ is empty "
                                     "or missing). Add .ril/.iml files first."))
                     return
                 header = (identify.read_mea_header(mea)
                           if mea and os.path.exists(mea) else {})
-                ril_paths, _iml_sel, info = identify.select_library_files(data_dir, header)
-                # GC/RI library (.ril) is column-specific → keep the selection.
-                # IMS drift (.iml) is instrument-relative, not GC-column-specific →
-                # match against ALL .iml; the DtMode filters keep RIPrel vs K0 apart.
-                all_iml = sorted(_glob.glob(os.path.join(data_dir, "*.iml")))
-                info = dict(info)
-                info["iml_strategy"] = "all (IMS drift is instrument-relative)"
-                q.put(("done", (library.load_ril_many(ril_paths),
-                                library.load_iml_many(all_iml), info)))
+                # Selection + loading + drift-gas cross-check all live in
+                # identify.load_libraries(), shared with the CLI. Keeping a second
+                # copy here is how the two drifted apart before: the UI matched
+                # against all .iml while the CLI filtered them by GC column.
+                q.put(("done", identify.load_libraries(data_dir, header)))
             except Exception as e:   # noqa: BLE001 — surface any load failure
                 q.put(("error", str(e)))
 
@@ -1872,6 +2013,35 @@ class GCIMSApp:
             if p is not None:
                 self._refresh_row(item, p)
 
+    @staticmethod
+    def _raise_window(win):
+        """Bring an already-open Toplevel to the front and give it focus.
+
+        `lift()` + `focus_set()` is not enough on Windows, which is why
+        re-clicking ▶ for a peak whose panel was buried behind other panels did
+        nothing:
+
+        - `lift()` only reorders within the *application's* stacking order, and
+          Windows' foreground lock routinely ignores it once another Toplevel is
+          on top.
+        - `focus_set()` moves focus *within* an application that is already
+          active; it does not activate the window.
+
+        Flipping `-topmost` on and straight back off makes the window manager
+        actually raise it, without leaving it permanently pinned above
+        everything else. `focus_force()` then takes the keyboard focus.
+        """
+        try:
+            win.deiconify()          # no-op unless it was minimised
+            win.lift()
+            win.attributes("-topmost", True)
+            # Off again on the next idle cycle — leaving it on would pin the
+            # panel above every other window, including the main one.
+            win.after_idle(win.attributes, "-topmost", False)
+            win.focus_force()
+        except TclError:
+            pass                     # destroyed between winfo_exists() and here
+
     def _open_compound_match_panel(self, peak):
         """Stage 10: list candidate compounds for `peak` in a popup. Matching uses
         the same cache as the GC column, so this is instant once auto-fill ran."""
@@ -1879,9 +2049,7 @@ class GCIMSApp:
         # instead of stacking a duplicate.
         existing = self._match_windows.get(peak.get("peak_id"))
         if existing is not None and existing.winfo_exists():
-            existing.deiconify()
-            existing.lift()
-            existing.focus_set()
+            self._raise_window(existing)
             return
 
         def show():
@@ -1936,7 +2104,12 @@ class GCIMSApp:
               font=("Georgia", 9), bg="white").pack(fill="x", padx=8, pady=(8, 2))
 
         if peak.get("ri_assumed_unverified"):
-            Label(win, text="⚠ Peak RI is assumed/borrowed (unverified) — matches are provisional.",
+            # 內容來自 reference_series 的 caveat_short，隨資料走；沒有就退回通用句。
+            # 這裡曾寫死 "assumed/borrowed"，在 RI 來源從借用值改成本批對照表之後
+            # 就變成錯的理由——訊息與旗標脫鉤是這類過期的根源。
+            Label(win,
+                  text="⚠ " + (peak.get("ri_caveat")
+                               or "此峰的 RI 尚未驗證，比對結果僅供參考"),
                   fg="firebrick", anchor="w", font=("Georgia", 8), bg="white"
                   ).pack(fill="x", padx=8)
 
@@ -2053,7 +2226,7 @@ class GCIMSApp:
                 self.root.after(100, lambda: self.poll_numbered_overlay(q))
             elif msg_type == "done":
                 base = Path(self.state.selected_mea_file).stem
-                numbered = f"results/{base}_overlay_numbered.png"
+                numbered = f"{RESULTS_DIR}/{base}_overlay_numbered.png"
                 if os.path.exists(numbered):
                     # Kept as a static artifact for the Batch 8 report only —
                     # swapping it into the canvas would bury the native circles

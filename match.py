@@ -1,6 +1,6 @@
 """
 match.py  —  GC-IMS Identify Workflow 第五階段：容許窗比對
-Version: 3.0 — by Albert Sheng
+Version: 3.1 — by Albert Sheng
 
 依 GC-IMS_Identify_Workflow.md §第五階段：
   - 核心：|library_value - peak_value| <= tolerance
@@ -103,22 +103,33 @@ def match_k0(peak_k0, library_rows, tolerance=DEFAULT_K0_TOLERANCE):
     """
     以 peak_k0 為中心、tolerance 為半寬，篩出 library rows 裡 K0 命中的候選。
 
-    須先透過 DtMode 篩選：只保留 DtMode 含 "K0" 的 row（表示該 row 的
-    "Dt[a.u.]" 存的是 1/K0 或 K0，可跟本專案 dt_convert.compute_k0 產出的值
-    做同單位比對）；其他 DtMode（Dt 直接以毫秒等別的單位存）跳過。
+    須先透過 DtMode 篩選：只保留 DtMode 含 "K0" 的 row；其他 DtMode（Dt 以毫秒等
+    別的單位存）跳過，避免單位混亂。
+
+    **比對一律在 K0 空間進行。** `dt_convert` 的兩個模式現在都回傳 K0 本身
+    （2026-08-12 統一），而 `.iml` 的庫值不一定是 K0——實測 library_data/ 的 203 筆
+    該類 row，`DtMode` 字面就是 `"1/K0"`（存的是逆值）。所以這裡依 DtMode 判斷：
+
+        DtMode 含 "1/K0"  → 庫值是逆值，取倒數換成 K0 再比
+        DtMode 含 "K0"    → 庫值已是 K0，直接比
+
+    取倒數刻意放在這一步而不是藏進 dt_convert：換算慣例屬於「這個庫怎麼存」的
+    性質，跟「峰的 K0 怎麼算」是兩回事，混在一起就是先前兩個模式互為倒數的成因。
 
     參數
     ----
     peak_k0 : float | None
-        該峰的 K0 值（由 dt_convert.compute_k0 產出）。None → 回空清單。
+        該峰的 K0 值（cm²/V/s，由 dt_convert.compute_k0 產出）。None → 回空清單。
     library_rows : list[dict]
         通常為 .iml 讀取結果（.ril 沒有 Dt/DtMode 欄位）。
     tolerance : float
+        K0 空間的容差（非庫值原始單位）。
 
     回傳
     ----
     list[dict]
-        依 delta_k0 遞增排序。欄位為 delta_k0 / match_dimensions=["k0"]。
+        依 delta_k0 遞增排序。欄位為 delta_k0 / k0_library_value（換算後的庫 K0，
+        原始 Dt[a.u.] 仍原樣保留）/ match_dimensions=["k0"]。
     """
     if peak_k0 is None:
         return []
@@ -129,11 +140,17 @@ def match_k0(peak_k0, library_rows, tolerance=DEFAULT_K0_TOLERANCE):
             continue
         dtmode = (row.get("DtMode") or "").strip()
         if "K0" not in dtmode:
-            # DtMode 非 K0 相關（可能是別的漂移時間表達法），跳過避免單位混亂
             continue
-        delta = abs(dt - peak_k0)
+        if "1/K0" in dtmode:
+            if not dt:
+                continue                      # 逆值為 0 → 無法還原，跳過
+            lib_k0 = 1.0 / dt
+        else:
+            lib_k0 = dt
+        delta = abs(lib_k0 - peak_k0)
         if delta <= tolerance:
             m = dict(row)
+            m["k0_library_value"] = lib_k0
             m["delta_k0"] = delta
             m["match_dimensions"] = ["k0"]
             hits.append(m)

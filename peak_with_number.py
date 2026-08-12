@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 peak_with_number.py — Render a GC-IMS overlay with peak circles AND peak-id numbers.
-Version: 3.0 — by Albert Sheng
+Version: 3.1 — by Albert Sheng
 
 Changelog:
+  3.1 — 移除熱圖右上角的軸標註（改由 UI 的「ⓘ 軸說明」呈現）。
   ver.02 — Fixed the OOM crash in write_overlay_numbered(): now downsamples the
            intensity matrix before passing to ax.imshow(), matching the fix
            already applied to readGAS.py / peaks.py ver.02. Reuses
@@ -132,13 +133,31 @@ def write_overlay_numbered(intensity, drift_ms, retention_s, peaks, path,
     ax.xaxis.set_major_locator(MultipleLocator(0.5))
     ax.xaxis.set_minor_locator(MultipleLocator(0.1))
     ax.xaxis.set_major_formatter(FormatStrFormatter("%.1f"))
+
+
     ax.set_title(f"Detected {len(peaks)} peaks (red = detected, numbered)")
     fig.savefig(path, dpi=dpi)
     plt.close(fig)
     return path
 
 
+def _use_utf8_stdout():
+    """Windows 主控台預設 cp950，印不出 µ / 中文以外的字元就整支崩掉（實際發生過：
+    print_summary 的 'µs' 讓 readGAS.py 在 cp950 下 UnicodeEncodeError）。
+
+    同時修掉一個更隱蔽的問題：main.py 以 encoding="utf-8" 讀子行程的 stdout，子行程
+    卻用 cp950 寫，狀態列的中文訊息因此一直是亂碼。兩邊統一成 utf-8。
+    calibration.py 與 test/ 早就用這個慣用法，這裡補齊。
+    """
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass                      # 舊版 Python 或已被重導向 → 沿用原設定
+
+
 def main():
+    _use_utf8_stdout()
     ap = argparse.ArgumentParser(
         description="Render GC-IMS overlay with peak circles and id numbers.")
     ap.add_argument("path", help="輸入 .npz 或 .mea（用來載入強度面）")

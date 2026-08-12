@@ -1,8 +1,13 @@
 """
 peaks.py  —  GC-IMS 峰偵測（第一層：偵測 / 測量；measure-only v1）
-Version: 3.0 — by Albert Sheng
+Version: 3.1 — by Albert Sheng
 
 變更記錄：
+  3.1  — load_surface() 從 .npz 載入時改用 npz 內的 mea_source 當 meta["source"]，
+         修正 RI 校正靜默失效（原本指向 .npz 自己，資料夾被解析成 results/，
+         那裡沒有 STD，y 軸就無聲退回保留時間）；_bg.json 幾何新增
+         rip_index / rip_drift_ms 供 UI 的軸說明使用；--ri-series 指定了卻
+         拿不到校正時改對 stderr 發警告；移除熱圖右上角的軸標註。
   2.1  — 強制規則 R004/R006 移到突出度門檻**之前**（門檻是相對值，RIP 會把它
          墊高數倍並誤殺真峰）；抽出 select_from_maxima() 供 UI 規則面板共用；
          新增 <name>_maxima.npz 快取（25 萬筆原始極大，使規則可即時重算）；
@@ -52,6 +57,7 @@ import argparse
 import datetime
 import json
 import os
+import sys
 
 import numpy as np
 
@@ -68,18 +74,47 @@ SATURATION = 32767  # int16 滿格
 # 載入強度面
 # --------------------------------------------------------------------------- #
 def load_surface(path):
-    """回傳 (intensity, drift_ms, retention_s, meta)。支援 .npz 與 .mea。"""
+    """回傳 (intensity, drift_ms, retention_s, meta)。支援 .npz 與 .mea。
+
+    meta 一定含 `rt_axis_version`：舊版 `.npz` 沒有這個欄位，視為版本 1，代表它的
+    retention_s 是用少了 +1 的舊公式算的（比實際短 16.7%）。這裡只警告不阻擋——
+    強度矩陣與漂移軸仍然正確，找峰照樣能跑，錯的只有保留時間；但不警告就會出現
+    「同一個 results/ 底下新舊 RT 混用而毫無跡象」的情況。
+    """
+    import readGAS
     ext = os.path.splitext(path)[1].lower()
     if ext == ".npz":
         z = np.load(path)
-        return z["intensity"], z["drift_ms"], z["retention_s"], {"source": path}
+        ver = int(z["rt_axis_version"]) if "rt_axis_version" in z.files else 1
+        # source 要指回原始 .mea：RI 校正靠「該 .mea 所在資料夾裡的 STD」解析，
+        # 指到 .npz 自己會讓資料夾變成 results/（沒有 STD）而讓 RI 靜默失效。
+        # 舊的 .npz 沒有 mea_source，只能沿用 npz 路徑（行為同以往）。
+        src = str(z["mea_source"]) if "mea_source" in z.files else ""
+        meta = {"source": src or path, "rt_axis_version": ver}
+        warn_if_stale_rt_axis(ver, path)
+        return z["intensity"], z["drift_ms"], z["retention_s"], meta
     elif ext == ".mea":
-        import readGAS
         data, header, axes = readGAS.read_mea(path)
-        return data, axes["drift_ms"], axes["retention_s"], {"source": path,
-                                                             "machine": header.get("Machine type"),
-                                                             "sample": header.get("Sample")}
+        return data, axes["drift_ms"], axes["retention_s"], {
+            "source": path,
+            "machine": header.get("Machine type"),
+            "sample": header.get("Sample"),
+            "rt_axis_version": axes.get("rt_axis_version", readGAS.RT_AXIS_VERSION),
+        }
     raise ValueError(f"不支援的副檔名：{ext}（請給 .npz 或 .mea）")
+
+
+def warn_if_stale_rt_axis(version, path=""):
+    """版本落後就印警告，回傳 True 表示這份產物的 RT 軸已過時。"""
+    import readGAS
+    if version is None or version >= readGAS.RT_AXIS_VERSION:
+        return False
+    print(f"  ⚠ 這份產物的保留時間軸是舊版公式（rt_axis_version={version}，"
+          f"現行={readGAS.RT_AXIS_VERSION}）：{os.path.basename(path)}")
+    print(f"    其 retention_s 比實際短約 16.7%（少了 (averages+1) 的 +1）。"
+          f"強度/漂移軸與找峰不受影響，RI 也不受影響，但 RT 相關輸出不可信。")
+    print(f"    重新讀取原始 .mea 即可更新（會覆寫 .npz）。")
+    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -404,10 +439,13 @@ def write_csv(peaks, path):
 
 
 def write_json(peaks, path, params, stats, meta, shape, geom=None):
+    import readGAS
     doc = {
         "source": meta.get("source"),
         "machine": meta.get("machine"),
         "sample": meta.get("sample"),
+        # 跟著峰一起走，讓 UI/報告能判斷這批峰的 retention_s 是哪一版軸算的
+        "rt_axis_version": meta.get("rt_axis_version", readGAS.RT_AXIS_VERSION),
         "detected_at": datetime.datetime.now().isoformat(timespec="seconds"),
         "matrix_shape": [int(shape[0]), int(shape[1])],
         "detection_params": params,
@@ -566,6 +604,8 @@ def write_overlay(intensity, drift_ms, retention_s, peaks, path,
     ax.xaxis.set_major_locator(MultipleLocator(0.5))
     ax.xaxis.set_minor_locator(MultipleLocator(0.1))
     ax.xaxis.set_major_formatter(FormatStrFormatter("%.1f"))
+
+
     ax.set_title(title if title is not None
                  else f"Detected {len(shown)} peaks (red = detected)")
     fig.savefig(path, dpi=dpi)
@@ -581,6 +621,10 @@ def write_overlay(intensity, drift_ms, retention_s, peaks, path,
         "ylim": [float(v) for v in ax.get_ylim()],
         # y 軸座標種類：'ri' 時 UI 要用 peak['ri'] 擺圈，'retention_s' 時用保留時間
         "y_axis": y_axis_kind,
+        # RIP 跟著幾何一起走，UI 的「ⓘ 軸說明」才能講出跟這張圖一致的正規化基準
+        # ——否則得回頭載 .npz 重算，還可能算出跟畫面不同的值。
+        "rip_index": int(rip_index),
+        "rip_drift_ms": float(drift_ms[rip_index]),
     }
     print(f"  PNG  -> {path}  (marked {len(shown) if draw_circles else 0} peaks)")
     if show:
@@ -593,7 +637,23 @@ def write_overlay(intensity, drift_ms, retention_s, peaks, path,
 # --------------------------------------------------------------------------- #
 # main
 # --------------------------------------------------------------------------- #
+def _use_utf8_stdout():
+    """Windows 主控台預設 cp950，印不出 µ / 中文以外的字元就整支崩掉（實際發生過：
+    print_summary 的 'µs' 讓 readGAS.py 在 cp950 下 UnicodeEncodeError）。
+
+    同時修掉一個更隱蔽的問題：main.py 以 encoding="utf-8" 讀子行程的 stdout，子行程
+    卻用 cp950 寫，狀態列的中文訊息因此一直是亂碼。兩邊統一成 utf-8。
+    calibration.py 與 test/ 早就用這個慣用法，這裡補齊。
+    """
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass                      # 舊版 Python 或已被重導向 → 沿用原設定
+
+
 def main():
+    _use_utf8_stdout()
     ap = argparse.ArgumentParser(description="GC-IMS 峰偵測（突出度，measure-only）")
     ap.add_argument("path", nargs="?", default=None,
                     help="輸入 .npz 或 .mea（省略則跳檔案總管）")
@@ -623,7 +683,7 @@ def main():
                     help="存檔後也開可縮放視窗顯示 overlay")
     ap.add_argument("--ri-series", default=None,
                     help="背景圖/疊圈圖 y 軸改標成 RI（第四階段），值為參照系列（如"
-                         " methyl_ketone），從本檔資料夾的 STD 解析校準；省略維持保留時間軸。"
+                         " ketone），從本檔資料夾的 STD 解析校準；省略維持保留時間軸。"
                          "x 軸 drift 正規化不受影響")
     ap.add_argument("--ri-start-carbon", type=int, default=None)
     args = ap.parse_args()
@@ -664,6 +724,11 @@ def main():
                 ri_calibration, ri_mode, _ = _cal.resolve_ri_calibration(
                     folder, series_key=args.ri_series, start_carbon=args.ri_start_carbon)
                 print(f"[RI] source={ri_mode}, series={args.ri_series}")
+                if ri_calibration is None:
+                    # 使用者明確要了 --ri-series 卻沒拿到，y 軸會默默退回保留時間，
+                    # 產出的圖與 _bg.json 跟「有 RI」的那批不同座標系卻長得一樣。
+                    print(f"[warn] 指定了 --ri-series {args.ri_series} 但在 {folder} "
+                          f"找不到可用的 STD；y 軸退回保留時間（秒）", file=sys.stderr)
             else:
                 print("[warn] 找不到原始 .mea 資料夾，RI 軸略過")
         except Exception as _e:

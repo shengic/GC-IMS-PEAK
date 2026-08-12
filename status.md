@@ -1,6 +1,6 @@
 # GC-IMS-PEAK — Status & Session Handoff
 
-**Last updated**: 2026-07-27 (session with Claude) — code tagged **v3**
+**Last updated**: 2026-08-12 (session with Claude) — code tagged **v3.1**
 **Project root**: `F:/GC-IMS-PEAK` (was `K:/` in earlier sessions — paths below updated)
 **Purpose**: catch a new session up on where the Identify Workflow implementation
 stands, what has been decided, what is testable now, and what to do next. Pair
@@ -19,17 +19,177 @@ progress tracker, not the design.
   (auto-detecting the STD if needed), the peak table gains an **RI** column, and
   every heatmap's y-axis becomes a **linear Retention Index** axis (x-axis
   drift/RIP normalization untouched).
-- STD confirmed **C4–C9 methyl ketones**; the 6 RI values are **borrowed**
-  (`assumed_unverified` / `borrowed_cross_referenced`, see
-  `methyl_ketone_RI_provenance.md`) — upgrade path documented there.
+- STD identity **confirmed (draft.24)**: 2-alkanone (methyl ketone) series C4–C9,
+  from the manager's `kintonemixed-C4-C9.xlsx` with matching CAS numbers. RI
+  values now come from that table, and its `Dt` column also **fixed the anchor
+  selection** (`match_anchors_by_dt()` replaces the spacing heuristic, which had
+  been picking the wrong six peaks). One caveat remains: the table's column
+  polarity is unconfirmed (~+302 vs non-polar literature), which would shift every
+  RI by a constant. **Existing `_peaks.json` files need re-running** to pick up
+  correct `ri`. See `ketone_RI_provenance.md`.
 - UI (`main.py`) rollout: **Batches 1, 2, 3, 4, 5, 6 done** + Stage-4 wiring.
   Batches 7, 8 pending. (Batch 5 = the ▶ compound-match panel: clicking a peak's
   ▶ loads the `.ril`/`.iml` libraries and lists candidate compounds via
   `match.match_all`.)
-- **125** pytest checks passing across `test/` (added `test_calibration.py`).
+- **145** pytest checks passing across `test/` (~8 s; added `test_calibration.py`).
 - Project uses `.venv` at project root; install with
   `"F:/GC-IMS-PEAK/.venv/Scripts/python.exe" -m pip install -r requirements.txt`.
   VS Code auto-detects this venv.
+
+### What changed on 2026-08-12 — supplier table lands; identity solved, calibration found to be wrong
+
+**A compound table arrived from the manager (`kintonemixed-C4-C9.xlsx`) and it
+changed three things at once.** Full analysis in `ketone_RI_provenance.md`;
+workflow is now **draft.24**.
+
+**1. Compound identity — SOLVED.** Six rows, each with a CAS that checks out
+(78-93-3 / 107-87-9 / 591-78-6 / 110-43-0 / 111-13-7 / 821-55-6). The standard is
+the **2-alkanone (methyl ketone) series, C4–C9**. This closes what workflow §4
+point 7 called "the one gap genuinely blocking the whole chain" — and it closed
+exactly as predicted: not from our own data (GC-IMS has no MS) but from an
+external document. Identity went through three revisions today — draft.19
+inferred 2-alkanones from the DT_rel ladder, draft.23 withdrew that as
+unsupported, draft.24 confirmed it from the table. Series key stays `ketone`
+(the mix's product name); member labels are the confirmed compound names plus
+CAS/formula/MW.
+
+**2. RI values replaced — with an unresolved caveat.** `ri_values` are now the
+table's (916.8372 … 1392.9), replacing the values borrowed from the 鱸魚 project
+(589.4 … 1095.6). The two differ by **+289…+327 (mean +302, strikingly uniform
+across all six)** — the signature of a different column polarity, not noise. The
+table's 2-butanone (916.84) lands almost exactly on the NIST **DB-Wax (polar)**
+value 917–950 that workflow draft.19 had already recorded, while this batch's
+column is `FS-SE-54-CB-1 / POLARITY: np` (**non-polar**, where 2-butanone belongs
+near 589). If the table is polar-column data, every RI here is ~300 too high.
+The user was told and chose to adopt the table's values, so `assumed=True`
+remains and `confidence` is now
+`supplier_table_column_polarity_unverified` — the flag no longer points at
+compound identity, it points at column polarity.
+
+**3. ⚠ The table's `Dt` column exposed an off-by-one in the anchor→carbon
+assignment.** Matching the table's `Dt [a.u.]` (RIP-relative, same unit as our
+`drift_relative`) against this batch's six anchors:
+
+| assignment | mean \|Δ(Dt)\| |
+|---|---|
+| current: 6 anchors = C4…C9 | 0.1264 |
+| shifted by one: anchors 2–6 = C4…C8 | **0.0028** |
+
+45× better, five points agreeing to 0.0008–0.0054. So **RT 389.7 s is C4**, not
+329.6 s, and **RT 329.6 s (DT_rel 1.104, the strongest peak in the image) is not
+in the C4–C9 series at all**.
+
+**Then a second pass — searching all 37 detected peaks by `Dt` instead of assuming
+the anchors were among the six already chosen — found all six compounds,
+including C9:**
+
+| compound | table Dt | measured RT (s) | measured DT_rel | Δ |
+|---|---|---|---|---|
+| 2-butanone | 1.23938 | 389.7 | 1.234 | 0.0056 |
+| 2-pentanone | 1.35521 | 467.0 | 1.356 | 0.0007 |
+| 2-hexanone | 1.49035 | 609.5 | 1.487 | 0.0036 |
+| 2-heptanone | 1.61390 | 813.4 | 1.613 | 0.0007 |
+| 2-octanone | 1.73359 | 1107.2 | 1.737 | 0.0032 |
+| **2-nonanone** | 1.85714 | **1523.4** | 1.854 | 0.0027 |
+
+Both axes strictly increasing, mean |Δ| 0.0027. **The correct anchor set is
+`[389.7, 467.0, 609.5, 813.4, 1107.2, 1523.4]` — still six points.** An earlier
+version of this entry said C9 was never detected and the batch had only five
+anchors; that was wrong and is retracted. It also retracts workflow draft.16
+point 5's measured claim that "signal only spans RT 258–949 s, everything beyond
+is flat background": there are three peaks above 1000 s (1523.4 / 1526.0 /
+2853.4) and C9 is one of them.
+
+**Why the ladder heuristic picked the wrong six** — worth recording, because both
+of its scoring criteria pointed at the wrong answer: the wrong set has DT_rel
+spacing std **0.0034** vs the correct set's 0.0046, *and* it contains the
+prominence-4508 peak so it wins the prominence sum too. draft.18 took the 0.0034
+as strong evidence; it turns out spacing uniformity cannot tell a genuine homolog
+ladder from a coincidentally even mixture. Carbon assignment needs external
+evidence — which is exactly what the table provides. (draft.18's other call,
+keeping 334 over 347.9, was right; the reasoning was just incomplete.)
+
+**Fixed in code (same day).** New `calibration.match_anchors_by_dt()` matches the
+table's `Dt` against **all** detected peaks (strongest wins when several share a
+Dt) and checks that RT stays monotonic with carbon number — non-monotonic means
+"this table doesn't fit this STD" and falls back rather than silently accepting.
+`build_from_std_peaks()` now prefers Dt matching whenever the series carries
+`dt_values`, falling back to `select_homolog_ladder()` for series that don't (e.g.
+`n_alkane`). `anchor_selection.mode` gains `dt_matched`; the match detail is kept
+under `anchor_selection.dt_match` for provenance. Verified on the real STD:
+`dt_matched`, 6/6, mean |Δ| 0.00273, monotonic, anchors
+`[389.7, 467.0, 609.5, 813.4, 1107.2, 1523.4]`.
+
+Partial matches stay aligned — matching only 3 compounds takes *those* 3 RI values
+by `_dt_index`, not the first 3. **RT coverage now extends to 1523.4 s instead of
+1107.2 s**, so fewer peaks are flagged `ri_extrapolated`. **Every existing
+`_peaks.json` `ri` needs re-running.**
+`test_ketone_dt_values_expose_the_anchor_off_by_one()` is kept as a regression
+guard: it records the arithmetic showing *why* the spacing heuristic was dropped,
+so a future attempt to reinstate it has the counter-evidence ready.
+
+**4. Evaluated `gc-ims-tools` (prompted by a Gemini write-up the manager shared).**
+Not adopted — but three findings are worth keeping.
+
+- **The Gemini write-up's code examples are not real.** Import name is **`ims`**,
+  not `gc_ims_tools`; `Dataset.from_folder()`, `align_rip()`,
+  `cut_retention_time()`, `get_roi_volumes()` do not exist anywhere in the
+  package; `gcit.PCA` / `gcit.PLSDA` are really `PCA_Model` / `PLS_DA`. Real API:
+  `Dataset.read_mea/read_zip/read_csv/read_hdf5`, `interp_riprel`, `rip_scaling`,
+  `align_ret_time`, `cut_rt`, `cut_dt`; `Spectrum.find_peaks`, `detect_peaks`,
+  `plot_persistence`, `watershed_segmentation`, `riprel`, `calc_reduced_mobility`.
+  Verified by downloading the 0.1.10 wheel (no install — it pulls 24 packages
+  including scikit-learn, pandas, xarray, numba and opencv, which this project
+  deliberately does not carry).
+- **The *capabilities* it described are real, and two corroborate our own code**:
+  `calc_reduced_mobility()` (see open decision 5 below) and `riprel()`, which
+  takes `argmax` of the first retention row exactly as our `rip.find_rip()` does
+  (we additionally skip the first 200 samples, following VOCal).
+- **`Spectrum.watershed_segmentation()` and `plot_persistence()` confirm the
+  approach we already took.** Our `compute_prominence()` union-find flood *is*
+  watershed, and it already computes the merge saddles — it just discards them
+  (noted in workflow §第七階段 R005). ROI segmentation + volume integration, i.e.
+  quantitation, would be an extension of existing code rather than a new
+  algorithm. Much cheaper than the MCR-ALS/PARAFAC2 route the blueprint shelved.
+
+Not adopted because: our `.mea` parsing is already reverse-engineered and working,
+and the package's other half (PCA/PLS-DA/RF/SVM chemometrics) is explicitly ruled
+out by `GC-IMS_Peak_Finding_Workflow.md` §9 "不建議的方向" and §1.3.
+
+The rest of the pass found places where the docs asserted something the code no
+longer did (or never did). Corrections:
+
+- **CLI and UI no longer disagree about which `.iml` to match against.** The UI
+  matched every `.iml` (correct: `DtMode=="RIPrel"` drift is an instrument-level
+  dimensionless ratio, not GC-column-specific), while `identify.py` filtered them
+  by GC column/polarity — same data, two different IMS candidate sets. Both now
+  call one shared `identify.load_libraries()`; `select_library_files()` returns
+  all `.iml` and keeps the column-specific selection for `.ril` only (RI *is*
+  column-dependent). **This changes CLI output**: more IMS candidates than before.
+- **Drift-gas cross-check is actually wired in.** `filter_iml_rows_by_drift_gas()`
+  existed but nothing called it, so workflow §第三階段 point 3 was never enforced.
+  Now applied inside `load_libraries()` — with **conservative** semantics: only
+  rows explicitly tagged as a *different* gas are dropped, untagged rows are kept.
+  Measured reason: of the 201 `RIPrel` rows in `library_data/`, only 162 carry a
+  gas tag; the other 39 come from the older `.iml` layout whose columns shift.
+  Strict filtering would silently discard those 39 real candidates.
+- **`identify.py` gained `--drift-tol`** and now reports `ims_dimensions_used` +
+  the drift tolerance in `match_tolerances`. Before, the IMS dimension it actually
+  used (RIPrel, since K0 is dormant) had no CLI knob and was absent from the
+  output's own tolerance record.
+- **`main.py` paths are absolute.** Every `results/...` was relative, so the app
+  only worked when launched with cwd == project root. Now built from `RESULTS_DIR`.
+- **`ImageViewerDialog` drag now repaints** (it updated the pan offsets but never
+  redrew); the double `display_image()` in its wheel handler is gone. Dead-ish
+  code — the popup is not currently wired into the main flow.
+- **`dt_convert.py` documents the K0 / 1/K0 reciprocal asymmetry** between its two
+  modes (open decision 5 below). Math deliberately unchanged.
+- Docs corrected: `peak_with_number.py`'s OOM bug is marked fixed (it was fixed in
+  ver.02 but the 待實作清單 still said ❌); test count 125/91/77/70 → **143**;
+  RI tolerance ±10 → ±5; the "n-alkane / Van den Dool–Kratz" open decision replaced
+  with the actual one (borrowed ketone RI → verified); workflow §第七階段 now
+  states that the `--prom-frac` migration was never done and why it cannot be done
+  as written.
 
 ### What changed on 2026-07-27 (workflow draft.16–21, tagged v3) — Stage 4 RT→RI
 
@@ -37,9 +197,11 @@ progress tracker, not the design.
 peak's retention time to a Retention Index, and the whole thing runs
 automatically from a folder's STD.
 
-- **Compound identity (draft.19):** the STD is **C4–C9 methyl ketones**
-  (2-butanone → 2-nonanone), *not* n-alkanes. Their RI is not `100·n`.
-- **RI values (methyl_ketone_RI_provenance.md):** the 6 values
+- **Compound identity (draft.19, corrected by draft.23):** the STD is **C4–C9
+  ketones**, *not* n-alkanes. Their RI is not `100·n`. *(draft.19 recorded this as
+  "methyl ketones, 2-butanone → 2-nonanone"; that structural assignment was this
+  project's inference, not user-supplied, and draft.23 withdrew it.)*
+- **RI values (ketone_RI_provenance.md):** the 6 values
   `[589.4, 688.6, 784.2, 892.2, 996.5, 1095.6]` are **borrowed** from another
   project's `.gasprj`, cross-referenced with literature (<11 RI). Marked
   `assumed_unverified` / `confidence="borrowed_cross_referenced"` and carried on
@@ -66,10 +228,10 @@ automatically from a folder's STD.
   `ri_mode` / provenance into `_peaks_identified.json`.
 - New modules/docs: `calibration.py`, `reference_series.py`,
   `RT_to_RI_normalization_math.md`, `Stage4_code_reference_for_CLI.md`,
-  `methyl_ketone_RI_provenance.md`, `test/test_calibration.py`.
+  `ketone_RI_provenance.md`, `test/test_calibration.py`.
 
 **Still open:** RI is borrowed/assumed — upgrade to verified per
-`methyl_ketone_RI_provenance.md`. A fresh folder whose STD isn't detected yet
+`ketone_RI_provenance.md`. A fresh folder whose STD isn't detected yet
 shows retention time until the background STD detection finishes.
 
 ### What changed on 2026-07-22 (workflow draft.14–15, tagged v2.1)
@@ -137,7 +299,7 @@ the user says otherwise.
 
 `main.py` was silently reverted **four times** by a stale IDE buffer being saved
 over it, each time losing only the most recent edit. Twice it went unnoticed by
-`pytest` (91 passing) because the lost code was UI wiring the suite does not
+`pytest` (green at the time) because the lost code was UI wiring the suite does not
 exercise — it was caught only by the manual smoke script. If work seems to
 vanish, check `git diff` before re-deriving anything, and keep `main.py` closed
 in the editor while another process is editing it.
@@ -150,9 +312,9 @@ in the editor while another process is editing it.
 |---|---|---|---|---|
 | 1 | RIP normalization | `rip.py` | Done | `find_rip()` + `attach_drift_relative()`. Integrated into `peaks.py` ver.03. RIP found at dt_index=680 (4.53 ms) on the test .mea. |
 | 2 | K0 conversion | `dt_convert.py` | Done — architecture; two decisions still open | Three modes: `standard_based` / `raw_parameters` / `unavailable`. `raw_parameters` refuses to run unless caller passes `raw_TP={T_C, P_mbar}` (workflow explicitly wants no silent assumption). `L`/`U`/`sample_rate_khz` confirmed extractable from header; `T`/`P` field mapping still ambiguous. |
-| 3 | Library readers | `library.py` | Done | `.ril` 21 cols / `.iml` 16 cols. `source_file` provenance auto-propagates via dict copy. `resolve_data_dir()` priority chain: explicit arg → `GCIMS_LIBRARY_DIR` env → `<PROJECT>/library_data/` → legacy VOCal folder → None. |
-| 4 | RT→RI conversion | `calibration.py` + `reference_series.py` | **Done — values borrowed** | Auto-selects 6 STD anchors (DT_rel homolog ladder), `log10(RT)` piecewise-linear interp (extrapolate+flag), 3-tier folder resolution + cache. STD = C4–C9 methyl ketones; 6 RI values **borrowed** (`assumed_unverified`, see `methyl_ketone_RI_provenance.md`). Wired into `identify.py` + UI; heatmaps show a linear RI y-axis. Upgrade to verified still pending. |
-| 5 | Tolerance-window match | `match.py` | Done — **now 2-D** | `gc_matches` / `ims_matches` / `combined_matches` (intersect by CAS). GC = RI (or Rt fallback). **IMS now works without K0**: `match_drift_rel()` compares `peak.drift_relative` vs library `Dt[a.u.]` where `DtMode=="RIPrel"` (drift relative to RIP — same quantity peaks carry). `match_all` prefers K0 if `k0_value` present, else RIPrel; reports `ims_dimension`. Combined = agree on both axes → collapses hundreds of RI-only hits to a few. Tolerances placeholder (RI ±10, Rt ±5s, drift ±0.05, K0 ±0.05). |
+| 3 | Library readers | `library.py` | Done | `.ril` 21 cols / `.iml` 16 cols. `source_file` provenance auto-propagates via dict copy. `resolve_data_dir()` priority chain: explicit arg → `GCIMS_LIBRARY_DIR` env → `<PROJECT>/library_data/` → legacy VOCal folder → None. **Selection is deliberately asymmetric**: `.ril` is column-specific (RI depends on the stationary phase), `.iml` is not (RIPrel drift is instrument-level) → all `.iml` are loaded. Drift-gas cross-check applied row-level, conservatively (only rows tagged as another gas are dropped; untagged kept — 39 of 201 RIPrel rows carry no tag). Both CLI and UI go through `identify.load_libraries()`. |
+| 4 | RT→RI conversion | `calibration.py` + `reference_series.py` | **Done — values borrowed** | Auto-selects 6 STD anchors (DT_rel homolog ladder), `log10(RT)` piecewise-linear interp (extrapolate+flag), 3-tier folder resolution + cache. STD = C4–C9 methyl ketones; 6 RI values **borrowed** (`assumed_unverified`, see `ketone_RI_provenance.md`). Wired into `identify.py` + UI; heatmaps show a linear RI y-axis. Upgrade to verified still pending. |
+| 5 | Tolerance-window match | `match.py` | Done — **now 2-D** | `gc_matches` / `ims_matches` / `combined_matches` (intersect by CAS). GC = RI (or Rt fallback). **IMS now works without K0**: `match_drift_rel()` compares `peak.drift_relative` vs library `Dt[a.u.]` where `DtMode=="RIPrel"` (drift relative to RIP — same quantity peaks carry). `match_all` prefers K0 if `k0_value` present, else RIPrel; reports `ims_dimension`. Combined = agree on both axes → collapses hundreds of RI-only hits to a few. Tolerances placeholder (RI ±5, Rt ±5s, drift ±0.05, K0 ±0.05); `identify.py --drift-tol` overrides the drift one. |
 | 6 | Integration | `identify.py` | Done | CLI-runnable. Full pipeline: peaks.json → header → K0 → rules → library → match → `_peaks_identified.json`. Provenance carried through (`k0_mode`, `source_file`, `match_dimensions`, `gc_dimension`). |
 | 7 | Rule engine | `rules.py` | Done | R001–**R006** registered. Three rule types (per_peak / per_peak_with_context / batch) + a `mandatory` flag. `mark_rules()` marks `rule_active` without removing; `apply_rules()` = mark + filter (kept for `identify.py`). R004/R006 are mandatory and applied **before** the prominence gate inside `peaks.py`. |
 | 8 | Interactive UI (main peak view) | `main.py` | Batches 1, 2, 3, 4, 5, 6 done; 7, 8 pending | See "UI batching" below. |
@@ -244,7 +406,7 @@ Flow:
    screen greyed. R004/R006 are shown locked (`always on`).
 9. **Generate Report** still a placeholder (Batch 8).
 
-Verified by 91 passing tests plus a scratch smoke script that drives the real Tk
+Verified by 145 passing tests plus a scratch smoke script that drives the real Tk
 app (circle click, drag-vs-click, table sync, state round-trip). Full visual QA
 by the user still pending.
 
@@ -284,7 +446,7 @@ K:/GC-IMS-PEAK/
     └── (existing tests)      # test_file_operations / test_peak_table / test_subprocess / test_ui_validators
 ```
 
-Total test count: **77 pass in ~4 s** (all under `pytest test/`).
+Total test count: **145 pass in ~8 s** (all under `pytest test/`).
 
 Recent tests added this session:
 - `test/test_state_machine.py`: `TestSettingsPersistence` (Batch 1 settings I/O)
@@ -328,14 +490,86 @@ These are things I cannot resolve — user needs to decide or provide data.
    requiring reliable K0, which means R004 works (uses `drift_relative`, not
    K0) but K0-based matching (.iml Dt column) has no trustworthy input.
 
-3. **n-alkane RI calibration data (stage 4 blocker)**
-   Without this, gc-branch match uses RT-seconds fallback (works but less
-   precise). With this, we can compute proper RI values via Van den Dool–Kratz.
+3. **The two problems the manager's table brought with it** — both block trusting
+   any RI number the app prints. Full analysis: `ketone_RI_provenance.md`.
+
+   **3a. Which column were the table's RI measured on?** They sit ~+302 above the
+   non-polar values previously borrowed, and 2-butanone's 916.84 matches the NIST
+   **DB-Wax (polar)** figure almost exactly, while this batch runs a non-polar
+   SE-54. If the table is polar-column data, every RI is ~300 too high. Answer
+   needed from whoever produced the table. Until then `assumed=True` /
+   `confidence="supplier_table_column_polarity_unverified"`.
+
+   **3b. ~~Anchor selection picks the wrong six~~ — ✅ FIXED.** Replaced the
+   spacing heuristic with `match_anchors_by_dt()`; see the 2026-08-12 entry above.
+   Anchors are now `[389.7, 467.0, 609.5, 813.4, 1107.2, 1523.4]`. Action still
+   outstanding: **re-run detection so existing `_peaks.json` files pick up correct
+   `ri` values** — nothing invalidates them automatically.
+
+   **3c. Unexplained: the strongest peak in the STD.** RT 329.6 s / DT_rel 1.104,
+   intensity 4936 — not one of the six ketones, yet the largest signal in the
+   image, and it sits on a vertical DT_rel≈1.104 band shared with RT 400.3 /
+   483.6 / 585.2 / 634.7. Reactant-ion cluster? Solvent? Contaminant? Worth
+   knowing, but it no longer affects RI now that it is not selected as an anchor.
+
+   *(This entry used to read "n-alkane RI calibration data … via Van den
+   Dool–Kratz". Both halves were superseded: draft.19 established the STD is
+   ketones, not n-alkanes, and draft.16 point 6 replaced Van den Dool–Kratz with
+   the Kovats log form after confirming the calibration table stores
+   `log10(Rt)`. The "borrowed values → verified" version of this entry was in turn
+   superseded by draft.24, when the values stopped being borrowed.)*
 
 4. **Tolerance windows (workflow §第五階段)**
-   `match.py` defaults (RI ±10, Rt ±5s, K0 ±0.05) are placeholders. Need
+   `match.py` defaults (RI ±5, Rt ±5s, drift ±0.05, K0 ±0.05) are placeholders. Need
    real known-compound data to calibrate. UI Batch 4 (Rules panel) may
    eventually expose these as user-editable.
+
+5. ~~**K0 vs 1/K0: the two modes return reciprocal quantities**~~ — ✅ **FIXED
+   2026-08-12.** Kept here because it defines what `instrument_constant` will mean
+   when a standard is finally measured (see decision 2).
+
+   The defect: `k0_from_instrument_constant()` returned **K0** while
+   `k0_from_raw_params()` returned **1/K0** (`return 1.0 / K0`), yet both were
+   written to the same `peak["k0_value"]` — for one peak on one instrument the two
+   modes disagreed by an inversion, not by rounding, and nothing anywhere raised.
+
+   **What settled it.** `gc-ims-tools` 0.1.10 (Food Chemistry 2022),
+   `Spectrum.calc_reduced_mobility()`:
+
+   ```python
+   T0, p0 = 273.15, 1013.15
+   K0 = (L**2 * T0 * p) / (dt * 1e-3 * Ud * T * p0)      # defaults L = 5.3 cm
+   ```
+
+   citing Ahrens & Zimmermann, *Anal Bioanal Chem* 413, 1009–1016 (2021). Expanded
+   that is `(T0/T)·(p/p0)·L²/(t·U)` — **identical in form to ours**, and it returns
+   **K0**. (Their default `L = 5.3 cm` also matches what we read from the header,
+   which independently validates our `nom Drift Tube Length` parsing.)
+
+   **The fix.** Both branches now return K0. The inversion moved to the comparison
+   step, **explicitly**: `match.match_k0()` reads `DtMode` to decide whether the
+   library value is `K0` or `1/K0` (203 rows in `library_data/` are literally
+   `"1/K0"`), converts into K0 space, and stores the converted value as
+   `k0_library_value` while leaving raw `Dt[a.u.]` untouched. Putting the
+   conversion there is the point: it is a property of *how this library stores
+   things*, not of *how a peak's K0 is computed* — conflating the two is what
+   produced the reciprocal in the first place.
+   Locked by `test_both_modes_return_the_same_quantity()`, which feeds `ah×L²` as
+   `instrument_constant` into the standard_based branch and requires both modes to
+   agree. The `return 1.0 / K0` in workflow §第二階段's design snippet — the origin
+   of the bug — now carries a correction note.
+
+   Still no output change: `mode` remains `unavailable`, so `k0_value` is `None`
+   until a calibration standard exists.
+
+6. **`R001` vs `prom_frac`: two prominence gates in series**
+   `prom_frac` (relative, inside detection) runs before `R001` (absolute, after
+   detection), so `R001` has no effect for any threshold below the current
+   relative gate. Consequence of the draft.14 ordering decision, not a bug, but
+   the migration described in workflow §第七階段 ("remove `--prom-frac`") was
+   never carried out and cannot be as written, because `prom_frac` is now
+   load-bearing inside `select_from_maxima()`. Needs a decision: make `R001`
+   relative, or demote `prom_frac` to a pure detection-layer floor.
 
 ---
 
@@ -402,5 +636,5 @@ Design constraints already settled that Batch 3 must respect:
   `rip.find_rip()`.
 - `rip.py` / `dt_convert.py` / `library.py` / `rules.py` / `match.py` /
   `identify.py`: new modules for stages 1–7 of the workflow.
-- `test/test_*.py`: 70 passing tests including smoke tests for every new
+- `test/test_*.py`: smoke tests for every new
   module; state machine + peak table tests updated for new columns/toolbar.

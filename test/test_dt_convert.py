@@ -28,6 +28,24 @@ def sep(t):
     print("=" * 60)
 
 
+def test_both_modes_return_the_same_quantity():
+    """兩個模式必須回傳同一個物理量（K0），不能互為倒數。
+
+    2026-08-12 之前 raw_parameters 回傳 1/K0、standard_based 回傳 K0，兩者卻同寫進
+    peak["k0_value"]——同一顆峰在不同模式下差一次取倒數，而且沒有任何地方會報錯。
+    這裡用「讓兩個模式在物理上等價」的方式檢查：把 raw_parameters 的
+    ah×L² 當成 instrument_constant 餵給 standard_based，兩者應得到同一個數字。
+    """
+    dt_raw, srate, U = 680, 150, 2700
+    L, T_C, P = 5.3, 45.0, 1013.0
+    ah = (273.0 / (273.0 + T_C)) * (P / 1013.0)
+
+    raw = dtc.k0_from_raw_params(dt_raw, srate, L, T_C, P, U)
+    std = dtc.k0_from_instrument_constant(dt_raw, srate, ah * L**2, U)
+    assert abs(raw - std) < 1e-9, "同一組物理條件下，兩個模式必須給出同一個 K0"
+    assert abs(raw / std - 1.0) < 1e-9, "尤其不能相差一次取倒數"
+
+
 def test_dt_convert_smoke():
     # ---- 數學核心 ----
     sep("[1] k0_from_instrument_constant: 純函式數學檢查")
@@ -44,14 +62,15 @@ def test_dt_convert_smoke():
     k0 = dtc.k0_from_raw_params(680, 150, 5.3, 45, 1013, 2700)
     # t_d_s = 0.0045333
     # ah = (273/318) * (1013/1013) = 0.8585
-    # K0_raw = 0.8585 * 5.3² / (0.0045333 * 2700) = 0.8585 * 28.09 / 12.24 = 1.9711
-    # returned = 1/K0_raw = 0.5073   ← 注意公式回傳 1/K0，符合 workflow 範例
+    # K0 = 0.8585 * 5.3² / (0.0045333 * 2700) = 0.8585 * 28.09 / 12.24 = 1.9711
+    # 2026-08-12 起回傳 K0 本身（不再是 1/K0）——與 k0_from_instrument_constant()
+    # 統一慣例。外部佐證：gc-ims-tools 的 calc_reduced_mobility() 同形且回傳 K0。
     t = 680 / 150 / 1000
     ah = (273 / 318) * (1013 / 1013)
-    Kraw = ah * 5.3**2 / (t * 2700)
-    expected = 1 / Kraw
+    expected = ah * 5.3**2 / (t * 2700)
     print(f"  K0 = {k0}  expected = {expected}")
     assert abs(k0 - expected) < 1e-9
+    assert k0 > 1.0, "K0 應為 ~1.97 量級；若得到 ~0.51 代表又回傳了倒數"
 
     # ---- 表頭欄位抽取 ----
     sep("[3] extract_confirmed_params: 真實 260625_141215_STD.mea")
@@ -120,13 +139,28 @@ def test_dt_convert_smoke():
     expected = dtc.k0_from_instrument_constant(680, 150, 20.0, 2700)
     assert abs(k0 - expected) < 1e-9
 
-    sep("[7] compute_k0: raw_parameters 但未傳 T/P → 拒絕 + 明確標記")
+    sep("[7] compute_k0: raw_parameters 未傳 T/P → 自動由表頭抽出（2026-08-12 起）")
+    # 舊行為是拒絕執行並標 raw_parameters_missing_TP。那道防呆的存在理由是「不知道
+    # 六個 Start temp / 兩個壓力欄位哪個才對」——VOCal 反編譯確認後這不再是猜測，
+    # 所以改為自動取用。**但表頭真的缺欄位時仍必須明確失敗**，見 [7b]。
     profile = {"k0_calibration": {"mode": "raw_parameters"}}
     k0, mode, reason = dtc.compute_k0(680, header, profile)
     print(f"  k0={k0}  mode={mode}  reason={reason}")
-    assert k0 is None
-    assert mode == "raw_parameters_missing_TP"
-    assert "unresolved" in reason or "T" in reason
+    assert mode == "raw_parameters"
+    assert k0 is not None
+    tp, _ = dtc.extract_raw_tp(header)
+    expected = dtc.k0_from_raw_params(680, 150, 5.3, tp["T_C"], tp["P_mbar"], 2700)
+    assert abs(k0 - expected) < 1e-9, "自動抽出的 T/P 必須與 extract_raw_tp 一致"
+    assert 1.8 < k0 < 2.5, "RIP 的 K0 應在反應離子的 2.0-2.3 量級"
+
+    sep("[7b] compute_k0: 表頭真的缺 T/P → 仍明確失敗，不猜")
+    stripped = {k: v for k, v in header.items()
+                if k not in ("Start temp 1", "Start ambient pressure",
+                             "EPC ambient pressure", "Start pressure EPC IMS",
+                             "EPC IMS pressure", "EPC1 pressure")}
+    k0b, modeb, reasonb = dtc.compute_k0(680, stripped, profile)
+    print(f"  k0={k0b}  mode={modeb}")
+    assert k0b is None and modeb == "raw_parameters_missing_TP"
 
     sep("[8] compute_k0: raw_parameters 呼叫者顯式指定 T=45, P=100393/100=1003.93")
     profile = {"k0_calibration": {"mode": "raw_parameters"}}

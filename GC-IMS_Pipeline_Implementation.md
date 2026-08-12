@@ -1,6 +1,6 @@
 # GC-IMS Peak-Finding Pipeline — Implementation Notes
 
-**Version: 3.0 — by Albert Sheng**
+**Version: 3.1 — by Albert Sheng**
 
 **Purpose of this document:** a self-contained, portable record of the working code built for
 reading G.A.S. FlavourSpec® GC-IMS `.mea` files, exporting them, and detecting peaks. It is
@@ -86,7 +86,7 @@ It is:
 | `Chunk sample count` | `4500` | drift samples per spectrum → **cols (DT axis)** |
 | `Chunk sample rate` | `150 [kHz]` | drift-time digitization rate |
 | `Chunk trigger repetition` | `30 [ms]` | IMS spectrum period (= drift window length) |
-| `Chunk averages` | `6` | transients averaged per stored chunk |
+| `Chunk averages` | `6` | averaging count. **A chunk spans `averages + 1` trigger periods, not `averages`** — see the retention-axis note below |
 | `Machine type` | `FlavourSpec®` | metadata |
 | `Sample` | `FM-1` | metadata |
 
@@ -100,8 +100,37 @@ It is:
 ### Axis calibration (derived purely from the header)
 - **Drift time (X):** `dt_step_ms = 1 / sample_rate_kHz` → `1/150 = 0.006667 ms` per sample;
   `4500 × 0.006667 ≈ 30 ms` window (matches `Chunk trigger repetition`). Axis = `0 … 29.993 ms`.
-- **Retention time (Y):** `rt_step_ms = Chunk averages × Chunk trigger repetition = 6 × 30 = 180 ms`
-  per chunk; `8571 × 180 ms ≈ 1542 s ≈ 25.7 min`. Axis = `0 … ~1542 s`.
+- **Retention time (Y):** `rt_step_ms = (Chunk averages + 1) × Chunk trigger repetition
+  = 7 × 30 = 210 ms` per chunk; `8571 × 210 ms = 1799.91 s ≈ 30.0 min`.
+  Axis = `0 … ~1800 s`.
+
+  > **⚠ Corrected 2026-08-12 — this used to read `averages × trigger = 180 ms`,
+  > which made every retention time 16.7 % too short.** Three independent lines of
+  > evidence for the `+1`:
+  > 1. **Round method lengths.** With `+1` the reference file above comes to
+  >    1799.91 s = 29.9985 min, and the coffee STD (`averages=6`,
+  >    `trigger=21 ms`, 20413 chunks) to 3000.7 s = 50.01 min. Without it: 25.7 min
+  >    and 42.9 min. GC methods are set in round minutes.
+  > 2. **Supplier compound table.** `kintonemixed-C4-C9.xlsx` lists `Rt[sec]` for
+  >    the six ketone standards. Pre-fix our anchors were systematically 16.7 %
+  >    below them; post-fix the residuals are −0.48 % … +0.97 %.
+  > 3. **Independent implementation.** `gc-ims-tools` 0.1.10 (Food Chemistry 2022)
+  >    uses `(chunk_averages + 1)`. Running its `Spectrum.read_mea()` on the same
+  >    `.mea`: the 20413×3150 intensity matrix is **identical cell-for-cell** and
+  >    the drift axis matches to 4e-15 — **only the retention axis differed, by
+  >    exactly 7/6**.
+  >
+  > Likely meaning: `Chunk averages` counts the averages *in addition to* the
+  > first transient, so a chunk occupies `N+1` trigger periods. Only two files and
+  > two methods were checked, so a firmware variant behaving differently is not
+  > ruled out.
+  >
+  > **Artefacts carry `rt_axis_version`** (`readGAS.RT_AXIS_VERSION`, currently 2).
+  > A `.npz` without the field is version 1 — the old, short axis —
+  > and `peaks.load_surface()` warns rather than mixing the two silently.
+  > **RI is unaffected**: it interpolates in `log10(RT)` and both the anchors and
+  > the query shift by the same `log10(7/6)`, which piecewise-linear interpolation
+  > cancels (measured difference ~1e-13).
 
 ### Display convention (matches VOCal images and the design doc)
 - **X axis = Drift time (DT)**, **Y axis = Retention time (RT)**.
@@ -130,7 +159,7 @@ It is:
 | `dt_convert.py` | module | stage 2 — K0 conversion (three modes) |
 | `library.py` | module | stage 3 — `.ril` / `.iml` readers |
 | `calibration.py` | module+CLI | **stage 4 — RT→RI**: STD anchor selection, log-linear interp, folder resolution + cache |
-| `reference_series.py` | module | stage 4 — pluggable calibration series (`methyl_ketone` / `n_alkane` / `custom`) |
+| `reference_series.py` | module | stage 4 — pluggable calibration series (`ketone` / `n_alkane` / `custom`) |
 | `match.py` | module | stage 5 — tolerance-window matching |
 | `identify.py` | script | stage 6 — integration CLI → `_peaks_identified.json` |
 | `rules.py` | module | stage 7 — rule engine (R001–R006) |
@@ -406,7 +435,7 @@ Converts a peak's retention time to a **Retention Index**. Runs off a batch
 1. `scan_folder_for_std(folder)` — find the STD by header `Sample=="STD"`.
 2. Load the STD's `_peaks.json`; `select_homolog_ladder(peaks, 6)` picks the 6
    calibration peaks as the strongest strictly-increasing **DT_rel** ladder
-   (this batch: C4–C9 methyl ketones — no template RTs needed).
+   (this batch: C4–C9 ketones — no template RTs needed).
 3. `reference_series.assign_ri()` supplies the 6 RI values for the series.
 4. `build_calibration()` stores `log10(RT)` anchors; `make_rt_to_ri()` is the one
    shared `RT→(RI, extrapolated)` function used by peak values **and** the heatmap
@@ -415,7 +444,7 @@ Converts a peak's retention time to a **Retention Index**. Runs off a batch
    `borrowed_from_registry` (`ri_calibration_registry.json`, with `days_gap`) /
    `unavailable` — with a session + `_folder_calibration.json` sidecar cache.
 
-**Series (`reference_series.REFERENCE_SERIES`):** `methyl_ketone` (this project;
+**Series (`reference_series.REFERENCE_SERIES`):** `ketone` (this project;
 RI `[589.4,688.6,784.2,892.2,996.5,1095.6]`, `assumed=True`,
 `confidence="borrowed_cross_referenced"`), `n_alkane` (generic 100·n mechanism),
 `custom` (user RI values). Provenance (`assumed_unverified`, `ri_confidence`)
@@ -431,13 +460,13 @@ RI axis is **linear** (not log). `_bg.json` records `y_axis: "ri" | "retention_s
 so the UI places circles by `peak["ri"]` when the backdrop is RI.
 
 **CLI flags** (added to `readGAS.py`, `peaks.py`, `peak_with_number.py`):
-`--ri-series <name>` (`methyl_ketone` etc.) resolves the folder STD and renders
+`--ri-series <name>` (`ketone` etc.) resolves the folder STD and renders
 the y-axis as RI; `--ri-start-carbon N` overrides the n_alkane start.
 `identify.py`: `--ri-series / --ri-registry / --ri-max-days-gap / --no-ri`.
 Standalone: `python calibration.py <STD_peaks.json> [--series ...] [--ri-values ...]`.
 
 Math + implementation checklist: `RT_to_RI_normalization_math.md`. RI-value
-provenance and the upgrade-to-verified path: `methyl_ketone_RI_provenance.md`.
+provenance and the upgrade-to-verified path: `ketone_RI_provenance.md`.
 
 ---
 

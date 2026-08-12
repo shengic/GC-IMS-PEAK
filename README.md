@@ -1,5 +1,7 @@
 # GC-IMS-PEAK
 
+**Version: 3.1 — by Albert Sheng**
+
 Desktop toolkit for **GC-IMS (Gas Chromatography–Ion Mobility Spectrometry)**
 peak detection and compound matching. Reads raw `.mea` files, detects peaks by
 topographic prominence, filters them with a pluggable rule engine, and lets you
@@ -25,16 +27,54 @@ libraries.
 `.mea` files are the original measurements and are **never modified or deleted**
 by any part of this project.
 
+### The two axes — which is which
+
+**RI belongs to GC.** It is derived from retention time, and retention time is
+chromatography — the *GC* in GC-IMS. The IMS axis is drift time.
+
+| | **GC axis** | **IMS axis** |
+|---|---|---|
+| Physical quantity | retention time → **RI** (Retention Index) | drift time → `drift_relative` (RIP-relative) or K0 |
+| **Display axis** | **y** | **x** |
+| Peak fields | `retention_s`, `ri`, `ri_mode` | `drift_ms`, `drift_relative`, `k0_value`, `k0_mode` |
+| Library file | `.ril` — **R**etention **I**ndex **L**ibrary | `.iml` — **IM**S **L**ibrary (`Dt[a.u.]` + `DtMode`) |
+| Matching (`match.py`) | `match_ri()` / `match_rt()` → `gc_dimension` | `match_drift_rel()` / `match_k0()` → `ims_dimension` |
+| Peak-table column | `GC (RI)` | `IMS` |
+| Pipeline stage | 4 — `calibration.py` (RT→RI) | 1 — `rip.py`, 2 — `dt_convert.py` |
+| Library selection | column-specific (RI depends on the stationary phase) | not column-specific (RIP-relative drift is instrument-level) |
+
+Two things that reliably cause confusion:
+
+- **The display convention is x = drift, y = retention** — the opposite of the
+  usual "time on x". This matches VOCal's images and is used consistently in every
+  heatmap (with `origin="lower"`, so retention increases upward). Peak coordinates
+  in code stay `[rt_index, dt_index]`, i.e. `[row, col]` = `[y, x]`.
+- **`.iml` files also carry an `RI` column**, which is why `match_ri()` scans
+  `ril_rows + iml_rows`. That is just the IMS library recording a compound's RI as
+  well — **RI is still the GC dimension**.
+
+The `GC×IMS` column is a compound that matches on **both** axes (intersected by
+CAS). That two-axis agreement is what collapses hundreds of RI-only candidates
+down to a few, and it is the most trustworthy identification the pipeline
+produces.
+
 ### Retention Index (RT→RI, Stage 4)
 
 Selecting a folder silently finds its **STD** run, auto-picks the 6 calibration
-peaks (this batch: **C4–C9 methyl ketones**, via the drift-relative homolog
+peaks (this batch: **C4–C9 2-alkanones**, via the drift-relative homolog
 ladder), and fits a `log10(RT)` piecewise-linear curve. Every peak then gets an
 RI, and each heatmap's y-axis becomes a **linear Retention Index** axis while the
 x-axis stays drift-relative-to-RIP. The calibration is cached per folder and
-reused across files. The methyl-ketone RI values are currently **borrowed** and
-flagged `assumed_unverified` (see `methyl_ketone_RI_provenance.md`); the axis
-falls back to retention time when no usable STD is available.
+reused across files. The axis falls back to retention time when no usable STD is
+available.
+
+> **⚠ One RI caveat remains.** Compound identity is confirmed (supplier table with
+> CAS) and anchors are now assigned from that table's drift values rather than a
+> spacing heuristic. Still open: the table's RI may be polar-column data applied to
+> this non-polar column, which would shift every RI by a constant (~+300). Peak
+> detection and the drift (x) axis are unaffected. Results produced before
+> 2026-08-12 carry the old, mis-assigned anchors — **re-run detection**. See
+> `ketone_RI_provenance.md`.
 
 ---
 
@@ -101,12 +141,12 @@ than `peak_id`, which is reassigned whenever the baseline moves.
 | `rules.py` | rule engine, R001–R006, mandatory-rule enforcement |
 | `rip.py` / `dt_convert.py` | RIP normalisation, K0 conversion |
 | `calibration.py` | Stage 4 RT→RI: STD anchor selection, log-linear interp, folder resolution + cache |
-| `reference_series.py` | pluggable calibration series (methyl_ketone / n_alkane / custom) |
+| `reference_series.py` | pluggable calibration series (ketone / n_alkane / custom) |
 | `library.py` / `match.py` / `identify.py` | library readers, matching, integration |
 | `peak_with_number.py` | static numbered image for the report (not the canvas) |
 | `gas_utils.py` | file-picker helpers |
 | `rules_config.json` | per-rule `enabled` + params |
-| `test/` | pytest suite (125 tests) |
+| `test/` | pytest suite (145 tests) |
 
 ### Output files (per `.mea`, written to `results/`)
 
@@ -139,7 +179,7 @@ so measurement data never gets committed.
 pytest test/ -q
 ```
 
-125 tests cover the rule engine and mandatory-rule enforcement, the selection
+145 tests cover the rule engine and mandatory-rule enforcement, the selection
 funnel and its ordering constraint, peak selection state and its coordinate
 keying, the state machine, file I/O, peak-table rendering, UI validators, and the
 Stage-4 RT→RI calibration (anchor selection, log-linear interp, extrapolate+flag,
@@ -156,7 +196,8 @@ pinning, folder resolution/cache, and the linear-RI axis resampling).
 | `GC-IMS_Pipeline_Implementation.md` | file formats, CLI flags, output schemas |
 | `RT_to_RI_normalization_math.md` | Stage-4 RT→RI interpolation math + checklist |
 | `Stage4_code_reference_for_CLI.md` | Stage-4 code skeletons / reference |
-| `methyl_ketone_RI_provenance.md` | why the 6 borrowed RI values, and how to upgrade to verified |
+| `ketone_RI_provenance.md` | compound identity, where the RI numbers come from, the anchor fix, and §0.0 the old→new retention-axis conversion table |
+| ~~`GC-IMS_Matching_Report_v1.pdf`~~ | **superseded (2026-08-12)** — generated before the retention-axis fix, the anchor re-assignment and the RI change. Kept as a record of what was reported on 2026-08-03; do not read its RT/RI as current |
 | `UI.md` | UI specification and change log |
 | `status.md` | progress tracker and session handoff |
 | `Report_Content_Example.md` | what the Batch 8 report should contain |

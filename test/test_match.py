@@ -83,24 +83,40 @@ def test_match_smoke():
     assert len(hits) == 2
     assert set(h["CAS"] for h in hits) == {"C001", "C010"}
 
-    sep("[4] match_k0: peak_k0=1.51, tol=0.05 → 只看 DtMode 含 K0 的 row")
-    hits = match.match_k0(1.51, iml, tolerance=0.05)
+    sep("[4] match_k0: 庫值 DtMode='1/K0' → 換算到 K0 空間再比")
+    # 2026-08-12：dt_convert 兩個模式一律回傳 K0，而 .iml 的 DtMode 實測為 "1/K0"
+    # （存逆值），故 match_k0 內部取倒數換算。庫值 1.50/1.60/1.48 對應的 K0 分別是
+    # 0.6667 / 0.6250 / 0.6757。以 peak_k0=0.670、tol=0.02 查詢：
+    #   C001 K0=0.6667  Δ0.0033 → 命中
+    #   C099 K0=0.6757  Δ0.0057 → 命中
+    #   C002 K0=0.6250  Δ0.0450 → 超差
+    #   compY DtMode="ms"       → 被 DtMode filter 剔除
+    hits = match.match_k0(0.670, iml, tolerance=0.02)
     print(f"  {len(hits)} hits:")
     for h in hits:
-        print(f"    CAS={h['CAS']} Dt={h['Dt[a.u.]']} DtMode={h['DtMode']!r} delta_k0={h['delta_k0']}")
-    # C001(1.50, dt=0.01) K0 mode → 命中
-    # C002(1.60, dt=0.09) K0 mode → 超差
-    # compZ(1.48, dt=0.03) K0 mode → 命中
-    # compY(1.50, dt=0.01) DtMode="ms" → 被 DtMode filter 剔除
+        print(f"    CAS={h['CAS']} Dt={h['Dt[a.u.]']} (1/K0) -> K0={h['k0_library_value']:.4f} "
+              f"DtMode={h['DtMode']!r} delta_k0={h['delta_k0']:.4f}")
     got_cas = set(h["CAS"] for h in hits)
     assert got_cas == {"C001", "C099"}, f"expected {{C001, C099}}, got {got_cas}"
+    # 換算確實發生：庫值原樣保留，另存換算後的 K0
+    c001 = [h for h in hits if h["CAS"] == "C001"][0]
+    assert c001["Dt[a.u.]"] == 1.50
+    assert abs(c001["k0_library_value"] - 1 / 1.50) < 1e-12
+
+    sep("[4b] 若庫值直接存 K0（DtMode='K0'）則不取倒數")
+    direct = [{"CAS": "D1", "Name": "direct", "Dt[a.u.]": 0.670, "DtMode": "K0"}]
+    h = match.match_k0(0.670, direct, tolerance=0.001)
+    assert len(h) == 1 and abs(h[0]["k0_library_value"] - 0.670) < 1e-12
+    # 反面：同一筆若標成 1/K0，換算後是 1.49，就不該命中 0.670
+    inv = [dict(direct[0], DtMode="1/K0")]
+    assert match.match_k0(0.670, inv, tolerance=0.001) == []
 
     sep("[5] match_k0: peak_k0=None → 回空")
     assert match.match_k0(None, iml, 0.05) == []
 
     sep("[6] combine_by_cas: RI 與 K0 都命中同 CAS")
     gc_hits = match.match_ri(1003, ril + iml, tolerance=10)
-    ims_hits = match.match_k0(1.51, iml, tolerance=0.05)
+    ims_hits = match.match_k0(0.670, iml, tolerance=0.02)
     combined = match.combine_by_cas(gc_hits, ims_hits)
     print(f"  gc={len(gc_hits)}  ims={len(ims_hits)}  combined={len(combined)}")
     for c in combined:
@@ -119,8 +135,8 @@ def test_match_smoke():
     assert c001["source_file_gc"] and c001["source_file_ims"]
 
     sep("[7] match_all: 峰同時有 ri 與 k0 → 三分支都有輸出")
-    peak = {"ri": 1003, "retention_s": 100.0, "k0_value": 1.51, "k0_mode": "standard_based"}
-    r = match.match_all(peak, ril, iml, ri_tolerance=10, k0_tolerance=0.05)
+    peak = {"ri": 1003, "retention_s": 100.0, "k0_value": 0.670, "k0_mode": "standard_based"}
+    r = match.match_all(peak, ril, iml, ri_tolerance=10, k0_tolerance=0.02)
     print(f"  gc={len(r['gc_matches'])} (dim={r['gc_dimension']})")
     print(f"  ims={len(r['ims_matches'])}")
     print(f"  combined={len(r['combined_matches'])}")
@@ -130,8 +146,8 @@ def test_match_smoke():
     assert len(r["combined_matches"]) > 0
 
     sep("[8] match_all: 峰無 ri 但有 retention_s → gc 走 RT 退路")
-    peak = {"ri": None, "retention_s": 102.0, "k0_value": 1.51, "k0_mode": "raw_parameters"}
-    r = match.match_all(peak, ril, iml, rt_tolerance=5, k0_tolerance=0.05)
+    peak = {"ri": None, "retention_s": 102.0, "k0_value": 0.670, "k0_mode": "raw_parameters"}
+    r = match.match_all(peak, ril, iml, rt_tolerance=5, k0_tolerance=0.02)
     print(f"  gc_dimension={r['gc_dimension']}  gc={len(r['gc_matches'])}  ims={len(r['ims_matches'])}")
     assert r["gc_dimension"] == "rt"
     assert all(h.get("delta_rt") is not None for h in r["gc_matches"])

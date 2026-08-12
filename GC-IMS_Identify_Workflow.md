@@ -1,14 +1,14 @@
 # GC-IMS 化合物比對工作流程 —— 第一版草稿
 
-**Version: draft.22 — by Albert Sheng**
+**Version: draft.25 — by Albert Sheng**
 **狀態：草稿，持續更新中，尚未定案**
 
 > **[實作狀態 2026-07-27 — 程式已 tag v3]** 第一~七階段皆已實作並可端到端執行。
 > **第四階段（RT→RI）已落地**：`calibration.py` + `reference_series.py` 自動從批次
-> STD 挑 6 個甲基酮錨點（DT_rel 階梯）、做 `log10(RT)` 分段線性內插（範圍外外插+標記），
+> STD 挑 6 個酮的錨點（DT_rel 階梯）、做 `log10(RT)` 分段線性內插（範圍外外插+標記），
 > 資料夾層級三態解析 + 快取，並串進 `identify.py` 與桌面 UI（RI 欄、線性 RI 熱圖軸；
-> x 軸 drift 正規化不動）。甲基酮 6 個 RI 值目前為**借用值**（`assumed_unverified`，見
-> `methyl_ketone_RI_provenance.md`）。數學細節見 `RT_to_RI_normalization_math.md`。
+> x 軸 drift 正規化不動）。6 個 RI 值目前為**借用值**（`assumed_unverified`，見
+> `ketone_RI_provenance.md`）。數學細節見 `RT_to_RI_normalization_math.md`。
 > 本規劃文件仍為設計權威；此處只標「已實作到哪」，設計內容不因實作而改寫。
 
 本文件是 `GC-IMS-PEAK` 專案在 `readGAS.py` → `peaks.py` 之後，銜接「化合物比對」這一段的規劃文件。內容依據對 VOCal（G.A.S. 官方軟體）多支 plugin jar 反編譯逆向出的邏輯整理，逐項標明來源可信度：
@@ -83,9 +83,11 @@ main.py     → Tkinter UI，串起上面兩支 + peak_with_number.py 疊字顯�
 1. **`detect_peaks()` 在真實尺寸資料上耗時約 83 秒**（此前只用較小範例資料測試過，沒有這個量級的真實耗時參考值）——若第十階段規劃「找完峰立刻在背景自動跑比對」，需將這個等級的基礎找峰時間也一併納入使用者體感等待時間的評估，不能只算比對本身的時間。
 2. **276,713 個原始局部極大，經預設篩選後只剩 47 個**——這印證了第七階段規則引擎的設計方向是對的（候選數量差距懸殊，僅靠使用者手動逐一取消勾選不可行），但也代表**若規則引擎的篩選比預設參數更寬鬆，UI 端仍可能需要面對數千甚至數萬候選的極端情況**，第八階段的 Canvas 效能設計不能只以「47 個」這種樂觀情況為基準。
 
-### 已發現但尚未修復：`peak_with_number.py` 有同一個 OOM bug
+### 已修復：`peak_with_number.py` 的同一個 OOM bug
 
-**[本輪發現，未修復]**：畫 UI mockup 時盤點既有檔案，發現 `peak_with_number.py`（疊峰編號顯示）的 `write_overlay_numbered()` 同樣是 `ax.imshow(intensity, ...)` 直接丟未降採樣的完整矩陣，跟上面修好的兩處是**同一個 bug、同一個成因**，只是這輪除錯時漏掉了這一支。**[本輪修正]**：此檔案的角色**不是**第八階段互動主畫面的來源（見第八階段「架構修正」一節，兩者架構互不相容），而是提供給第十一階段「Generate Report」匯出用的靜態標號圖——優先度因此不像先前筆記講的那麼高，但仍是待修的既有 bug。**待辦**：套用同樣的 `_downsample_for_display()` 修法，動工時一併處理。
+**[draft.12 發現，已於 `peak_with_number.py` ver.02 修復]**：畫 UI mockup 時盤點既有檔案，發現 `peak_with_number.py`（疊峰編號顯示）的 `write_overlay_numbered()` 同樣是 `ax.imshow(intensity, ...)` 直接丟未降採樣的完整矩陣，跟上面修好的兩處是**同一個 bug、同一個成因**，只是那輪除錯時漏掉了這一支。**已修**：`write_overlay_numbered()` 現在在 `ax.imshow()` 之前呼叫 `peaks._downsample_for_display(intensity, figsize, dpi)`（直接重用 `peaks.py` 那一份，因為本模組本來就已硬相依 `peaks` 取 `load_surface`/`RESULTS_DIR`，不需要第三份複製）。
+
+此檔案的角色**不是**第八階段互動主畫面的來源（見第八階段「架構修正」一節，兩者架構互不相容），而是提供給第十一階段「Generate Report」匯出用的靜態標號圖。
 
 ---
 
@@ -150,8 +152,26 @@ main.py     → Tkinter UI，串起上面兩支 + peak_with_number.py 疊字顯�
        t_d_s = (dt_raw / sample_rate_khz) / 1000.0
        ah = (273.0 / (273.0 + T)) * (P / 1013.0)
        K0 = ah * L**2 / (t_d_s * U)
-       return 1.0 / K0
+       return 1.0 / K0        # ← ⚠ draft.24 更正：應為 return K0，見下方
    ```
+
+   > **⚠ [draft.24 更正] 最後那行 `return 1.0 / K0` 是錯的，已於 `dt_convert.py` 修正為回傳 K0 本身。**
+   > 本設計稿的這一行讓 `raw_parameters` 回傳逆值，而上方 `standard_based` 的
+   > `instrument_constant / (t_d_s * U)` 回傳 K0——同一台機器、同一顆峰，兩個模式的數字
+   > 互為倒數，卻都被 `attach_k0()` 寫進同一個 `peak["k0_value"]`，且沒有任何地方會報錯。
+   >
+   > **外部佐證**：`gc-ims-tools` 0.1.10（Food Chemistry 2022）的
+   > `Spectrum.calc_reduced_mobility()` 用
+   > `K0 = L²·T₀·p / (dt·Ud·T·p₀)`（預設 `L = 5.3 cm`，與本專案自表頭讀出的值一致），
+   > 引 Ahrens & Zimmermann, *Anal Bioanal Chem* 413, 1009–1016 (2021)。展開即
+   > `(T₀/T)·(p/p₀)·L²/(t·U)`，與本公式同形，**而它回傳 K0，不是倒數**。
+   >
+   > **修正方式**：兩個模式一律回傳 K0；取倒數移到比對端**顯式**處理——
+   > `match.match_k0()` 依 `DtMode` 判斷庫值是 `K0` 還是 `1/K0`（實測 `library_data/`
+   > 的 203 筆該類 row 字面就是 `"1/K0"`），換算到 K0 空間再比，換算後的值另存
+   > `k0_library_value`。換算慣例屬於「這個庫怎麼存」，與「峰的 K0 怎麼算」是兩回事，
+   > 混在一起正是本 bug 的成因。由 `test_both_modes_return_the_same_quantity()` 鎖住。
+
    **[待決策，本輪部分澄清，未解決]**：`T`/`P` 該讀哪個表頭欄位仍不確定——表頭有 `Start temp 1` 到 `Start temp 6` 六個溫度欄位（本輪實測分別為 45/60/80/80/45/off），哪一個對應漂移管本身尚未確認；`'Start pressure EPC IMS'` 是否等於管內實際壓力也未確認。`L`（`nom Drift Tube Length`）、`U`（`nom Drift Potential Difference`）本輪已確認可直接從表頭讀取。此模式算出的 K0 帶有已知但無法量化的殘留誤差。
 
 3. **`"unavailable"`**：兩者皆無時，K0 相關比對（`.iml` 那條路、`R004`）直接跳過，`identify_peak()` 的 `ims` 分支回傳空清單並標注原因，不靜默產生不可信的數字。
@@ -201,6 +221,19 @@ identify.py 讀取順序：
    - **優先**：直接用管柱型號名稱（`FS-SE-54-CB-1`）去比對 `.ril`/`.iml` 檔名或內部 `column_name` 欄位做**精確匹配**（例如對應到資料夾裡類似 `SE-54`/`apiezon` 命名的檔案），比只按極性分類精確得多
    - **次選（找不到精確對應管柱時的退路）**：依極性（`np`/`p`）分類，退回 VOCal 原本的做法，載入 `AVERAGE LOW POLAR | HP-5 | DB-5`（非極性）或 `DB WAX | HP WAX | Carbowax`（極性）這類同極性合併檔案
    - **`.iml` 額外可交叉核對載流氣體**：同一份表頭裡 `'Drift Gas': 'nitrogen'`，與 `.iml` 資料裡的 `[+][nitrogen]`/`[+][N2]` 標記一致，選 `.iml` 子集時應一併篩選載流氣體種類相符的條目，不只看化合物名稱
+
+   > **[實作修正] `.iml` 不套用管柱/極性選檔，改全部載入**：上面的管柱優先／極性退路
+   > 策略**只適用 `.ril`**。`.iml` 走的是漂移維度，`DtMode=="RIPrel"` 存的是相對 RIP
+   > 的無因次比值，屬儀器層級的量，與樣品跑哪根 GC 管柱無關；用管柱名或極性去篩 `.iml`
+   > 只會製造 false negative。單位混用的風險由 `match.match_drift_rel()`／`match_k0()`
+   > 的 `DtMode` 過濾承擔，不靠檔名。實作於 `identify.select_library_files()`，CLI 與 UI
+   > 共用（先前只有 UI 這樣做，CLI 仍在篩，同一批資料兩條路徑候選集不同）。
+   >
+   > **[實作修正] 載流氣體核對採保守語意**：`library.filter_iml_rows_by_drift_gas()`
+   > 預設只排除「明確標記為別種氣體」的 row，**未標記者保留**。實測 `library_data/`
+   > 的 201 筆 `RIPrel` row 只有 162 筆帶標記，其餘 39 筆來自欄位會偏移的舊格式檔
+   > （見本階段開頭的已知 caveat）——那是「沒記錄氣體」不是「記錄了別種氣體」，嚴格
+   > 篩選會拿缺漏的 metadata 去否定實際可用的資料。要嚴格模式傳 `keep_untagged=False`。
    - **[待決策]** 管柱型號名稱字串不保證與 `.ril` 檔名/內部欄位命名完全一致（可能有拼寫或格式差異，之前整理 `.ril` 檔名時就發現同類命名有不一致的情況），精確匹配需要做模糊比對或人工維護一份對照表，不能單純假設字串完全相等
 
 4. **[本輪新增，UI 溯源需求] 每一筆讀進來的資料需附加 `source_file` 欄位（僅檔名，不含路徑）**：第三階段的選檔策略確定會同時載入多個 `.ril`/`.iml`（精確匹配 + 極性退路合併檔），合併進同一個查詢清單後，**若不記錄來源，使用者在候選結果裡會無法分辨某筆候選是從哪個資料庫檔案來的**，也就無法追溯／核對原始資料。`load_ril(path)`/`load_iml(path)` 讀取時，每一筆 row 需附加 `row["source_file"] = os.path.basename(path)`；由於比對函式（第五階段）是直接複製整個 row 字典再附加 `delta` 欄位，這個欄位會自動隨比對結果傳遞到第六階段輸出與第十階段面板，不需要在比對邏輯裡另外處理。
@@ -218,11 +251,12 @@ identify.py 讀取順序：
 >   ~9–14 個峰中，挑「DT_rel 嚴格遞增、間距最均勻、突出度最大」的 6 個同系物錨點
 >   （呼應第 5、8 點）。實測從 141215 STD 還原出文獻的 6 點（282/334/400/522/697/949s，
 >   DT_rel 間距 std 0.0034）。另有 `pin_anchors()` 可用已知 RT 模板釘定（第 5 點）。
-> - **化合物身分與 RI 值**：STD 為 C4–C9 甲基酮（第 13 點）。6 個 RI 值
+> - **化合物身分與 RI 值**：STD 為 C4–C9 的**酮**（第 13 點；draft.23 更正——先前
+>   寫「甲基酮」是本專案推論，已撤回）。6 個 RI 值
 >   `[589.4,688.6,784.2,892.2,996.5,1095.6]` 目前為**借用值**（`assumed=True`、
 >   `confidence="borrowed_cross_referenced"`，只借 RI/Y、Rt/X 用本批實測），完整來源與
->   升級條件見 `methyl_ketone_RI_provenance.md`。系列定義在 `reference_series.py`
->   （`methyl_ketone`/`n_alkane`/`custom`，第 8 點的 `series_key` 架構）。
+>   升級條件見 `ketone_RI_provenance.md`。系列定義在 `reference_series.py`
+>   （`ketone`/`n_alkane`/`custom`，第 8 點的 `series_key` 架構）。
 > - **內插與外插**：`build_calibration()` 存 `log10(RT)` 錨點；`make_rt_to_ri()` 是
 >   **唯一共用**的 `RT→(RI, extrapolated)` 函式（peak 值與熱圖軸都走它，避免不一致）。
 >   範圍外**外插並標記**（`ri_extrapolated`），不 clamp（draft.21 定案）。數學與檢查清單
@@ -267,6 +301,8 @@ identify.py 讀取順序：
 
    二進位格式：純文字表頭以 `nom Drift Tube Length` 那一行的換行符號結尾，資料區起點為該換行符號位置 **+2**（+1 換行本身，+1 一個額外對齊位元組，已用兩支檔案交叉驗證），矩陣為 `int16` little-endian、形狀 `(20413, 3150)`，與表頭 `Chunks count`/`Chunk sample count` 一致。RIP index=680（drift time 4.533ms，`find_rip()` 邏輯不變）。
 
+   **⚠ 下表 RT 為修正前的舊保留時間軸**（少了 `(averages+1)` 的 +1，是實際值的 6/7；見 `readGAS.RT_AXIS_VERSION` 與 `ketone_RI_provenance.md` §0.0 的換算表）。DT_rel 不受影響。
+
    | RT (s) | 強度 | DT_rel（相對 RIP） |
    |---|---|---|
    | 282.0 | 4937 | 1.104 |
@@ -276,7 +312,9 @@ identify.py 讀取順序：
    | 697.0 | 2932 | 1.613 |
    | 949.0 | 2213 | 1.737 |
 
-   **訊號範圍確認只落在 RT 258–949s**，此範圍外（含 RT<250s 與 RT>950s 直到檔案結束的 2572s）皆為平坦背景，殘差雜訊僅個位數，無真實峰。
+   ~~**訊號範圍確認只落在 RT 258–949s**，此範圍外（含 RT<250s 與 RT>950s 直到檔案結束的 2572s）皆為平坦背景，殘差雜訊僅個位數，無真實峰。~~
+
+   > **⚠ [draft.24 撤回] 此判定不成立。** `260625_141215_STD_peaks.json` 在該範圍外有 3 個真實峰（舊軸 1305.7 / 1308.0 / 2445.8），**其中 1305.7 就是 C9（2-nonanone）**。這個錯誤的「平坦背景」結論正是 C9 長期未被納入錨點的原因之一。詳見第 13 點。
 
    **[draft.18 新增] 347.9s 這個候選點改標記為「疑似拖尾偽影，予以排除」**：原本另有一個候選點在 RT=347.9s（強度 2025），與 334.3s 同屬待釐清雙峰。定量比較兩種六點組合的間距均勻度後（`np.diff().std()`）：納入 334.3、排除 347.9 的組合，DT_rel 間距標準差僅 0.0034（六點依序 1.104/1.234/1.356/1.487/1.613/1.737，間距 0.130/0.122/0.131/0.126/0.124，近乎等差），比納入 347.9 的組合（DT_rel 標準差 0.0797）小約 23 倍。且 347.9s 這個候選點的 DT_rel（1.104）與 282.0s 完全相同（不是接近，是同值），不符合同系物序列該遞增的預期，較合理解釋是 282.0s 那個全域最強峰（4937）的拖尾/肩峰，非獨立化合物。**此判斷依據為 DT_rel 間距均勻度的定量比較，非化合物身分確認**，log10(RT) 間距在此六點組合下反而略不如原 5 點組合均勻（標準差 0.0135→0.0247），推測與方法本身的多段升溫程式（`Program` 欄位）有關、GC 保留時間不保證嚴格 log-linear，但此推論未經進一步驗證，維持為推測層級。
 
@@ -292,7 +330,7 @@ identify.py 讀取順序：
    # reference_series.py
    REFERENCE_SERIES = {
        "n_alkane":      {"assumed": True, "ri_formula": lambda n: 100*n, "assumed_start_carbon": 6},
-       "methyl_ketone": {"assumed": False, "ri_values": None},   # 待對照表
+       "ketone": {"assumed": False, "ri_values": None},   # 待對照表
        "custom":        {"assumed": False, "ri_values": None},   # 使用者直接指定
    }
    ```
@@ -336,18 +374,46 @@ identify.py 讀取順序：
     }
     ```
 
-13. **[本輪使用者提供，draft.19] 化合物身分部分確認：C4–C9 甲基酮同系物**，非烷烴。使用者確認 STD 標準品範圍是「酮」、碳數 C4–C9，對應到 2-butanone → 2-nonanone 這條標準甲基酮同系物（每個成員比前一個多一個 CH₂），依 RT 由小到大對應 6 個錨點：
+13. **[draft.24 定案] 化合物身分已確認：2-alkanone（甲基酮）系列，C4–C9** —— 由經理提供的對照表 `kintonemixed-C4-C9.xlsx` 確認，六列各帶 CAS，核對無誤（78-93-3 / 107-87-9 / 591-78-6 / 110-43-0 / 111-13-7 / 821-55-6）。
 
-    | RT (s) | 假設化合物 | DT_rel |
+    **這解決了本階段第 7 點長期列為「整條鏈路唯一真正卡住的缺口」的化合物身分問題**——該缺口原判定為「GC-IMS 沒有質譜，技術上無法從專案自身資料反推」，最終確實不是靠專案資料解決的，而是靠外部文件。第 7 點可標記為已解決。
+
+    身分認定經過三個版本，記錄於此以免日後誤讀：
+
+    | 版本 | 認定 | 依據 |
     |---|---|---|
-    | 282.0 | 2-butanone (C4) | 1.104 |
-    | 334.3 | 2-pentanone (C5) | 1.234 |
-    | 400.3 | 2-hexanone (C6) | 1.356 |
-    | 521.8 | 2-heptanone (C7) | 1.487 |
-    | 697.0 | 2-octanone (C8) | 1.613 |
-    | 949.0 | 2-nonanone (C9) | 1.737 |
+    | draft.19 | C4–C9 甲基酮，2-butanone→2-nonanone | 使用者說「酮、C4–C9」＋**本專案推論**（DT_rel 呈等差階梯 → 猜 2-alkanone） |
+    | draft.23 | 只認到「C4–C9 的酮」，撤回結構指派 | 使用者更正：材料是酮，不是甲基酮 |
+    | **draft.24（現行）** | **2-alkanone，C4–C9，已確認** | 經理對照表 + CAS |
 
-    **[待決策，未解決] 精確 RI 值仍缺**：甲基酮的 RI 依定義不是整百（不像正構烷烴 RI=100n 是定義本身），是**相對於烷烴尺實測出來的**數值，查過 NIST WebBook 只取得 2-butanone 在極性管柱（DB-Wax）的 Kovats RI（~917–950），與本專案的 SE-54（非極性/中等非極性）管柱不可比，未查到可用的非極性管柱數值。**`series_key` 已可切換為 `"methyl_ketone"`，但 `ri_values` 查找表仍是空的**，需要文獻查證（非極性管柱數據）或標準品證書提供精確數字，在此之前 `single_point_relative` 仍是唯一能實際運作的模式。
+    系列 key 維持 `ketone`（對應混標品名），成員標籤使用確認後的具體化合物名並附 CAS/Formula/MW。
+
+    **[draft.24] 對照表同時提供了 `Dt [a.u.]`，據此發現 `select_homolog_ladder()` 挑錯了錨點**（詳見 `ketone_RI_provenance.md` 第 3 節）。
+
+    第一輪只把 Dt 拿來對「程式已挑出的那六個錨點」，得到的是**碳數整體錯位一格**的結論：現行「6 錨點 = C4…C9」平均 |Δ| = 0.1264，「第 2–6 個 = C4…C8」平均 |Δ| = 0.0028（差 45 倍）。第二輪改用 Dt 去**全部 37 個偵測峰**裡配對（不預設錨點就在那六個之中），才看到完整答案——**六個化合物全部都在，包括 C9**：
+
+    > ⚠ 據此撤回第一輪衍生的「C9 從未被偵測到、本批可用錨點只有 5 個（C4–C8）」這個說法。那是「只在既有六個錨點裡找對應」這個錯誤前提造成的，不是資料本身的結論。
+
+    | 化合物 | 對照表 Dt | 實測 RT (s) | 實測 DT_rel | Δ | 強度 | 現行指派 |
+    |---|---|---|---|---|---|---|
+    | 2-butanone (C4) | 1.23938 | 389.7 | 1.234 | 0.0056 | 2498 | 誤標為 C5 |
+    | 2-pentanone (C5) | 1.35521 | 467.0 | 1.356 | 0.0007 | 3230 | 誤標為 C6 |
+    | 2-hexanone (C6) | 1.49035 | 609.5 | 1.487 | 0.0036 | 3189 | 誤標為 C7 |
+    | 2-heptanone (C7) | 1.61390 | 813.4 | 1.613 | 0.0007 | 2927 | 誤標為 C8 |
+    | 2-octanone (C8) | 1.73359 | 1107.2 | 1.737 | 0.0032 | 2213 | 誤標為 C9 |
+    | 2-nonanone (C9) | 1.85714 | **1523.4** | 1.854 | 0.0027 | 1028 | **未被選入** |
+
+    RT 與 DT_rel 皆嚴格遞增，平均 |Δ| = 0.0027。**正確錨點集 = `[389.7, 467.0, 609.5, 813.4, 1107.2, 1523.4]`，仍是 6 點**；修正前程式挑的是 `[329.6, 389.7, 467.0, 609.5, 813.4, 1107.2]`——多納入不屬於此序列的 329.6 s（DT_rel 1.104，全圖最強峰 I=4936），並漏掉 RT 1523.4 s 的 C9。
+
+    **⚠ 本表 RT 為 2026-08-12 修正後的保留時間軸**（`(averages+1)×trigger`，見 `readGAS.RT_AXIS_VERSION`）。本階段第 5 點與 draft.16/18 記錄的 282.0/334.3/400.3/521.8/697.0/949.0 是修正前的舊軸，為同一批峰的 6/7 倍表示，換算表見 `ketone_RI_provenance.md` §0.0。
+
+    **⚠ 連帶更正本階段第 5 點的一項實測記錄**：該點寫「訊號範圍確認只落在 RT 258–949s，此範圍外（含 RT>950s 直到檔案結束的 2572s）皆為平坦背景，殘差雜訊僅個位數，無真實峰」。實際上 `260625_141215_STD_peaks.json` 在 RT>1000 s 有 **3 個峰**（新軸）：1523.4（DT_rel 1.854，I=1028）、1526.0（1.406，I=1188）、2853.4（1.143，I=335）。**C9 就在其中**，「平坦背景」的判定不成立。
+
+    **為什麼啟發式會挑錯（影響 draft.18 的方法論結論）**：錯誤組合的 DT_rel 間距標準差是 **0.0034**，正確組合是 0.0046；且錯誤組合含突出度 4508 的最強峰，突出度總和也較大——**兩個評分準則都指向錯誤答案**。draft.18 當初以 std=0.0034（比替代方案小 23 倍）作為六點定案的強證據，現在看來間距均勻度無法分辨「真正的同系物階梯」與「恰好等距的混合物」：碳數指派需要外部依據，不能靠形狀推論。（draft.18 排除 347.9、保留 334 的判斷仍是對的，只是理由不完整。）
+
+    **[已修正] 新增 `calibration.match_anchors_by_dt()`，取代間距啟發式**。`build_from_std_peaks()` 的分支改為：系列帶 `dt_values` → 走 Dt 配對；沒有（如 `n_alkane`）或配對結果不單調 → 退回 `select_homolog_ladder()`。`anchor_selection.mode` 新增 `dt_matched`，配對明細記於 `anchor_selection.dt_match`。實測 `dt_matched`、6/6 命中、平均 |Δ|=0.00273、單調，錨點為 `[334.0, 400.3, 522.4, 697.2, 949.0, 1305.7]`。部分命中時 RI 依 `_dt_index` 取對應項，不會錯位。**RT 涵蓋上界由 949 s 延伸到 1305.7 s**，`ri_extrapolated` 的峰因此變少；**既有 `_peaks.json` 的 `ri` 需重跑才會正確**。`test_ketone_dt_values_expose_the_anchor_off_by_one()` 保留為迴歸護欄（記錄舊挑法錯在哪的算術）。
+
+    **[原始記錄，draft.19]** 精確 RI 值仍缺：酮的 RI 依定義不是整百（不像正構烷烴 RI=100n 是定義本身），是**相對於烷烴尺實測出來的**數值，查過 NIST WebBook 只取得 2-butanone 在極性管柱（DB-Wax）的 Kovats RI（~917–950），與本專案的 SE-54（非極性/中等非極性）管柱不可比，未查到可用的非極性管柱數值。*（「`ri_values` 查找表仍是空的」已被 draft.22 推翻。而 draft.24 值得注意的巧合是：對照表的 2-butanone = 916.84，幾乎正中此處記錄的**極性管柱** 917–950 區間——這正是第 2 節管柱極性疑慮的由來。）*
 
 14. **[本輪對話補充，draft.20] RT→RI 套用步驟的數學細節，獨立成檔** `RT_to_RI_normalization_math.md`：內容涵蓋分段線性內插的五步驟推導（建表需先取 `log10(RT)`，查詢新峰時同一個峰的 RT 也要先取 `log10` 才能查表——這是實作最常漏掉的一步）、手算範例（`RT=450s → RI=644.1`，可直接當單元測試 ground truth）、`np.interp`/`scipy.interp1d` 的 clamp vs 外插行為差異，與五項實作檢查清單。**外插時該 clamp 還是真的沿邊界斜率外插，此處未定案**，需要之後另外決定並補回此節。
 
@@ -612,6 +678,16 @@ def rule_min_relative_steepness(peak, params, floor):
 
 遷移後，`peaks.py` 的 CLI 參數 `--prom-frac`／`--top-n` 應予移除，改由 `rules_config.json` 的 `R001`/`R002` 參數控制；`peaks.py` 本身回歸單純 measure-only（只留 `floor_pct`/`min_distance` 兩個偵測層參數），完整候選清單交給規則庫做裁決。
 
+> **[實作現況：此段尚未執行]** `--prom-frac`／`--top-n` 目前仍留在 `peaks.py`，而且
+> `prom_frac` 已經因為 `R004`/`R006` 的「門檻前」需求被綁進 `select_from_maxima()`
+> 的核心（門檻是相對值，必須在裁切之後、編號之前算），不再是可以單純刪掉的 CLI 旗標。
+> 因此現況是**雙層門檻並存**：`prom_frac`（相對值，偵測時）在前，`R001`（絕對值，
+> 偵測後）在後。實際後果是 **`R001` 填任何小於當前 `prom_frac` 門檻的值都不會有效果**
+> ——那些候選在 `R001` 有機會看到它們之前就已經被相對門檻濾掉了。
+> 這不是 bug，是 draft.14 的順序決策帶來的必然結果，但本段原文寫得像已完成，故補註。
+> 要真正收斂成單層，得先決定 `R001` 改採相對語意、或讓 `prom_frac` 降為純粹的
+> 「偵測層下限」而由 `R001` 承擔裁決——屬未定案項目，見 `status.md` open decisions。
+
 
 
 ### 對應的 UI 功能：規則管理面板
@@ -826,13 +902,13 @@ peaks.py
 
 **目的**：這幾輪對話裡確認的設計，很大一部分還停在「文件寫定案、程式碼沒動」的狀態，集中列在這裡，避免只存在對話記憶裡、之後遺漏。
 
-### 待修的既有 bug（3 個，2 個已修）
+### 既有 bug（3 個，皆已修復）
 
 | # | 檔案 | 狀態 |
 |---|---|---|
 | 1 | `readGAS.py` `plot_heatmap()` | ✅ 已修復並驗證（draft.11） |
 | 2 | `peaks.py` `write_overlay()` | ✅ 已修復並驗證（draft.11） |
-| 3 | `peak_with_number.py` `write_overlay_numbered()` | ❌ 尚未修復（draft.12 發現），同樣的 `_downsample_for_display()` 修法可直接套用 |
+| 3 | `peak_with_number.py` `write_overlay_numbered()` | ✅ 已修復（draft.12 發現，ver.02 修復）——重用 `peaks._downsample_for_display()`，不另建第三份複製 |
 
 ### 已設計但尚未寫成程式碼的新模組（第一～七、十階段）
 
@@ -854,7 +930,7 @@ peaks.py
 | # | 問題 | 卡住哪個階段 |
 |---|---|---|
 | 1 | 儀器常數（L/U/T/P）從哪來？ | 第二階段（K0 換算）——`L`/`U` 本輪已可從表頭取得，`T`/`P` 仍不確定 |
-| 2 | STD 標準品的化合物身分（不限於烷烴，甲基酮等其他同系物亦可）？ | 第四階段（RI 轉換）——**身分已確認為 C4–C9 甲基酮（draft.19）**；VOCal 資料結構與 UI 不記錄此資訊。6 個 RI 值目前用**借用值**（`assumed_unverified`，見 `methyl_ketone_RI_provenance.md`）跑通絕對 RI；**仍待**證書/文獻查證以升級成 verified（未到位前旗標維持 borrowed，不當既定事實） |
+| 2 | ~~STD 標準品的化合物身分~~ | ✅ **已解決（draft.24）**——經理對照表 `kintonemixed-C4-C9.xlsx` 帶 CAS，確認為 2-alkanone C4–C9。**但衍生兩個新的未決項**：(a) 對照表 RI 的管柱極性未確認（疑為極性，本批為非極性，差約 +302）；(b) 錨點碳數指派錯位一格，程式尚未修正 → 峰的 RI 輸出暫不可信。見 `ketone_RI_provenance.md` |
 | 3 | 有沒有 K0 校準標準品資料？ | 第二階段（`standard_based` 模式），沒有的話只能用帶殘留誤差的 `raw_parameters` 退路 |
 
 這些不是技術問題，是需要先盤點手上實際擁有的資料才能回答。
@@ -863,11 +939,13 @@ peaks.py
 
 ## 修訂記錄
 
-- **draft.22（對應程式 tag v3）**：第四階段由「最大缺口」改標為**已實作**，章節開頭新增「已實作」摘要（設計 1–14 點與逆向調查全數保留）。實際落地：`calibration.py` + `reference_series.py`——`select_homolog_ladder()` 自動挑 6 個甲基酮錨點（DT_rel 階梯，免模板；另有 `pin_anchors()` 模板釘定）；`methyl_ketone` 借用 6 個 RI 值（`assumed_unverified`，見 `methyl_ketone_RI_provenance.md`）；`make_rt_to_ri()` 為唯一共用 RT→RI 函式（外插+標記）；`resolve_ri_calibration()` 三態 + `_folder_calibration.json` 快取；串進 `identify.py` 與桌面 UI（RI 欄、`warp_rows_to_ri()` 線性 RI 熱圖軸，x 軸 drift 正規化不動）。測試 `test/test_calibration.py`（全套 125 項通過）。同步更新 `status.md`/`README.md`/`GC-IMS_Pipeline_Implementation.md`/`UI.md`。
+- **draft.24**：**經理提供 `kintonemixed-C4-C9.xlsx`，一次解決一個舊缺口、揭露一個新錯誤。** (1) **化合物身分確認**——六列各帶 CAS，核對無誤，組成確為 2-alkanone（甲基酮）C4–C9；第四階段第 7 點「整條鏈路唯一真正卡住的缺口」就此解決（如當初所判定，不是靠專案自身資料解決的，而是靠外部文件）。draft.23 撤回的結構指派因此恢復，成員標籤改回具體化合物名並補 CAS/Formula/MW，系列 key 維持 `ketone`。(2) **RI 數值改用對照表**（916.8372…1392.9），取代借自鱸魚專案的 589.4…1095.6；兩組差值 +289~+327（均值 +302，跨六點高度一致），而 2-butanone 的 916.84 幾乎正中 NIST 的**極性管柱** 917–950，本批管柱卻是非極性 SE-54——**管柱極性疑慮未解**，使用者知悉後裁決採用，`assumed=True` 保留、`confidence` 改為 `supplier_table_column_polarity_unverified`。(3) **[重要] 用對照表的 `Dt` 發現 `select_homolog_ladder()` 挑錯錨點**：拿 Dt 去全部 37 個偵測峰配對，六個化合物全部命中（平均 |Δ|=0.0027，RT/DT 皆嚴格遞增），正確錨點集為 `[389.7, 467.0, 609.5, 813.4, 1107.2, 1523.4]`（新軸）；修正前挑的 `[329.6, 389.7, 467.0, 609.5, 813.4, 1107.2]` 多納入了不屬於此序列的最強峰、漏掉 RT 1523.4 s 的 C9。連帶更正第四階段第 5 點「訊號只落在 RT 258–949s、其外為平坦背景」的實測記錄（RT>1000s 實有 3 個峰）。**啟發式失效的診斷**：錯誤組合的間距 std 0.0034 反而優於正確組合的 0.0046，且突出度總和更大——兩個準則都指向錯誤答案，故 draft.18 用間距均勻度定案碳數的方法論不足以支撐該結論。**已修正**：新增 `calibration.match_anchors_by_dt()` 取代間距啟發式，`build_from_std_peaks()` 在系列帶 `dt_values` 時優先走 Dt 配對（無則退回啟發式），`anchor_selection.mode` 新增 `dt_matched`。實測 6/6 命中、平均 |Δ|=0.00273。既有 `_peaks.json` 的 `ri` 需重跑。完整分析見 `ketone_RI_provenance.md`。**(4) 另補一項外部佐證**：反編譯 `gc-ims-tools` 0.1.10（Food Chemistry 2022）的 `Spectrum.calc_reduced_mobility()`，其公式為 `K0 = L²·T₀·p /(dt·Ud·T·p₀)`（預設 L=5.3 cm，與本專案表頭讀值一致），展開與本專案 `dt_convert.k0_from_raw_params()` 的 `ah·L²/(t·U)` 同形——**該函式回傳 K0 本身，而我們回傳其倒數**，佐證第二階段那個左右不對稱是實作瑕疵（見 status.md open decision 5）。其 `riprel()` 取第 0 列 argmax，亦與本專案 `rip.find_rip()` 一致。
+- **draft.23**：**化合物身分更正——標準品是「酮」，不是「甲基酮」。** 使用者指出 draft.19 記錄的「C4–C9 甲基酮同系物（2-butanone→2-nonanone）」超出了他實際確認的範圍：他確認的只有「酮 + C4–C9」，2-alkanone 這個結構指派是本專案自己從 DT_rel 等差階梯推出來的猜測，予以撤回。連帶修改：`reference_series.py` 系列名 `methyl_ketone` → `ketone`、成員標籤改為不宣稱結構的 `C4 ketone`…`C9 ketone`、借用 RI 的來源化合物移入獨立欄位 `ri_source_compounds`（數值溯源與身分宣告分離，由 `test_ketone_labels_do_not_claim_a_structural_subtype()` 鎖住）；`methyl_ketone_RI_provenance.md` 更名為 `ketone_RI_provenance.md` 並補上**第二層假設**的說明——借來的六個 RI 是在 2-alkanone 上量的，套到只確認到「酮」的本批 STD 上，等於跨批次借用之外再疊一層跨結構亞型借用，而這個誤差**不會**在 DT_rel 階梯均勻度上顯現（階梯只證明每多一個 CH₂，不辨官能基位置），現有自動錨點機制偵測不到。不受影響：碳數範圍、同系物性質、`select_homolog_ladder()` 的挑錨點邏輯、六個實測 RT/DT_rel。
+- **draft.22（對應程式 tag v3）**：第四階段由「最大缺口」改標為**已實作**，章節開頭新增「已實作」摘要（設計 1–14 點與逆向調查全數保留）。實際落地：`calibration.py` + `reference_series.py`——`select_homolog_ladder()` 自動挑 6 個酮的錨點（DT_rel 階梯，免模板；另有 `pin_anchors()` 模板釘定）；`ketone` 借用 6 個 RI 值（`assumed_unverified`，見 `ketone_RI_provenance.md`）；`make_rt_to_ri()` 為唯一共用 RT→RI 函式（外插+標記）；`resolve_ri_calibration()` 三態 + `_folder_calibration.json` 快取；串進 `identify.py` 與桌面 UI（RI 欄、`warp_rows_to_ri()` 線性 RI 熱圖軸，x 軸 drift 正規化不動）。測試 `test/test_calibration.py`（全套 125 項通過）。同步更新 `status.md`/`README.md`/`GC-IMS_Pipeline_Implementation.md`/`UI.md`。
 - **draft.21**：第四階段外插行為**定案**——邊界外「外插並標記」（`scipy.interp1d(fill_value='extrapolate')` + `ri_extrapolated` 旗標），不 clamp；理由是 clamp 會讓範圍外的峰全部壓到邊界值、失去 RI 區分度（悄悄丟資訊），外插保留區分度並由旗標讓下游分級。要求 `attach_ri()` 與熱圖軸共用同一個 `make_rt_to_ri()`/`interp_fn`，避免「峰表外插、軸 clamp」不一致。`RT_to_RI_normalization_math.md` 的參考實作與檢查清單同步改用 scipy 外插版、並標明手算範例（RT=450→644.1）為「內插演算法測試、非校準驗證」。
 - **draft.20**：第四階段新增第 14 點——RT→RI 套用步驟的數學細節獨立成 `RT_to_RI_normalization_math.md`（分段線性內插五步驟、手算範例可當單元測試、外插行為待決策），此處僅存指標與摘要，不重複完整推導。**同時修正 draft.19 編輯時誤刪的「## 第五階段：容許窗比對」標題**（上一版 str_replace 操作疏失，標題與內容被誤合併，本版已修復，第五階段以下章節內容本身未受影響）。
 
-- **draft.19**：第四階段新增第 13 點——使用者確認 STD 標準品為 C4–C9 甲基酮同系物（非烷烴），依 RT 對應 2-butanone→2-nonanone 六個錨點。明確標注精確 RI 值仍缺（甲基酮 RI 非定義式整百，需查證非極性管柱文獻值或證書），`series_key="methyl_ketone"` 可切換但 `ri_values` 查找表尚空，`single_point_relative` 仍是唯一可運作模式。
+- **draft.19**：第四階段新增第 13 點——使用者確認 STD 標準品為 C4–C9 的酮（非烷烴），依 RT 對應六個錨點。**[draft.23 更正]** 本版原記為「甲基酮同系物，2-butanone→2-nonanone」，該結構指派是本專案的推論而非使用者提供，已於 draft.23 撤回。明確標注精確 RI 值仍缺（甲基酮 RI 非定義式整百，需查證非極性管柱文獻值或證書），`series_key="ketone"` 可切換但 `ri_values` 查找表尚空，`single_point_relative` 仍是唯一可運作模式。
 
 - **draft.18**：第四階段第 5、9 點更新——用 DT_rel 間距均勻度定量比較（`np.diff().std()`），將 141215 STD 的錨點從 5 點升級為 6 點：新納入 334.3s，原本待釐清的 347.9s 改標記為「疑似拖尾偽影」予以排除（理由：DT_rel 與 282.0s 完全重疊、不符合序列遞增預期，且納入 334.3 後 DT_rel 間距標準差降至 0.0034，比排除方案小 23 倍）。同時誠實記錄一個未解的張力：此六點組合的 log10(RT) 間距均勻度反而略遜於原 5 點組合，推測與方法多段升溫程式有關，但未驗證，維持推測層級。`single_point_relative` 提案的錨點數同步更新為 6。
 - **draft.17**：第四階段新增第 12 點——批次資料夾內沒有 STD 檔案時的三層解析邏輯（`resolve_ri_calibration()`）。判斷依據改為表頭 `Sample` 欄位而非檔名慣例；新增跨批次共用的 `ri_calibration_registry.json`（比照 Stage 2 `calibration_profile.json` 綁定「儀器＋管柱＋方法」組合的精神），借用舊校正曲線時強制帶 `days_gap` 信心標記；完全無可用校正時降級走 `.iml` 直接比對或標記 `ri_mode="unavailable"`，與 Stage 2 `k0_mode` 三態設計對稱，RI/K0 兩維度 provenance 各自獨立標記。

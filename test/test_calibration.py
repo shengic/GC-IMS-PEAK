@@ -31,7 +31,14 @@ def sep(t):
     print("=" * 60)
 
 
-# workflow §第四階段第 5 點：141215_STD 實測 7 個候選峰（含 DT_rel＝drift_relative）
+# workflow §第四階段第 5 點：141215_STD 的 7 個候選峰（含 DT_rel＝drift_relative）
+#
+# ⚠ **這組是修正前保留時間軸的歷史快照**（rt_step 少了 +1，見 readGAS.RT_AXIS_VERSION），
+# 而且是比 _STD_REAL 更早一次偵測的結果（強度略有出入：282.0/4937 vs 282.5/4936）。
+# 刻意**不**換算成新軸：它的用途是驗證 select_anchor_peaks() / resolve_anchor_doublets() /
+# select_homolog_ladder() 這幾條**已降為退路**的啟發式路徑，那些邏輯看的是 DT_rel 間距
+# 與 RT 相對間隔，換算後所有斷言都要跟著改，徒增風險而不增加涵蓋率。
+# 描述「本批 STD 現況」的資料請用下方的 _STD_REAL（新軸、已對齊經理對照表）。
 STD_141215 = [
     {"retention_s": 282.0, "intensity": 4937, "drift_relative": 1.104},
     {"retention_s": 334.3, "intensity": 2500, "drift_relative": 1.234},
@@ -154,35 +161,204 @@ def test_loglinear_interpolation_kovats():
     assert abs(got - expect) < 1e-6
 
 
-def test_methyl_ketone_borrowed_ri_is_absolute_but_flagged():
-    sep("[9] methyl_ketone_RI_provenance.md：借用 6 點 RI → 絕對模式 + assumed_unverified")
-    mk = rs.REFERENCE_SERIES["methyl_ketone"]
+def test_ketone_std_table_is_a_faithful_transcription():
+    """[draft.24] KETONE_STD_TABLE 是 kintonemixed-C4-C9.xlsx 的逐列硬編碼。
+
+    硬編碼的參照資料最大的風險是「抄錯了沒人發現」，所以這裡驗的是**內部一致性**
+    ——每一列自己的欄位彼此對得起來，而且六列構成一條合理的同系物序列。這些檢查
+    不需要原檔在場（原檔可能不在，或被 Excel 鎖住），但任何一處手滑都會被抓到：
+
+      - 分子式的碳數要等於 carbon 欄（C9H18O → 9）
+      - 分子式要符合酮的通式 CnH2nO
+      - MW 由分子式算出來要對得上（±0.15）
+      - 依碳數遞增排序後，RI / Rt / Dt 三者都必須嚴格遞增（同系物的物理必然）
+    """
+    import re
+    t = rs.KETONE_STD_TABLE
+    assert len(t) == 6
+    assert [r["count"] for r in t] == [1, 2, 3, 4, 5, 6], "應保留原檔列序"
+
+    for r in t:
+        m = re.fullmatch(r"C(\d+)H(\d+)O", r["formula"])
+        assert m, f"{r['compound']} 的分子式格式異常：{r['formula']}"
+        n_c, n_h = int(m.group(1)), int(m.group(2))
+        assert n_c == r["carbon"], f"{r['compound']}：分子式碳數 {n_c} ≠ carbon {r['carbon']}"
+        assert n_h == 2 * n_c, f"{r['compound']}：不符合酮通式 CnH2nO"
+        # 12.011*C + 1.008*H + 15.999*O
+        mw_calc = 12.011 * n_c + 1.008 * n_h + 15.999
+        assert abs(mw_calc - r["mw"]) < 0.15, \
+            f"{r['compound']}：MW {r['mw']} 與分子式算出的 {mw_calc:.2f} 不符"
+
+    asc = sorted(t, key=lambda r: r["carbon"])
+    assert [r["carbon"] for r in asc] == [4, 5, 6, 7, 8, 9]
+    for field in ("ri", "rt_s", "dt"):
+        vals = [r[field] for r in asc]
+        assert all(vals[i] < vals[i + 1] for i in range(5)), \
+            f"{field} 未隨碳數嚴格遞增（同系物應遞增）：{vals}"
+
+    # 對外欄位確實由該表導出、且順序一致（不是另一份手打的平行陣列）
+    k = rs.REFERENCE_SERIES["ketone"]
+    assert k["ri_values"] == [r["ri"] for r in asc]
+    assert k["dt_values"] == [r["dt"] for r in asc]
+    assert k["members"] == [r["compound"].lower() for r in asc]
+    assert k["source_file"] == "kintonemixed-C4-C9.xlsx"
+
+
+def test_ketone_identity_confirmed_by_supplier_table():
+    """[draft.24] 身分由經理對照表（kintonemixed-C4-C9.xlsx）確認，CAS 逐一核對。
+
+    draft.23 曾把成員改成不宣稱結構的 'C4 ketone'…（因為當時「2-alkanone」只是本專案
+    的推論）。draft.24 拿到帶 CAS 的對照表後，該推論獲得外部證實，故改回具體化合物名。
+    這個測試鎖住的是：**身分宣告必須有 CAS 撐著**——六個成員名與六個 CAS 一一對應且
+    數量相符，才不會退回成「憑階梯形狀猜化合物」的狀態。
+    """
+    k = rs.REFERENCE_SERIES["ketone"]
+    assert k["members"] == ["2-butanone", "2-pentanone", "2-hexanone",
+                            "2-heptanone", "2-octanone", "2-nonanone"]
+    # CAS 是身分宣告的依據，缺一不可
+    assert k["cas_numbers"] == ["C78933", "C107879", "C591786",
+                                "C110430", "C111137", "C821556"]
+    for field in ("members", "cas_numbers", "formulas",
+                  "molecular_weights", "carbon_numbers", "ri_values", "dt_values"):
+        assert len(k[field]) == 6, f"{field} 長度必須為 6"
+    # 身分已確認，但 assumed 仍為 True——指向的是管柱極性疑慮，不是化合物身分
+    assert rs.series_is_assumed("ketone") is True
+    assert "polarity" in rs.series_confidence("ketone")
+
+
+# --------------------------------------------------------------------------- #
+# draft.24：用對照表 Dt 指派錨點（取代間距啟發式）
+# --------------------------------------------------------------------------- #
+# 141215_STD 的真實偵測峰（節錄，含足以構成陷阱的干擾峰）。寫成字面值而非讀
+# results/，測試才不依賴 gitignore 掉的資料。
+#
+# ⚠ RT 為**修正後的保留時間軸**（rt_index × 0.147 s，即 (averages+1)×trigger）。
+# 2026-08-12 之前這些值是 6/7 倍（282.5 / 334.0 / … / 1305.7），若在舊產物裡看到
+# 那組數字，那是修正前的軸，不是不同的峰——見 readGAS.RT_AXIS_VERSION。
+# DT_rel 不受該修正影響，本測試的配對邏輯也只看 DT_rel。
+_STD_REAL = [
+    {"retention_s": 329.6,  "drift_relative": 1.104, "intensity": 4936},  # 最強峰，非錨點
+    {"retention_s": 389.7,  "drift_relative": 1.234, "intensity": 2498},  # C4
+    {"retention_s": 400.3,  "drift_relative": 1.104, "intensity": 2071},  # 同 DT_rel 干擾
+    {"retention_s": 467.0,  "drift_relative": 1.356, "intensity": 3230},  # C5
+    {"retention_s": 609.5,  "drift_relative": 1.487, "intensity": 3189},  # C6
+    {"retention_s": 813.4,  "drift_relative": 1.613, "intensity": 2927},  # C7
+    {"retention_s": 1107.2, "drift_relative": 1.737, "intensity": 2213},  # C8
+    {"retention_s": 1523.4, "drift_relative": 1.854, "intensity": 1028},  # C9（啟發式漏掉）
+    {"retention_s": 1526.0, "drift_relative": 1.406, "intensity": 1188},
+]
+
+
+def test_dt_match_finds_all_six_including_the_one_the_ladder_missed():
+    """Dt 配對必須挑出正確的六點，而且**不能**選中那顆最強的干擾峰。
+
+    這是 draft.24 的核心修正。啟發式挑的是 [329.6,389.7,467.0,609.5,813.4,1107.2]——它把
+    全圖最強峰（329.6, DT_rel 1.104）當成 C4，並漏掉 RT 1523.4 的 C9。Dt 配對有外部依據，
+    不受「哪顆比較強」「間距像不像等差」影響。
+    """
+    dt = rs.REFERENCE_SERIES["ketone"]["dt_values"]
+    matched, rep = cal.match_anchors_by_dt(_STD_REAL, dt, tol=0.01)
+    rts = [round(p["retention_s"], 1) for p in matched]
+    assert rts == [389.7, 467.0, 609.5, 813.4, 1107.2, 1523.4]
+    assert 329.6 not in rts, "全圖最強峰不屬於此序列，不得被選為錨點"
+    assert rep["n_matched"] == 6 and rep["missing_indices"] == []
+    assert rep["rt_monotonic_with_carbon"] is True
+    assert rep["mean_abs_delta"] < 0.006
+    # 碳數序位要跟著 RT 走（第 i 個錨點 = 第 i 個化合物）
+    assert [p["_dt_index"] for p in matched] == [0, 1, 2, 3, 4, 5]
+
+
+def test_dt_match_beats_the_spacing_heuristic_on_real_data():
+    """同一份資料，兩種挑法給出不同答案——證明換掉啟發式是有意義的，不是重構。"""
+    dt = rs.REFERENCE_SERIES["ketone"]["dt_values"]
+    by_dt, _ = cal.match_anchors_by_dt(_STD_REAL, dt, tol=0.01)
+    by_ladder, _ = cal.select_homolog_ladder(_STD_REAL, len(dt))
+    a = [round(p["retention_s"], 1) for p in by_dt]
+    b = [round(p["retention_s"], 1) for p in by_ladder]
+    assert a != b, "若兩者一致，代表資料或啟發式變了，本測試的前提要重新檢視"
+    assert 329.6 in b and 1523.4 not in b, "啟發式會納入最強干擾峰並漏掉 C9"
+
+
+def test_dt_match_partial_hit_keeps_ri_aligned():
+    """只配到一部分時，RI 必須跟著配到的化合物走，不能整組錯位。"""
+    dt = rs.REFERENCE_SERIES["ketone"]["dt_values"]
+    ri = rs.REFERENCE_SERIES["ketone"]["ri_values"]
+    subset = [p for p in _STD_REAL if round(p["retention_s"], 1) in (467.0, 813.4, 1523.4)]
+    c, _ = cal.build_from_std_peaks(subset, header={}, series_key="ketone")
+    assert c["mode"] == "multi_point_loglinear"
+    assert c["n_anchors"] == 3
+    # C5 / C7 / C9 → ri_values 的第 1、3、5 項
+    assert c["ri_values"] == [ri[1], ri[3], ri[5]]
+
+
+def test_dt_match_falls_back_when_series_has_no_dt():
+    """沒有 dt_values 的系列（n_alkane）必須仍走原本的階梯啟發式，不得報錯。"""
+    c, _ = cal.build_from_std_peaks(_STD_REAL, header={}, series_key="n_alkane")
+    assert c["anchor_selection"]["mode"] == "dynamic"
+    assert c["anchor_selection"]["dt_match"] is None
+
+
+def test_build_from_std_peaks_uses_dt_match_for_ketone():
+    """整合：ketone 系列預設就該走 dt_matched，且錨點自身內插回自己的 RI。"""
+    c, _ = cal.build_from_std_peaks(_STD_REAL, header={}, series_key="ketone")
+    a = c["anchor_selection"]
+    assert a["mode"] == "dt_matched"
+    assert a["n_clean_anchors"] == 6
+    r2r = cal.make_rt_to_ri(c)
+    for rt, ri in zip(a["clean_rt_s"], c["ri_values"]):
+        assert abs(r2r(rt)[0] - ri) < 1e-6
+
+
+def test_ketone_dt_values_expose_the_anchor_off_by_one():
+    """[draft.24] 對照表 Dt 首度揭露錯位時的算術證據——保留為迴歸護欄。
+
+    這是發現問題那一輪的計算：只拿 Dt 對「啟發式已挑出的六個錨點」，就看得出整體
+    錯位一格。程式現已改用 match_anchors_by_dt()，但這個算術仍然成立，且它是唯一
+    記錄「舊挑法錯在哪」的地方——若有人日後想改回間距啟發式，這裡的 45 倍差距是
+    現成的反證。
+    """
+    dt = rs.REFERENCE_SERIES["ketone"]["dt_values"]          # C4..C9
+    proj = [1.104, 1.234, 1.356, 1.487, 1.613, 1.737]        # 141215_STD 實測 6 錨點
+
+    def mean_abs(a, b):
+        return sum(abs(x - y) for x, y in zip(a, b)) / len(a)
+
+    as_is = mean_abs(proj, dt)              # 現行假設：6 錨點 = C4..C9
+    shifted = mean_abs(proj[1:], dt[:5])    # 位移一格：第 2..6 個 = C4..C8
+    assert as_is > 0.1, "現行指派應該明顯對不上（若變小，代表有人改了資料或指派）"
+    assert shifted < 0.01, "位移一格後應該逐點吻合"
+    assert as_is / shifted > 20, "兩種指派的優劣必須是壓倒性的，不是勉強勝出"
+
+
+def test_ketone_borrowed_ri_is_absolute_but_flagged():
+    sep("[9] ketone_RI_provenance.md：對照表 6 點 RI → 絕對模式 + assumed_unverified")
+    mk = rs.REFERENCE_SERIES["ketone"]
     assert mk["carbon_numbers"] == [4, 5, 6, 7, 8, 9]
-    assert mk["members"][0] == "2-butanone" and mk["members"][-1] == "2-nonanone"
-    assert mk["ri_values"] == [589.4, 688.6, 784.2, 892.2, 996.5, 1095.6]  # 借用值已填
-    assert rs.series_is_assumed("methyl_ketone") is True         # 借用未驗證
-    assert rs.series_confidence("methyl_ketone") == "borrowed_cross_referenced"
-    # 模板只借 RI(Y)，Rt(X) 用本批 STD 實測值
+    assert mk["ri_values"] == [916.8372, 987.12244, 1087.4615,
+                               1181.3636, 1293.7333, 1392.9]   # 經理對照表
+    assert rs.series_is_assumed("ketone") is True                # 管柱極性未驗證
+    assert rs.series_confidence("ketone") == "supplier_table_column_polarity_unverified"
+    # 模板只取 RI(Y)，Rt(X) 用本批 STD 實測值
     tmpl = cal.template_from_series(
-        [282.0, 334.3, 400.3, 521.8, 697.0, 949.0], "methyl_ketone")
-    assert tmpl[0]["ri"] == 589.4 and tmpl[-1]["ri"] == 1095.6
+        [282.0, 334.3, 400.3, 521.8, 697.0, 949.0], "ketone")
+    assert tmpl[0]["ri"] == 916.8372 and tmpl[-1]["ri"] == 1392.9
     # 釘定 6 峰 + 借用 RI → 絕對 RI，但 provenance 全程帶著
     c, _ = cal.build_from_std_peaks(STD_141215, HDR_141215,
-                                    series_key="methyl_ketone", expected_anchors=tmpl)
+                                    series_key="ketone", expected_anchors=tmpl)
     print(f"  mode={c['mode']}  assumed={c['assumed_unverified']}  conf={c.get('ri_confidence')}")
     assert c["mode"] == "multi_point_loglinear"
     assert c["assumed_unverified"] is True
-    assert c["ri_confidence"] == "borrowed_cross_referenced"
+    assert c["ri_confidence"] == "supplier_table_column_polarity_unverified"
     # 套到樣品峰：ri 有值、且每峰帶 ri_confidence
     pk = [dict(p) for p in STD_141215]
     cal.attach_ri(pk, c)
     assert all(p["ri"] is not None for p in pk)
-    assert all(p["ri_confidence"] == "borrowed_cross_referenced" for p in pk)
+    assert all(p["ri_confidence"] == "supplier_table_column_polarity_unverified" for p in pk)
 
 
 def test_interp_ALGORITHM_only_rt450_NOT_calibration_validation():
     # draft.21 line 55 / 第16點：此測試只驗「log10 轉換 + 區間搜尋 + 加權內插」三步驟
-    # 寫對沒有；RI 值 400..900 是純示範算術，**不是真實甲基酮校準值**，不得被誤讀為
+    # 寫對沒有；RI 值 400..900 是純示範算術，**不是真實的酮校準值**，不得被誤讀為
     # 校準已驗證（真實 RI 仍待補，見 workflow §4 第 13 點）。
     sep("[10] 內插『演算法』ground truth（非校準驗證！示範 RI）：RT=450 → RI≈644.1")
     rts = [282.0, 334.3, 400.3, 521.8, 697.0, 949.0]
@@ -234,13 +410,14 @@ def test_reference_series_assign():
     assert rs.assign_ri(3, "n_alkane", start_carbon=8) == [800, 900, 1000]
     assert rs.series_is_assumed("n_alkane") is True
     assert rs.series_is_assumed("custom") is False
-    # methyl_ketone 現在有 6 點借用 RI（methyl_ketone_RI_provenance.md）
-    assert rs.assign_ri(6, "methyl_ketone") == [589.4, 688.6, 784.2, 892.2, 996.5, 1095.6]
+    # ketone 現在有 6 點對照表 RI（ketone_RI_provenance.md）
+    assert rs.assign_ri(6, "ketone") == [916.8372, 987.12244, 1087.4615,
+                                         1181.3636, 1293.7333, 1392.9]
     try:
-        rs.assign_ri(3, "methyl_ketone")           # 錨點數不符（6≠3）→ ValueError
+        rs.assign_ri(3, "ketone")                  # 錨點數不符（6≠3）→ ValueError
         assert False, "應丟 ValueError"
     except ValueError:
-        print("  methyl_ketone 錨點數不符時正確丟 ValueError")
+        print("  ketone 錨點數不符時正確丟 ValueError")
 
 
 # --------------------------------------------------------------------------- #
@@ -345,19 +522,19 @@ def test_syn_ri_yticks_axis_relabel():
 
 
 def test_pin_to_six_ketone_anchors():
-    sep("[P1] 釘定：7 個候選 → 對齊 6 個甲基酮模板，多的 347.9 被忽略")
+    sep("[P1] 釘定：7 個候選 → 對齊 6 個酮的模板，多的 347.9 被忽略")
     expected = cal.template_from_series(
-        [282.0, 334.3, 400.3, 521.8, 697.0, 949.0], "methyl_ketone")
+        [282.0, 334.3, 400.3, 521.8, 697.0, 949.0], "ketone")
     assert [e["label"] for e in expected][:2] == ["2-butanone", "2-pentanone"]
     c, _ = cal.build_from_std_peaks(STD_141215, HDR_141215,
-                                    series_key="methyl_ketone",
+                                    series_key="ketone",
                                     expected_anchors=expected)
     asel = c["anchor_selection"]
     print(f"  anchor_mode={asel['mode']}  n={asel['n_clean_anchors']}  rt={asel['clean_rt_s']}")
     assert asel["mode"] == "pinned"
     assert asel["n_clean_anchors"] == 6                 # 固定為模板數，347.9 被丟
     assert 347.9 not in asel["clean_rt_s"]
-    # methyl_ketone 已有借用 RI → 絕對模式（provenance 帶 assumed_unverified）
+    # ketone 已有借用 RI → 絕對模式（provenance 帶 assumed_unverified）
     assert c["mode"] == "multi_point_loglinear"
     assert c["assumed_unverified"] is True
 
@@ -525,7 +702,7 @@ def test_syn_warp_rows_to_ri_linear():
     sep("[S9] warp_rows_to_ri：RT 均勻列 → RI 均勻列（RI 軸線性，非 log）")
     import numpy as np
     c = cal.build_calibration([282, 334.3, 400.3, 521.8, 697, 949],
-                              series_key="methyl_ketone")
+                              series_key="ketone")
     r2r = cal.make_rt_to_ri(c)
     row_rts = np.linspace(300, 940, 200)             # 均勻於 RT，落在錨點範圍內
     img = np.array([[r2r(t)[0]] for t in row_rts])   # 每列值＝該列的 RI，方便驗線性
@@ -549,3 +726,77 @@ def _run_all():
 
 if __name__ == "__main__":
     _run_all()
+
+
+# --------------------------------------------------------------------------- #
+# K0 校準：用 STD 已知化合物反推 instrument_constant（Stage 2 standard_based）
+# --------------------------------------------------------------------------- #
+_STD_K0 = [  # dt_index 為 141215_STD 實測；drift_relative 供認峰
+    {"dt_index": 839,  "drift_relative": 1.234, "intensity": 2498, "retention_s": 389.7},
+    {"dt_index": 922,  "drift_relative": 1.356, "intensity": 3230, "retention_s": 467.0},
+    {"dt_index": 1011, "drift_relative": 1.487, "intensity": 3189, "retention_s": 609.5},
+    {"dt_index": 1097, "drift_relative": 1.613, "intensity": 2927, "retention_s": 813.4},
+    {"dt_index": 1181, "drift_relative": 1.737, "intensity": 2213, "retention_s": 1107.2},
+    {"dt_index": 1261, "drift_relative": 1.854, "intensity": 1028, "retention_s": 1523.4},
+]
+_HDR_K0 = {"Start temp 1": "45 [°C]", "Start ambient pressure": "100.393 [kPa]",
+           "Start pressure EPC IMS": "1.450 [kPa]", "Chunk sample rate": "150 [kHz]",
+           "nom Drift Tube Length": "53000 [µm]",
+           "nom Drift Potential Difference": "2700 [V]"}
+
+
+def test_k0_instrument_constant_is_consistent_across_anchors():
+    """六個獨立化合物必須解出**同一個** instrument_constant。
+
+    這是整個 standard_based 校準成立的前提：若各點解出的 IC 分散，代表偏差不是單一
+    乘法因子（認錯峰／STD 有問題／參考 K0 與本儀器不同源），那時給出平均值只是製造
+    假的精確度——所以 max_cv 超標要回 usable=False，而不是硬給一個數。
+    """
+    s = rs.REFERENCE_SERIES["ketone"]
+    r = cal.derive_k0_instrument_constant(
+        _STD_K0, s["dt_values"], s["inv_k0_values"], 150.0, 2700.0)
+    assert r["usable"] is True
+    assert r["n_anchors"] == 6
+    assert r["cv"] < 0.01, f"六點解出的 IC 應高度一致，實得 CV={r['cv']:.3%}"
+    assert 24 < r["instrument_constant"] < 26
+
+
+def test_k0_calibration_removes_the_raw_parameters_bias():
+    """校準後殘差必須遠小於同系物間距，否則 K0 比對沒有分辨力。"""
+    import dt_convert as dtc
+    s = rs.REFERENCE_SERIES["ketone"]
+    prof, _ = cal.build_k0_profile_from_std(_STD_K0, _HDR_K0, series_key="ketone")
+    assert prof["k0_calibration"]["mode"] == "standard_based"
+
+    gap = 0.061          # 相鄰同系物 1/K0 平均間距（實測）
+    worst_cal = worst_raw = 0.0
+    for p, inv_ref in zip(_STD_K0, s["inv_k0_values"]):
+        cal_k0 = dtc.compute_k0(p["dt_index"], _HDR_K0, prof)[0]
+        raw_k0 = dtc.compute_k0(p["dt_index"], _HDR_K0,
+                                {"k0_calibration": {"mode": "raw_parameters"}})[0]
+        worst_cal = max(worst_cal, abs(1 / cal_k0 - inv_ref))
+        worst_raw = max(worst_raw, abs(1 / raw_k0 - inv_ref))
+    assert worst_cal < 0.1 * gap, f"校準後殘差應 <10% 間距，實得 {worst_cal / gap:.0%}"
+    assert worst_raw > 0.3 * gap, "raw_parameters 的偏差本就大到不可比對；若變小，前提要重查"
+
+
+def test_k0_derivation_rejects_inconsistent_anchors():
+    """參考 K0 亂掉時必須拒絕校準，不得回一個平均值。"""
+    s = rs.REFERENCE_SERIES["ketone"]
+    bad = list(s["inv_k0_values"])
+    bad[0] *= 1.5                       # 其中一點明顯不同源
+    r = cal.derive_k0_instrument_constant(_STD_K0, s["dt_values"], bad, 150.0, 2700.0)
+    assert r["usable"] is False and "離散" in r["reason"]
+
+
+def test_extract_raw_tp_sums_the_two_pressures():
+    """T/P 欄位對應（VOCal 反編譯確認）：壓力是 ambient + EPC 的**和**，不是二選一。"""
+    import dt_convert as dtc
+    tp, det = dtc.extract_raw_tp(_HDR_K0)
+    assert tp["T_C"] == 45.0
+    assert abs(tp["P_mbar"] - 10.0 * (100.393 + 1.450)) < 1e-9
+    assert tp["P_mbar"] > 1000, "取單一欄位會得到 1004 或 14.5，都不對"
+    assert det["T_field"] == "Start temp 1"
+    # 缺欄位要明確失敗，不猜
+    tp2, det2 = dtc.extract_raw_tp({"Start temp 1": "45"})
+    assert tp2 is None and det2["missing"]

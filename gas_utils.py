@@ -1,6 +1,6 @@
 """
 gas_utils.py  —  GC-IMS 專案共用小工具
-Version: 3.0 — by Albert Sheng
+Version: 3.1 — by Albert Sheng
 
 目前提供：
   - pick_mea_file(): 跳出檔案總管讓使用者選 .mea，預設開在本專案 GAS/ 資料夾。

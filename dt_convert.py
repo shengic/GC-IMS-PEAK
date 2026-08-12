@@ -1,6 +1,6 @@
 """
 dt_convert.py  —  GC-IMS Identify Workflow 第二階段：K0 換算
-Version: 3.0 — by Albert Sheng
+Version: 3.1 — by Albert Sheng
 
 依 GC-IMS_Identify_Workflow.md §第二階段（draft.13 定案）：
   - 雙模式設計，明確標記 provenance：
@@ -23,10 +23,43 @@ confirmed 表頭欄位（本輪 draft.09 實測 260625_141215_STD.mea 驗證）�
   U → 'nom Drift Potential Difference' (V, 直接使用)
   sample_rate_khz → 'Chunk sample rate' (kHz, 直接使用)
 
-unresolved 表頭欄位（不猜）：
-  T → 'Start temp 1'..'Start temp 6' 有六個候選，本輪實測值 45/60/80/80/45/off
-  P → 'Start pressure EPC IMS' 是否等於管內實際壓力尚未確認
-      （另有 'Start ambient pressure' ~ 100 kPa 亦為候選）
+✅ **T/P 欄位對應已解決（2026-08-12，VOCal 反編譯確認）**
+  先前列為 unresolved：六個 `Start temp` 不知哪個是漂移管、壓力該用 EPC 還是 ambient。
+  反編譯 `reporter.jar` 的 `BufferedMEA.java:313`（**未混淆的原廠程式碼**）：
+
+      k0Faktor = 273.0/(273.0 + startT1) * (10.0*(ambientPressure + EPC1_Start_Pressure)/1013.0)
+
+  對應到表頭：
+      T → **'Start temp 1'**（六個裡的第一個）
+      P → **10 x ('Start ambient pressure' + 'Start pressure EPC IMS')**  [kPa→mbar]
+
+  **關鍵在於壓力是「兩者相加」**，不是二選一——絕對壓力 = 環境壓力 + EPC 錶壓。
+  這就是為什麼單獨看 EPC 的 1.45 kPa 太小、單獨看 ambient 的 100.4 kPa 又缺一點。
+  實測 260625_141215_STD：T=45C、P=10x(100.393+1.450)=1018.4 mbar，代入後 RIP 的
+  K0=1.98 cm^2/V/s，落在反應離子 H+(H2O)n 的文獻範圍 2.0-2.3。
+  由 extract_raw_tp() 實作；compute_k0() 在呼叫端未給 raw_TP 時會自動取用。
+
+⚠ **但 raw_parameters 的 K0 仍不足以做比對**（標稱值 vs 實際狀態的殘留誤差已量化）：
+  拿六個已確認身分的酮對照原廠庫，raw_parameters 算出的 1/K0 系統性偏高 **+3.5%**
+  （六點一致，+3.2%~+3.6%）。而相鄰同系物的 1/K0 間距僅約 0.061——偏差 0.026 是間距的
+  **43%**，容許窗開到足以吸收偏差，就會同時收進隔壁碳數的化合物。
+  **結論：K0 比對必須走 standard_based。** 校準品已在手（STD 的六個酮，身分由經理
+  對照表確認、K0 由原廠庫提供），見 calibration.derive_k0_instrument_constant()：
+  六點解出的 instrument_constant CV=0.13%，校準後殘差 <0.25%（間距的 4% 以內）。
+
+✅ **已解決（2026-08-12）：兩個模式一律回傳 K0 本身**
+  舊版的 k0_from_raw_params() 回傳 1/K0 而 k0_from_instrument_constant() 回傳 K0，
+  兩者卻同寫進 peak["k0_value"]——同一台機器、同一顆峰，兩個模式的數字互為倒數。
+  外部佐證：gc-ims-tools 0.1.10（Food Chemistry 2022）的 Spectrum.calc_reduced_mobility()
+  用
+      K0 = L² · T₀ · p / (dt · Ud · T · p₀)      # 預設 L = 5.3 cm
+  引 Ahrens & Zimmermann, Anal Bioanal Chem 413, 1009–1016 (2021)。展開即
+  (T₀/T)·(p/p₀)·L²/(t·U)，與本模組同形，而**它回傳 K0，不是倒數**。（其預設 L=5.3 cm
+  也與本專案自表頭讀出的值一致，順帶驗證了 'nom Drift Tube Length' 的解析。）
+  故本模組統一為「一律回傳 K0」，取倒數的動作移到比對端**顯式**處理：
+  match.match_k0() 依 DtMode 判斷庫值是 K0 還是 1/K0，換算到 K0 空間再比。
+  舊行為的來源是 GC-IMS_Identify_Workflow.md §第二階段設計稿裡的 `return 1.0 / K0`，
+  該處已加更正註記。
 
 依賴：僅 Python stdlib + readGAS.hnum 共用工具（本模組不 import readGAS，僅
       在內部小型 helper 中複製 hnum 的邏輯，避免循環依賴）
@@ -55,6 +88,7 @@ def k0_from_instrument_constant(dt_raw, sample_rate_khz, instrument_constant, U)
     回傳
     ----
     K0 : float  reduced mobility (cm²/V/s)
+        與 k0_from_raw_params() 同單位、同慣例（皆為 K0 本身）。
     """
     t_d_s = (dt_raw / sample_rate_khz) / 1000.0   # kHz → s
     return instrument_constant / (t_d_s * U)
@@ -81,11 +115,13 @@ def k0_from_raw_params(dt_raw, sample_rate_khz, L_cm, T_C, P_mbar, U):
     回傳
     ----
     K0 : float  reduced mobility (cm²/V/s) — 帶已知殘留誤差
+        與 k0_from_instrument_constant() 同單位、同慣例（皆為 K0 本身）。
+        2026-08-12 前此處回傳 1.0/K0，造成兩個模式互為倒數；見檔頭說明。
+        庫值若為 1/K0（.iml 的 DtMode），由 match.match_k0() 換算，不在此處取倒數。
     """
     t_d_s = (dt_raw / sample_rate_khz) / 1000.0
     ah = (273.0 / (273.0 + T_C)) * (P_mbar / 1013.0)
-    K0 = ah * L_cm ** 2 / (t_d_s * U)
-    return 1.0 / K0
+    return ah * L_cm ** 2 / (t_d_s * U)
 
 
 # --------------------------------------------------------------------------- #
@@ -97,6 +133,43 @@ def _hnum(header, key, default=None):
         return default
     m = re.search(r"-?\d+\.?\d*", header[key])
     return float(m.group()) if m else default
+
+
+def extract_raw_tp(header):
+    """從表頭抽出 raw_parameters 模式需要的 T / P。
+
+    欄位對應由 VOCal `reporter.jar` 的 `BufferedMEA.java:313` 反編譯確認（見檔頭）：
+        T_C    = 'Start temp 1'
+        P_mbar = 10 × ('Start ambient pressure' + 'Start pressure EPC IMS')
+
+    壓力是**相加**（絕對 = 環境 + EPC 錶壓），不是二選一——這是先前卡住的關鍵。
+    VOCal 對壓力欄位接受多個別名，此處一併嘗試，取第一個找得到的。
+
+    回傳
+    ----
+    (raw_tp, detail) : (dict|None, dict)
+        raw_tp — {"T_C": float, "P_mbar": float}；任一項缺失則為 None
+        detail — 實際採用的欄位名與原始值，供 provenance
+    """
+    t_c = _hnum(header, "Start temp 1")
+    amb = next((_hnum(header, k) for k in
+                ("Start ambient pressure", "EPC ambient pressure")
+                if _hnum(header, k) is not None), None)
+    epc = next((_hnum(header, k) for k in
+                ("Start pressure EPC IMS", "EPC IMS pressure", "EPC1 pressure")
+                if _hnum(header, k) is not None), None)
+    detail = {"T_field": "Start temp 1", "T_C": t_c,
+              "ambient_kPa": amb, "epc_kPa": epc,
+              "formula": "P_mbar = 10 x (ambient + EPC)",
+              "source": "VOCal BufferedMEA.java:313 (decompiled 2026-08-12)"}
+    if t_c is None or amb is None or epc is None:
+        detail["missing"] = [n for n, v in
+                             (("Start temp 1", t_c), ("ambient pressure", amb),
+                              ("EPC pressure", epc)) if v is None]
+        return None, detail
+    p_mbar = 10.0 * (amb + epc)
+    detail["P_mbar"] = p_mbar
+    return {"T_C": t_c, "P_mbar": p_mbar}, detail
 
 
 def extract_confirmed_params(header):
@@ -214,10 +287,15 @@ def compute_k0(dt_raw, header, profile, raw_TP=None):
         if params["L_cm"] is None:
             return None, "missing_header_fields", "header 缺 nom Drift Tube Length"
         if raw_TP is None or raw_TP.get("T_C") is None or raw_TP.get("P_mbar") is None:
-            return None, "raw_parameters_missing_TP", (
-                "raw_parameters 模式需呼叫者顯式指定 T_C 與 P_mbar 來源"
-                "（workflow §第二階段列為 unresolved）"
-            )
+            # 2026-08-12 起改為自動取用：欄位對應已由 VOCal 反編譯確認，不再是猜測，
+            # 所以「要求呼叫者顯式指定」這道防呆已無意義（見檔頭）。表頭真的缺欄位
+            # 才失敗——那時仍明確標記，不靜默造假。
+            raw_TP, tp_detail = extract_raw_tp(header)
+            if raw_TP is None:
+                return None, "raw_parameters_missing_TP", (
+                    f"表頭缺少 T/P 欄位：{tp_detail.get('missing')}"
+                    f"（需 'Start temp 1' + ambient/EPC 壓力，見 extract_raw_tp）"
+                )
         k0 = k0_from_raw_params(
             dt_raw, params["sample_rate_khz"],
             params["L_cm"], raw_TP["T_C"], raw_TP["P_mbar"], params["U_V"],

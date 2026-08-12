@@ -28,6 +28,34 @@ def _tk_root_or_skip():
     return tk, root
 
 
+def _destroy(root):
+    """拆掉 Tk root，且不把 unraisable 例外洩漏給後面的測試。
+
+    `tkinter.Variable.__del__` 會回呼直譯器。`_render_match_panel` 建的那幾個
+    BooleanVar 掛在 `win._filter_vars` 上，如果 root 先被 destroy、它們才被 GC，
+    `__del__` 就會對著已死的直譯器丟
+    `RuntimeError: main thread is not in main loop`。Python 把它歸類為
+    **unraisable** 例外，pytest 則算到「當下正在跑的那個測試」頭上——所以本檔多加
+    一個 Tk 測試之後，失敗的是毫不相干的 test_subprocess。
+
+    做法：先清掉 widget 的 Python 端參照（`__dict__`，含 `_filter_vars`），在 root
+    還活著時 gc.collect() 讓那些 `__del__` 跑完，最後才 destroy root。
+    """
+    import gc
+    for w in list(root.winfo_children()):
+        # 只丟掉持有 BooleanVar 的那個屬性——清整個 __dict__ 會連 widget 自己的
+        # _w / tk / master 一起清掉，widget 就壞了（試過，4 個測試當場失敗）。
+        for attr in ("_filter_vars", "_refresh_candidates", "_tree"):
+            w.__dict__.pop(attr, None)
+        try:
+            w.destroy()
+        except Exception:
+            pass
+    gc.collect()          # Variable.__del__ 此時直譯器仍活著
+    root.destroy()
+    gc.collect()
+
+
 def _panel_shim(root):
     class _Shim:
         pass
@@ -80,7 +108,7 @@ def test_panel_defaults_to_combined_and_gc_toggle_reveals_gc_only():
         assert {r[1] for r in rows} == {"Ethanol", "Acetone"}
         assert all(r[0] == "GC" for r in rows)
     finally:
-        root.destroy()
+        _destroy(root)
 
 
 def test_panel_combined_dedups_and_labels():
@@ -100,7 +128,7 @@ def test_panel_combined_dedups_and_labels():
         assert len(rows) == 1
         assert tree.item(rows[0], "values")[0] == "GC+IMS"
     finally:
-        root.destroy()
+        _destroy(root)
 
 
 def test_panel_opens_with_no_candidates():
@@ -114,7 +142,7 @@ def test_panel_opens_with_no_candidates():
         assert len(tops) == 1
         assert len(_tree_in(tops[0]).get_children()) == 0
     finally:
-        root.destroy()
+        _destroy(root)
 
 
 def test_autofill_populates_gc_column_without_trigger():
@@ -169,7 +197,7 @@ def test_autofill_populates_gc_column_without_trigger():
         assert gc.startswith("726")                          # matched RI value shown
         assert "Ethanol" not in gc                           # value, not name
     finally:
-        root.destroy()
+        _destroy(root)
 
 
 def test_selection_highlight_survives_redraw():
@@ -214,7 +242,7 @@ def test_selection_highlight_survives_redraw():
         app._draw_peak_circles()
         assert not app.main_canvas.find_withtag("highlight")
     finally:
-        root.destroy()
+        _destroy(root)
 
 
 def test_one_match_window_per_peak():
@@ -232,6 +260,7 @@ def test_one_match_window_per_peak():
         app._match_windows = {}
         app._render_match_panel = GCIMSApp._render_match_panel.__get__(app, _Shim)
         app._open_compound_match_panel = GCIMSApp._open_compound_match_panel.__get__(app, _Shim)
+        app._raise_window = GCIMSApp._raise_window          # staticmethod
 
         result = {"gc_dimension": "ri", "gc_matches": [], "ims_matches": [],
                   "combined_matches": []}
@@ -250,7 +279,31 @@ def test_one_match_window_per_peak():
         root.update()
         assert 1 not in app._match_windows
     finally:
-        root.destroy()
+        _destroy(root)
+
+
+def test_raise_window_does_not_leave_the_panel_pinned_on_top():
+    """re-click ▶ 必須把既有面板抬到前景，但**不能**讓它永久置頂。
+
+    Windows 上 lift()+focus_set() 抬不動被其他 Toplevel 蓋住的視窗（前景鎖定），
+    所以改用 -topmost 開→關 的手法。這裡鎖住的是「關」那一半：忘了關掉的話，
+    比對面板會永遠浮在主視窗上面，使用者無法把它推到背景——那是比原本的 bug
+    更難忍受的行為，而且很容易在重構時被順手刪掉。
+    """
+    tk, root = _tk_root_or_skip()
+    try:
+        win = tk.Toplevel(root)
+        root.update()
+        GCIMSApp._raise_window(win)
+        assert bool(win.attributes("-topmost")) is True, "抬升當下應暫時置頂"
+        root.update()                      # 讓 after_idle 執行
+        assert bool(win.attributes("-topmost")) is False, "抬升後必須取消置頂"
+        assert win.winfo_exists()
+        # 視窗已銷毀時不得拋例外（winfo_exists 與呼叫之間可能被關掉）
+        win.destroy()
+        GCIMSApp._raise_window(win)
+    finally:
+        _destroy(root)
 
 
 if __name__ == "__main__":
@@ -261,3 +314,36 @@ if __name__ == "__main__":
     test_selection_highlight_survives_redraw()
     test_one_match_window_per_peak()
     print("✓ match-panel render + autofill + highlight + dedup checks passed")
+
+
+def test_peak_view_is_the_default_when_results_exist():
+    """選 .mea 後主畫面應直接是帶圈的峰圖，不是原始熱圖。
+
+    使用者明確要求的行為決策，很容易在重構載入流程時退化回「停在原始熱圖、
+    等使用者再按一次按鈕」。這裡只驗分支：有現成結果 → 切峰畫布；沒有 → 不切、
+    且狀態列要說清楚該按哪個按鈕（**不自動觸發偵測**，那是 workflow §第八階段
+    的既有決策，約 90 秒的靜默等待會讓人以為程式當掉）。
+    """
+    class _Shim:
+        pass
+
+    for has_results, expect_switch in ((True, True), (False, False)):
+        app = _Shim()
+        app._loaded = []
+        app._shown = []
+        app._load_existing_peaks = lambda b: (app._loaded.append(b), has_results)[1]
+        app._show_peak_canvas = lambda: app._shown.append(True)
+
+        class _L:
+            def __init__(self): self.texts = []
+            def config(self, **k): self.texts.append(k.get("text", ""))
+        app.status_label = _L()
+        app._show_peaks_if_available = GCIMSApp._show_peaks_if_available.__get__(app, _Shim)
+
+        got = app._show_peaks_if_available("sample_1")
+        assert got is expect_switch
+        assert app._loaded == ["sample_1"]
+        assert bool(app._shown) is expect_switch
+        if not has_results:
+            assert "Show Detected Peak Heatmap" in app.status_label.texts[-1], \
+                "沒有現成結果時，必須告訴使用者要按哪個按鈕"
