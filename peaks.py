@@ -668,6 +668,14 @@ def main():
                     help="兩峰最小像素間距，去重用 (預設 3)")
     ap.add_argument("--top-n", type=int, default=0,
                     help="只保留突出度前 N 個峰 (預設 0=全部)")
+    ap.add_argument("--baseline", action="store_true",
+                    help="沿保留時間方向做 AsLS 基線扣除（預設關閉）。實測對最終峰集"
+                         "影響很小，但會大幅降低候選池雜訊；峰體積積分需要它")
+    ap.add_argument("--baseline-lam", type=float, default=None,
+                    help="基線平滑度 λ（預設見 baseline.DEFAULT_LAM，由本批最寬的"
+                         "峰決定；太小會把寬峰當基線吃掉）")
+    ap.add_argument("--baseline-stride", type=int, default=8,
+                    help="每 n 列取樣求基線再內插回去 (預設 8，全圖約 16s；1 則約 107s)")
     ap.add_argument("--bg-only", action="store_true",
                     help="只從 .npz 重畫互動畫布的背景圖 (<名>_bg.png + _bg.json)，"
                          "不做找峰。約 5 秒，用於 .npz 還在但圖檔被刪掉的情況")
@@ -687,6 +695,11 @@ def main():
                          "x 軸 drift 正規化不受影響")
     ap.add_argument("--ri-start-carbon", type=int, default=None)
     args = ap.parse_args()
+    if args.baseline_lam is None:
+        # 預設值放在 baseline.py，這裡不複製一份數字——λ 是量測出來的，
+        # 兩處各寫一個就會有一處先過時
+        import baseline as _bl
+        args.baseline_lam = _bl.DEFAULT_LAM
 
     try:
         fw, fh = (float(x) for x in args.figsize.lower().split("x"))
@@ -702,6 +715,20 @@ def main():
 
     print(f"載入：{path}")
     intensity, drift_ms, retention_s, meta = load_surface(path)
+
+    # 保留時間方向的基線扣除（選用）。**預設關閉**：實測對最終峰集影響很小
+    # （47→46 顆、六個錨點全數保留、突出度門檻 98.5→98.1），因為突出度本來就是
+    # 相對量，緩慢變化的基線會把峰頂與鞍點抬起相同的量而互相抵銷。開啟後真正改變
+    # 的是候選池——floor 由 218.6 降到 64.2、原始局部極大由 27.7 萬降到 19.2 萬。
+    # 對日後的峰體積積分（定量）則是必要前處理：不扣基線的積分會把基座一起算進去。
+    baseline_info = None
+    if getattr(args, "baseline", False):
+        import baseline as _bl
+        print(f"基線扣除（AsLS, λ={args.baseline_lam:g}, stride={args.baseline_stride}）…")
+        intensity, baseline_info = _bl.correct_rt_baseline(
+            intensity, lam=args.baseline_lam, row_stride=args.baseline_stride)
+        print(f"  基線中位 {baseline_info['baseline_median']:.1f}，"
+              f"最大 {baseline_info['baseline_max']:.0f}")
     print(f"強度面 shape={intensity.shape} dtype={intensity.dtype}")
 
     # 第一階段：RIP 正規化（先做，fail-fast；且必須逐檔案獨立算，
@@ -796,6 +823,10 @@ def main():
     geom = write_bg(intensity, drift_ms, retention_s, out, rip_index=rip_index,
                     cmap=args.cmap, figsize=figsize, dpi=args.dpi,
                     ri_calibration=ri_calibration)
+    # 有無扣基線的 _peaks.json 外觀完全一樣，強度與突出度卻是不同基準——不記下來
+    # 就無從分辨，正是 rt_axis_version 要防的那種靜默混用。
+    params = dict(params)
+    params["baseline"] = baseline_info      # None 表示未扣
     write_json(peaks, out + "_peaks.json", params, stats, meta, intensity.shape,
                geom=geom)
     print(f"完成：基準 {len(peaks)} 個峰，其中 {len(active_peaks)} 個通過規則。"
