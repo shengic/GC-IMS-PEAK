@@ -507,51 +507,68 @@ by the user still pending.
 
 ---
 
-## Key files (this session's additions in **bold**)
+## Key files (refreshed at v3.1 — the annotations below were years of "NEW" tags)
 
 ```
 F:/GC-IMS-PEAK/
-├── main.py                   # Tk UI (Batch 1 applied)
-├── peaks.py                  # ver.03 (integrates rip.py)
-├── readGAS.py                # unchanged this session
-├── peak_with_number.py       # ver.02 (OOM fix applied)
-├── gas_utils.py              # unchanged
-├── rules_config.json         # NEW (draft.14) — R001-R006 enabled/params
-├── rip.py                    # NEW — stage 1 (RIP normalization)
-├── dt_convert.py             # NEW — stage 2 (K0 conversion)
-├── library.py                # NEW — stage 3 (.ril/.iml readers, resolve_data_dir)
-├── rules.py                  # NEW — stage 7 (rule engine + R001-R005)
-├── match.py                  # NEW — stage 5 (tolerance-window match)
-├── identify.py               # NEW — stage 6 (integration CLI)
-├── library_data/             # NEW — 646 .ril + 7 .iml copied from VOCal (gitignored)
-├── ui_settings.json          # NEW — user library_dir persisted (gitignored)
-├── GC-IMS_Identify_Workflow.md   # authoritative spec (draft.13)
-├── Report_Content_Example.md     # stage 11 content spec
-├── status.md                     # THIS FILE
-└── test/
-    ├── test_rip.py           # NEW
-    ├── test_dt_convert.py    # NEW
-    ├── test_library.py       # NEW
-    ├── test_rules.py         # NEW
-    ├── test_match.py         # NEW
-    ├── test_identify.py      # NEW
-    ├── test_select_from_maxima.py  # NEW (draft.14) — locks "R004/R006 must
-    │                               #   run before the prominence gate"
-    ├── test_state_machine.py # updated for new toolbar
-    └── (existing tests)      # test_file_operations / test_peak_table / test_subprocess / test_ui_validators
+├── CLAUDE.md                 # auto-loaded every session; points here. Keep short
+├── main.py                   # Tk UI — batches 1–7 done, 8 (Report) pending
+├── readGAS.py                # .mea parser + RT_AXIS_VERSION (the (averages+1) fix)
+├── peaks.py                  # detection, _bg.png/_bg.json, _maxima.npz, --bg-only
+├── peak_with_number.py       # static numbered overlay (report export, not the canvas)
+├── gas_utils.py              # file-picker + path resolution
+├── rip.py                    # stage 1 — RIP normalization
+├── dt_convert.py             # stage 2 — K0 (extract_raw_tp from VOCal decompilation)
+├── library.py                # stage 3 — .ril/.iml readers, resolve_data_dir
+├── calibration.py            # stage 4 — RT→RI, K0 instrument constant, axis_explanation
+├── reference_series.py       # stage 4 — hardcoded ketone table + 1/K0 reference
+├── match.py                  # stage 5 — 2-D tolerance-window match
+├── identify.py               # stage 6 — integration CLI, load_libraries (shared w/ UI)
+├── rules.py                  # stage 7 — R001–R006, mandatory-rule enforcement
+├── rules_config.json         # per-rule enabled/params
+├── kintonemixed-C4-C9.xlsx   # authoritative source for RI values + anchor Dt
+├── library_data/             # 646 .ril + 7 .iml from VOCal (gitignored)
+├── ui_settings.json          # user library_dir (gitignored)
+├── results/                  # all artefacts (gitignored)
+├── GAS/                      # raw .mea — never modified or deleted by this project
+└── test/                     # 165 tests
+    ├── test_rt_axis.py            # locks the (averages+1) formula + version marker
+    ├── test_select_from_maxima.py # locks "R004/R006 before the prominence gate"
+    ├── test_calibration.py        # stage 4, incl. the anchor off-by-one evidence
+    └── test_{rip,dt_convert,library,rules,match,identify,peak_table,
+        peak_selection,match_panel,state_machine,subprocess,ui_ri,
+        ui_validators,file_operations}.py
 ```
+
+Docs: `CLAUDE.md` → `status.md` (this file) → `GC-IMS_Identify_Workflow.md`
+(design authority, draft.26) → `GC-IMS_Pipeline_Implementation.md` (artefacts,
+CLI) / `UI.md` (Tk spec) / `ketone_RI_provenance.md` (where the RI numbers came
+from). `GC-IMS_Peak_Finding_Workflow.md` is the original image-mode blueprint;
+its founding premise no longer holds and it is kept only as a methodology record.
 
 Total test count: **165 pass in ~9 s** (all under `pytest test/`).
 
-Recent tests added this session:
-- `test/test_state_machine.py`: `TestSettingsPersistence` (Batch 1 settings I/O)
-- `test/test_peak_table.py`: `TestCellValueLogic` (Batch 2 cell rendering)
-- `test/test_select_from_maxima.py`: 5 checks (draft.14). The load-bearing one is
-  `test_r004_before_gate_lowers_threshold` — it fails if anyone moves the
-  mandatory rules back to post-detection filtering.
-- `test/test_rules.py`: `test_mandatory_rules_cannot_be_disabled` (covers
-  `enabled:false`, whole entry deleted, and params-not-forced) and
-  `test_r006_excludes_faster_than_rip`.
+> **Intermittent skips are expected, not a regression.** Several tests call
+> `pytest.skip` when their inputs are absent — `test_identify.py` and
+> `test_library.py` need the real `.mea` / `library_data/`, `test_match_panel.py`
+> needs a Tk display. Running the suite *while a detection batch is rewriting
+> `results/`* will show 1–2 skips that vanish on re-run. Seen twice on
+> 2026-08-12; both times a plain re-run gave a clean 165. If you see a skip,
+> re-run before investigating.
+
+The load-bearing tests — these encode decisions that were expensive to reach, so
+a failure here means someone has undone a fix, not that the test is wrong:
+- `test_rt_axis.py` — the `(averages+1)` retention step, the version marker, and
+  that RI is invariant under the axis change.
+- `test_select_from_maxima.py::test_r004_before_gate_lowers_threshold` — fails if
+  the mandatory rules move back to post-detection filtering.
+- `test_calibration.py::test_ketone_dt_values_expose_the_anchor_off_by_one` —
+  keeps the arithmetic showing *why* the spacing heuristic was dropped, so any
+  attempt to reinstate it meets the counter-evidence.
+- `test_rules.py::test_mandatory_rules_cannot_be_disabled` — covers
+  `enabled:false`, a deleted entry, and params-not-forced.
+- `test_dt_convert.py::test_both_modes_return_the_same_quantity` — locks the K0 /
+  1÷K0 fix; both modes must return K0.
 
 ---
 
@@ -704,11 +721,17 @@ Working style preferences the user reinforced this session:
 
 ## Where a next session should look first
 
+0. **`CLAUDE.md`** — loaded automatically, so you have already read it. It exists
+   only to point here and to carry the handful of invariants that are expensive
+   to rediscover (axis convention, the `(averages+1)` retention step, mandatory
+   rules before the prominence gate, peak state keyed by coordinates, `.npz`
+   carrying `mea_source`). **Keep it short**: details belong in this file, and
+   duplicating them means one copy goes stale.
 1. **This file** (`status.md`) for current position.
 2. **`GC-IMS_Identify_Workflow.md`** for the authoritative spec — especially
    the "待實作清單" section at the bottom.
 3. If UI: read the Batch table above; pick the next unstarted batch.
-4. If CLI: check the three open decisions; if user has resolved any, wire
+4. If CLI: check the open decisions; if the user has resolved any, wire
    that into the corresponding module.
 
 *(Batches 3, 4 and 6 were listed here as "next" in earlier revisions; all three
