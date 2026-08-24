@@ -46,7 +46,35 @@ progress tracker, not the design.
 - **Retention-time baseline correction exists but is off by default** —
   `peaks.py --baseline` (AsLS). See the entry immediately below.
 
-### What changed on 2026-08-24 (latest) — RI without an STD, from the folder's own `.gasprj`
+### 2026-08-24 (latest) — evidence that the supplier RI table is a polar scale; **no code changed**
+
+**Documentation-only entry.** Reading `.gasprj` for the v3.3 RI tier surfaced a
+`Compounds` block — operator-annotated peaks with CAS, RI, Rt, drift, and the
+instrument serial. It bears directly on open decision 3a, which had been waiting
+on the manager since 2026-08-12.
+
+The short version: **two instruments running the same SE-54 phase carry RI scales
+differing by +283 to +654 on seven shared compounds, and the size of the gap
+tracks each compound's polarity** — ester +283 through to furan aldehyde +654.
+A constant offset would mean a mis-set calibration; a polarity-ordered one is the
+signature of a different stationary phase. The supplier table sits on the higher
+(polar-looking) scale; the other instrument ran the same ketone standard ~300
+lower, at exactly the `[589.4 … 1095.6]` values this project borrowed and then
+discarded in draft.24.
+
+**The user was shown this and chose to keep `library_data/` and the supplier
+table unchanged, explicitly declining code changes off the back of the
+`.gasprj`/`.mea` findings.** Nothing was modified — not `ri_values`, not anchor
+selection, not library selection. Full analysis in `ketone_RI_provenance.md` §2
+(four numbered pieces of evidence); consequences in open decisions 3a and **9**
+(the RI scale and the `.ril` library polarity currently disagree).
+
+Two things a future session should not have to rediscover: the discrepancy is
+**not** a constant, so no single correction fixes it; and the evidence being
+strong is *not* the same as the question being closed — the user decided to hold,
+which is a different state from "unknown".
+
+### What changed on 2026-08-24 — RI without an STD, from the folder's own `.gasprj`
 
 **Follow-on from the entry below.** Once it was clear `藝妓咖啡` could only produce
 RT matches, the question became whether RI is obtainable there at all. **From the
@@ -915,6 +943,42 @@ These are things I cannot resolve — user needs to decide or provide data.
    needed from whoever produced the table. Until then `assumed=True` /
    `confidence="supplier_table_column_polarity_unverified"`.
 
+   > **📌 2026-08-24 — strong internal evidence now says "polar". Behaviour
+   > deliberately unchanged.** Reading the `.gasprj` files for the v3.3 RI tier
+   > turned up a `Compounds` block: operator-annotated peaks in `.iml` row format
+   > with CAS, RI, Rt, drift, plus the instrument serial. Four findings:
+   >
+   > 1. **Two instruments, same stationary phase, scales differing by +283…+654.**
+   >    `5H4-00123` (`FS-SE-54-CB-1`) and `1H1-00088` (`FS-SE54-CB-0.5`) are both
+   >    SE-54 — length and bore do not move RI. Seven compounds matched by CAS
+   >    disagree by hundreds of units.
+   > 2. **The size of Δ tracks polarity**: ester +283 → ketone +315 → cyclic
+   >    ketone +395 → sec-alcohol +404 → prim-alcohol +501 → aromatic aldehyde
+   >    +567 → furan aldehyde +654. A constant offset would mean a mis-set
+   >    calibration; a polarity-ordered one is the signature of a *different
+   >    phase*. This argument needs no external reference.
+   > 3. **The supplier table and the `5H4-00123` project are one scale, not two
+   >    witnesses** — Coffee-bean's VOCal curve reproduces the six ketone values
+   >    to within ±4.4 RI.
+   > 4. **The other instrument ran the same ketone standard ~300 lower** — 鱸魚's
+   >    six anchors are exactly the `[589.4 … 1095.6]` this project borrowed and
+   >    then discarded in draft.24, and 藝妓咖啡's independent 2-butanone
+   >    annotation (594.3) agrees with them.
+   >
+   > Literature (approximate, from general knowledge — worth spot-checking two)
+   > puts all seven pairs on the same side: `1H1-00088` non-polar, `5H4-00123`
+   > polar.
+   >
+   > **The user was shown this on 2026-08-24 and chose to keep `library_data/`
+   > and the supplier table as-is, explicitly declining code changes off the back
+   > of the `.gasprj`/`.mea` findings.** So `ri_values`, anchor selection and
+   > library selection are all **untouched**. This entry records evidence, not a
+   > change. Full analysis in `ketone_RI_provenance.md` §2.
+   >
+   > Two consequences worth knowing: **a constant correction cannot fix it**
+   > (283→654, compound-dependent), and it leaves the RI scale and the library
+   > polarity disagreeing — see open decision 9.
+
    **3b. ~~Anchor selection picks the wrong six~~ — ✅ FIXED.** Replaced the
    spacing heuristic with `match_anchors_by_dt()`; see the 2026-08-12 entry above.
    Anchors are now `[389.7, 467.0, 609.5, 813.4, 1107.2, 1523.4]`. Action still
@@ -1023,6 +1087,36 @@ These are things I cannot resolve — user needs to decide or provide data.
    registry entry whenever `batch_own_std` succeeds would be the natural place — or
    delete it. Leaving a tested-but-unreachable tier in the resolution chain invites
    someone to assume it works.
+
+9. **The RI scale and the `.ril` library polarity currently disagree.**
+   (new 2026-08-24 — a decision for the user; **no code changed**)
+
+   Matching compares a peak's RI against a library's RI, and both must be on the
+   same scale for the comparison to mean anything. Right now they are not:
+
+   - **peak RI** comes from the supplier ketone table, which the evidence in
+     decision 3a points to being a **polar** scale;
+   - **library RI** comes from `.ril` files chosen by the header's
+     `POLARITY: np` — deliberately **non-polar** (`AVERAGE LOW POLAR`, DB-5,
+     HP-5 …).
+
+   A ±5 hit across two different scales lands on whatever compound's non-polar RI
+   happens to equal this peak's polar RI — a *different* compound than the right
+   answer, and reliably rather than noisily. This is not something v3.3
+   introduced: it has been latent since draft.24 swapped the RI values, and only
+   became visible once the `.gasprj` evidence identified the scale.
+
+   Two self-consistent options. **Both are essentially one-line changes, and
+   neither should be made without the user choosing:**
+
+   | keep | would change | effect |
+   |---|---|---|
+   | supplier RI (current) | select **polar** `.ril` (`Full_Polar`, `NIST2020 RI DB-Wax`, `Standard polar`) | query and reference on one scale; contradicts the column header |
+   | non-polar libraries (current) | the RI values | contradicts the user's 2026-08-24 decision |
+
+   **Status: the user has chosen to keep both as they are for now.** Recorded so
+   the inconsistency is known in advance rather than inferred later from bad
+   matches.
 
 ---
 
