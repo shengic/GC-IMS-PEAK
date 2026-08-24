@@ -62,9 +62,15 @@
 (PowerShell 與 bash 皆可直接執行):
 
 ```bash
-.venv/Scripts/python.exe -m pytest test/ -q     # 全套測試(現 238 項,約 9 s;冷啟動約 20 s)
+.venv/Scripts/python.exe -m pytest -q           # 全套 238 項(test/ 194 + test2/ 44)
+.venv/Scripts/python.exe -m pytest test/ -q     # 只跑第一支應用
+.venv/Scripts/python.exe -m pytest test2/ -q    # 只跑第二支應用
 .venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
+
+**測試分兩個根目錄**：`test/` 是第一支應用、`test2/` 是第二支應用。`pytest.ini` 的
+`testpaths` 讓**光打 `pytest` 就兩邊都收**——這是防呆：舊文件寫的是 `pytest test/`，
+照那個跑會靜靜漏掉 44 項而毫無徵兆。
 
 `results/` 已 gitignore。**`GAS/` 底下的 `.mea` 與 `.gasprj` 任何程式都不得修改或
 刪除**(後者存著 RI 校正表,見上)。

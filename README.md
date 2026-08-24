@@ -181,7 +181,8 @@ than `peak_id`, which is reassigned whenever the baseline moves.
 | `peak_with_number.py` | static numbered image for the report (not the canvas) |
 | `gas_utils.py` | file-picker helpers |
 | `rules_config.json` | per-rule `enabled` + params |
-| `test/` | pytest suite (238 tests) |
+| `test/` | pytest suite, first app (194 tests) |
+| `test2/` | pytest suite, second app (44 tests) |
 
 ### Output files (per `.mea`, written to `results/`)
 
@@ -213,8 +214,14 @@ so measurement data never gets committed.
 ## Testing
 
 ```bash
-pytest test/ -q
+pytest -q            # everything: test/ (194) + test2/ (44)
+pytest test/  -q     # first app only
+pytest test2/ -q     # second app only
 ```
+
+Tests live in two roots — `test/` for the first app, `test2/` for the second
+(`areas2.py` / `main2.py`). `pytest.ini` sets `testpaths` so a bare `pytest`
+collects both; running `pytest test/` alone would silently skip 44 tests.
 
 238 tests cover the rule engine and mandatory-rule enforcement, the selection
 funnel and its ordering constraint, peak selection state and its coordinate

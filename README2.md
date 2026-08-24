@@ -128,8 +128,8 @@ results/<folder>_area_matrix2.csv   矩陣（UTF-8 BOM，Excel 直接開）
 |---|---|
 | `areas2.py` | 邏輯，headless，可 CLI 執行 |
 | `main2.py` | Tk 介面 |
-| `test/test_areas2.py` | 邏輯測試（31 項） |
-| `test/test_main2.py` | 介面測試（13 項，需 Tk display） |
+| `test2/test_areas2.py` | 邏輯測試（31 項） |
+| `test2/test_main2.py` | 介面測試（13 項，需 Tk display） |
 | `Area_Matrix2.md` | 設計與實作細節 |
 | `status2.md` | 進度與交接 |
 | `README2.md` | 本檔 |
