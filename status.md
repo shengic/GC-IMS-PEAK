@@ -646,15 +646,15 @@ in the editor while another process is editing it.
 |---|---|---|---|---|
 | 0 | RT baseline correction | `baseline.py` | **Done — opt-in, off by default** | Not a workflow stage; it runs before stage 1 when `peaks.py --baseline` is given. AsLS per drift channel, λ=1e11 measured on this batch's widest peak (**not** gc-ims-tools' 1e7, which eats σ≈222-row peaks). Effect on the final peak set is small (47→46) because prominence is already relative; it changes the candidate pool (floor 218.6→64.2) and is a prerequisite for peak-volume integration. Parameters recorded in `_peaks.json` `params["baseline"]`. |
 | 1 | RIP normalization | `rip.py` | Done | `find_rip()` + `attach_drift_relative()`. Integrated into `peaks.py` ver.03. RIP found at dt_index=680 (4.53 ms) on the test .mea. |
-| 2 | K0 conversion | `dt_convert.py` | **Done — constant derived; not yet wired into the folder cache** | Three modes: `standard_based` / `raw_parameters` / `unavailable`. T/P field mapping **resolved** via VOCal decompilation (`extract_raw_tp()`: `Start temp 1`; pressure = 10×(ambient + EPC)), so `raw_parameters` now runs unaided — but lands +3.5% off, unusable for matching. `standard_based` is the usable path: `calibration.derive_k0_instrument_constant()` gives **IC = 25.0808, CV 0.133%** from the STD against `GAS BASE 3H_IMS K0.iml`. Remaining gap: the profile is not produced by `resolve_ri_calibration()`'s folder/cache path, so the UI still reports `k0_mode=unavailable`. |
-| 3 | Library readers | `library.py` | Done | `.ril` 21 cols / `.iml` 16 cols. `source_file` provenance auto-propagates via dict copy. `resolve_data_dir()` priority chain: explicit arg → `GCIMS_LIBRARY_DIR` env → `<PROJECT>/library_data/` → legacy VOCal folder → None. **Selection is deliberately asymmetric**: `.ril` is column-specific (RI depends on the stationary phase), `.iml` is not (RIPrel drift is instrument-level) → all `.iml` are loaded. Drift-gas cross-check applied row-level, conservatively (only rows tagged as another gas are dropped; untagged kept — 39 of 201 RIPrel rows carry no tag). Both CLI and UI go through `identify.load_libraries()`. |
-| 4 | RT→RI conversion | `calibration.py` + `reference_series.py` | **Done — values from the supplier table; column polarity unverified** | Anchors selected by **`match_anchors_by_dt()`** against the table's `Dt` (6/6, mean \|Δ\| 0.00273, RT-vs-carbon monotonicity checked), replacing the DT_rel spacing heuristic which picked the wrong six. `log10(RT)` piecewise-linear interp (extrapolate+flag), **4-tier** folder resolution + cache (STD → the folder’s own `.gasprj` `RI_Normalization` table → registry → unavailable). STD = C4–C9 2-alkanones (CAS-confirmed). RI values are the manager's table; `assumed_unverified` now flags **column polarity**, not identity (see `ketone_RI_provenance.md`). Wired into `identify.py` + UI; heatmaps show a linear RI y-axis; `axis_explanation()` backs the UI's ⓘ dialog. |
-| 5 | Tolerance-window match | `match.py` | Done — **now 2-D** | `gc_matches` / `ims_matches` / `combined_matches` (intersect by CAS). GC = RI (or Rt fallback). **IMS now works without K0**: `match_drift_rel()` compares `peak.drift_relative` vs library `Dt[a.u.]` where `DtMode=="RIPrel"` (drift relative to RIP — same quantity peaks carry). `match_all` prefers K0 if `k0_value` present, else RIPrel; reports `ims_dimension`. Combined = agree on both axes → collapses hundreds of RI-only hits to a few. Tolerances placeholder (RI ±5, Rt ±5s, drift ±0.05, K0 ±0.05); `identify.py --drift-tol` overrides the drift one. |
+| 2 | K0 conversion | `dt_convert.py` | **Done — wired end-to-end (v3.2)** | Three modes: `standard_based` / `raw_parameters` / `unavailable`. T/P field mapping **resolved** via VOCal decompilation (`extract_raw_tp()`: `Start temp 1`; pressure = 10×(ambient + EPC)), so `raw_parameters` runs unaided — but lands +3.5% off, unusable for matching. `standard_based` is the usable path: `calibration.derive_k0_instrument_constant()` gives **IC = 25.0808, CV 0.133%** from the STD against `GAS BASE 3H_IMS K0.iml`. `resolve_calibrations_cached()` produces the profile alongside RI from the same STD, and both `identify.py` and the UI use it — measured `k0_mode=standard_based` on all 37 STD peaks, IMS match dimension flips RIPrel → `{'k0': 37}`. **No registry-borrowing tier by design**: `instrument_constant` is tied to this machine's drift-tube geometry and voltage. *(This row previously said "not yet wired / UI reports unavailable" — that was already false when v3.2 landed and contradicted open decision 2 below.)* |
+| 3 | Library readers | `library.py` | Done | `.ril` 21 cols / `.iml` 16 cols. `source_file` provenance auto-propagates via dict copy. `resolve_data_dir()` priority chain: explicit arg → `GCIMS_LIBRARY_DIR` env → `<PROJECT>/library_data/` → legacy VOCal folder → None. **Selection is deliberately asymmetric**: `.ril` is column-specific (RI depends on the stationary phase), `.iml` is not (RIPrel drift is instrument-level) → all `.iml` are loaded. Drift-gas cross-check applied row-level, conservatively (only rows tagged as another gas are dropped; untagged kept — 39 of 201 RIPrel rows carry no tag). Both CLI and UI go through `identify.load_libraries()`. **v3.3**: `infer_polarity_from_column_name()` supplies the polarity when the `GC Column` header has no `POLARITY:` field (older layout, e.g. `FS-SE54-CB-0.5, 15m x 0,32ID`) — without it the polarity fallback never fired and the folder silently loaded **0 `.ril` rows** (measured 0 → 13 files / 117,329 rows). Explicit header values always win; `polarity_source` records which it was. |
+| 4 | RT→RI conversion | `calibration.py` + `reference_series.py` | **Done — 4 tiers; STD values from the supplier table, column polarity unverified** | Anchors selected by **`match_anchors_by_dt()`** against the table's `Dt` (6/6, mean \|Δ\| 0.00273, RT-vs-carbon monotonicity checked), replacing the DT_rel spacing heuristic which picked the wrong six. `log10(RT)` piecewise-linear interp (extrapolate+flag), **4-tier** folder resolution + cache (STD → the folder’s own `.gasprj` `RI_Normalization` table → registry → unavailable). STD = C4–C9 2-alkanones (CAS-confirmed). RI values are the manager's table; `assumed_unverified` now flags **column polarity**, not identity (see `ketone_RI_provenance.md`). Wired into `identify.py` + UI; heatmaps show a linear RI y-axis; `axis_explanation()` backs the UI's ⓘ dialog. **v3.3**: folders with no STD now get RI from their own `.gasprj` `RI_Normalization` table (`vocal_project_table`, ranked above registry borrowing because it is *this* batch's scale) — measured `藝妓咖啡` 182 anchors, `鱸魚` 6. Negative-RI extrapolation at the short-RT end trimmed at the Kovats floor (methane = 100, a definitional line, not a tuned threshold). |
+| 5 | Tolerance-window match | `match.py` | Done — **now 2-D** | `gc_matches` / `ims_matches` / `combined_matches` (intersect by CAS). GC = RI, **or the Rt fallback when no RI calibration exists** — that fallback is *not* transferable across instrument/column/method and the UI now says so (see the v3.3 entry above); it used to render under a "GC (RI)" heading. **IMS now works without K0**: `match_drift_rel()` compares `peak.drift_relative` vs library `Dt[a.u.]` where `DtMode=="RIPrel"` (drift relative to RIP — same quantity peaks carry). `match_all` prefers K0 if `k0_value` present, else RIPrel; reports `ims_dimension`. Combined = agree on both axes → collapses hundreds of RI-only hits to a few. Tolerances placeholder (RI ±5, Rt ±5s, drift ±0.05, K0 ±0.05); `identify.py --drift-tol` overrides the drift one. |
 | 6 | Integration | `identify.py` | Done | CLI-runnable. Full pipeline: peaks.json → header → K0 → rules → library → match → `_peaks_identified.json`. Provenance carried through (`k0_mode`, `source_file`, `match_dimensions`, `gc_dimension`). |
 | 7 | Rule engine | `rules.py` | Done | R001–**R006** registered. Three rule types (per_peak / per_peak_with_context / batch) + a `mandatory` flag. `mark_rules()` marks `rule_active` without removing; `apply_rules()` = mark + filter (kept for `identify.py`). R004/R006 are mandatory and applied **before** the prominence gate inside `peaks.py`. |
-| 8 | Interactive UI (main peak view) | `main.py` | Batches 1, 2, 3, 4, 5, 6 done; 7, 8 pending | See "UI batching" below. |
+| 8 | Interactive UI (main peak view) | `main.py` | Batches 1–6 done, 7 partly (stipple); **8 is the only unimplemented feature** | See "UI batching" below. v3.3 also: the calibration STD is marked in the file list and refused by Generate Report; the GC column heading names the dimension actually in use. |
 | 9 | Batch conversion | `batch_convert.py` (not yet) | Not started | Optional. |
-| 10 | Compound-match panel | part of `main.py` | **Done (Batch 5), 2-D** | Auto-fills the table's **GC (RI)** (matched RI value), **IMS** (matched RIPrel drift value), and **GC×IMS** (compound agreeing on both axes) columns; ▶ opens the full candidate list. Loads all `.iml` for the drift dimension. `test/test_match_panel.py`. |
+| 10 | Compound-match panel | part of `main.py` | **Done (Batch 5), 2-D** | Auto-fills the table's **GC** (matched RI value — heading reads `GC (RT s)` and cells carry the unit when the RT fallback is in use), **IMS** (matched RIPrel or K0 value), and **GC×IMS** (compound agreeing on both axes) columns; ▶ opens the full candidate list. Loads all `.iml` for the drift dimension. v3.3 layout fixes: one field per line in the header, footer count + Close packed before the tree so they stay on screen at the default size. `test/test_match_panel.py`. |
 | 11 | Generate Report | part of `main.py` | Batch 8 | Content spec in `Report_Content_Example.md`; export format still TBD. |
 
 ---
@@ -702,14 +702,29 @@ python identify.py results/260625_141215_STD_peaks.json
 #   --raw-tp 45,1013         raw_parameters mode: pass T (°C) and P (mbar)
 #   --library-dir <path>     override library folder
 #   --rules-config <path>    override rules_config.json
-#   --ri-tol / --rt-tol / --k0-tol   tolerance overrides
+#   --ri-tol / --rt-tol / --k0-tol / --drift-tol   tolerance overrides
+#   --ri-series ketone       reference series for the STD anchors
+#   --no-ri                  disable stage 4 (forces the RT fallback)
 
 # Expected output on the STD sample:
 #   peaks: 47 detected, ~17 in RIP band (drift_relative ≈ 1.0, will be excluded by R004)
-#   coffee marker Diacetyl (C431038) matched via RT retreat when profile absent
+#   k0_mode=standard_based on every peak; ims_dimensions_used={'k0': 37}
 ```
 
-### UI (Batches 1, 2, 3, 4, 6)
+**Which RI source a folder resolves to** (`ri_mode` in `_peaks_identified.json`,
+and in the UI's status line) — measured across all four `GAS/` folders:
+
+| folder | STD | `.gasprj` | `ri_mode` | anchors |
+|---|---|---|---|---|
+| `Coffee-bean` | 1 | 1 | `batch_own_std` | 6 |
+| `嘉義大學＿咖啡發酵` | 2 | 0 | `batch_own_std` | 6 |
+| `海洋大學…鱸魚` | 0 | 3 | `vocal_project_table` | 6 |
+| `藝妓咖啡` | 0 | 2 | `vocal_project_table` | 182 |
+
+A folder with neither stays `unavailable`, and the GC column then falls back to
+retention-time matching — labelled `GC (RT s)`, not `GC (RI)`.
+
+### UI (Batches 1–6; 7 partly)
 
 ```bash
 python main.py
@@ -724,7 +739,12 @@ Expected on launch:
 - Bottom-right: indeterminate progress bar (idle until a subprocess runs).
 
 Flow:
-1. **Browse mea folder** → defaults to `<project>/GAS/`.
+1. **Browse mea folder** → defaults to `<project>/GAS/`. Samples list first;
+   the **calibration STD is sorted last, grey italic, with `· STD` appended**
+   (decided by header `Sample=="STD"`, never by filename). A background thread
+   resolves RI + K0 for the folder once and caches it; the status line names the
+   source — `batch_own_std, 6 ketone anchors` or
+   `vocal_project_table, 182 points from <file>.gasprj`.
 2. Select a `.mea`. If an `.npz` already exists you are asked whether to reuse
    it (instant) or re-read the `.mea` (~13 s, overwrites the `.npz`). Missing
    display images are rebuilt from the `.npz` alone (`peaks.py --bg-only`).
@@ -734,9 +754,12 @@ Flow:
    circle-free backdrop; the peak table populates.
 4. **Show Original Heatmap** → swaps the same canvas back to the plain heatmap.
 5. Wheel zooms toward the cursor; left-drag pans. Circles track both.
-6. Peak table has 10 columns. Header shows
+6. Peak table has 9 columns (`# / Drift rel. RIP / RI / Intensity / On /
+   GC×IMS / GC / IMS / ▶`). Header shows
    `(n_rt × n_dt = N points)  Detected Peaks: 31    Current selected peaks: 31`.
-   `GC×IMS/GC/IMS` show `—` until Batch 5.
+   The identification columns auto-fill once the libraries load — no ▶ click.
+   **The GC heading names its own dimension**: `GC (RI)` when calibrated,
+   `GC (RT s)` when it fell back to retention time.
 7. **Click a circle** (or the `On` checkbox) → it greys out and the matching row
    greys with it; click again to restore. A peak the rules rejected looks the
    same as one you dropped by hand; clicking it keeps it anyway and adds a
@@ -744,15 +767,21 @@ Flow:
 8. **Rules** → panel opens top-right (480×600). Toggling R001/R003/R005 or
    editing a parameter repaints the circles in ~4 ms; rejected peaks stay on
    screen greyed. R004/R006 are shown locked (`always on`).
-9. **Generate Report** still a placeholder (Batch 8).
+9. **▶** on any row opens the candidate list. Header is one field per line; the
+   count line and **Close** sit at the bottom and stay visible without resizing.
+   If RI is uncalibrated, a red warning above the list says the candidates come
+   from retention-time proximity and are unverified.
+10. **Generate Report** still a placeholder (Batch 8). It declines the STD with
+    an explanation — reporting the calibration source would be circular.
 
 Verified by 191 passing tests plus a scratch smoke script that drives the real Tk
-app (circle click, drag-vs-click, table sync, state round-trip). Full visual QA
-by the user still pending.
+app (circle click, drag-vs-click, table sync, state round-trip). **Full visual QA
+by the user is still pending, including everything v3.3 changed** — see
+"Immediate next actions" item 0.
 
 ---
 
-## Key files (refreshed at v3.1 — the annotations below were years of "NEW" tags)
+## Key files (refreshed at v3.3)
 
 ```
 C:/GC-IMS-PEAK/
@@ -765,9 +794,9 @@ C:/GC-IMS-PEAK/
 ├── gas_utils.py              # file-picker + path resolution
 ├── rip.py                    # stage 1 — RIP normalization
 ├── dt_convert.py             # stage 2 — K0 (extract_raw_tp from VOCal decompilation)
-├── library.py                # stage 3 — .ril/.iml readers, resolve_data_dir
-├── calibration.py            # stage 4 — RT→RI, K0 instrument constant, axis_explanation
-├── reference_series.py       # stage 4 — hardcoded ketone table + 1/K0 reference
+├── library.py                # stage 3 — .ril/.iml readers, resolve_data_dir, polarity inference
+├── calibration.py            # stage 4 — RT→RI (4 tiers incl. .gasprj), K0 constant, axis_explanation
+├── reference_series.py       # stage 4 — ketone table, 1/K0 reference, vocal_project_table
 ├── match.py                  # stage 5 — 2-D tolerance-window match
 ├── identify.py               # stage 6 — integration CLI, load_libraries (shared w/ UI)
 ├── rules.py                  # stage 7 — R001–R006, mandatory-rule enforcement
@@ -777,6 +806,9 @@ C:/GC-IMS-PEAK/
 ├── ui_settings.json          # user library_dir (gitignored)
 ├── results/                  # all artefacts (gitignored)
 ├── GAS/                      # raw .mea — never modified or deleted by this project
+│                             #   also .gasprj: VOCal projects. Read-only, but now
+│                             #   load-bearing — RI_Normalization is the stage-4
+│                             #   source for folders with no STD
 └── test/                     # 191 tests
     ├── test_rt_axis.py            # locks the (averages+1) formula + version marker
     ├── test_select_from_maxima.py # locks "R004/R006 before the prominence gate"
@@ -788,12 +820,19 @@ C:/GC-IMS-PEAK/
 ```
 
 Docs: `CLAUDE.md` → `status.md` (this file) → `GC-IMS_Identify_Workflow.md`
-(design authority, draft.26) → `GC-IMS_Pipeline_Implementation.md` (artefacts,
+(design authority, draft.27) → `GC-IMS_Pipeline_Implementation.md` (artefacts,
 CLI) / `UI.md` (Tk spec) / `ketone_RI_provenance.md` (where the RI numbers came
 from). `GC-IMS_Peak_Finding_Workflow.md` is the original image-mode blueprint;
 its founding premise no longer holds and it is kept only as a methodology record.
 
 Total test count: **191 pass in ~9 s** (all under `pytest test/`).
+
+> **[v3.3] The Tk flakiness is fixed, the data-dependent skips are not.**
+> `tk.Tk()` occasionally raised mid-suite and the reason read "no Tk display
+> available", which is indistinguishable from a genuinely headless box. Root
+> creation in isolation is fine (300 cycles, no failure), so it is transient;
+> `_tk_root_or_skip()` now retries once and reports the real `TclError` if it
+> still fails. The note below still applies to the file-dependent skips.
 
 > **Intermittent skips are expected, not a regression.** Several tests call
 > `pytest.skip` when their inputs are absent — `test_identify.py` and
@@ -895,10 +934,22 @@ These are things I cannot resolve — user needs to decide or provide data.
    `log10(Rt)`. The "borrowed values → verified" version of this entry was in turn
    superseded by draft.24, when the values stopped being borrowed.)*
 
-4. **Tolerance windows (workflow §第五階段)**
-   `match.py` defaults (RI ±5, Rt ±5s, drift ±0.05, K0 ±0.05) are placeholders. Need
-   real known-compound data to calibrate. UI Batch 4 (Rules panel) may
-   eventually expose these as user-editable.
+4. **Tolerance windows (workflow §第五階段)** — *the most actionable open item;
+   there is now real data to calibrate against, which there was not before.*
+   `match.py` defaults (RI ±5, Rt ±5s, drift ±0.05, K0 ±0.05) are placeholders.
+   Three measurements say they are too loose:
+
+   - **K0 ±0.05** yields **673 IMS hits across 37 peaks** on the STD once the
+     dimension flipped from RIPrel to k0 (v3.2).
+   - **RI ±5** now runs against **117,329 `.ril` rows** for `藝妓咖啡` once the
+     polarity fallback started working (v3.3) — it was matching against 0 before,
+     so this window has never actually been exercised at scale.
+   - **Rt ±5 s** returns **9–24 hits per peak** on a folder with no RI, and its
+     nearest matches are chemically implausible (see the v3.3 entry above). That
+     one is arguably not a tolerance problem at all — RT is not transferable — but
+     it sets a floor on how much the window can ever help.
+
+   UI Batch 4 (Rules panel) may eventually expose these as user-editable.
 
 5. ~~**K0 vs 1/K0: the two modes return reciprocal quantities**~~ — ✅ **FIXED
    2026-08-12.** Kept here because it defines what `instrument_constant` will mean
@@ -935,8 +986,11 @@ These are things I cannot resolve — user needs to decide or provide data.
    agree. The `return 1.0 / K0` in workflow §第二階段's design snippet — the origin
    of the bug — now carries a correction note.
 
-   Still no output change: `mode` remains `unavailable`, so `k0_value` is `None`
-   until a calibration standard exists.
+   *(This entry used to end "Still no output change: `mode` remains
+   `unavailable`, so `k0_value` is `None` until a calibration standard exists."
+   That was true when written and stopped being true the same day — decision 2
+   found the standard already on disk, and v3.2 wired it through. `k0_mode` is
+   now `standard_based` on every peak of a folder that has a usable STD.)*
 
 6. **`R001` vs `prom_frac`: two prominence gates in series**
    `prom_frac` (relative, inside detection) runs before `R001` (absolute, after
@@ -946,6 +1000,29 @@ These are things I cannot resolve — user needs to decide or provide data.
    never carried out and cannot be as written, because `prom_frac` is now
    load-bearing inside `select_from_maxima()`. Needs a decision: make `R001`
    relative, or demote `prom_frac` to a pure detection-layer floor.
+
+7. **What produced the `.gasprj` RI tables?** (new 2026-08-24, v3.3)
+   Two folders now calibrate from `RI_Normalization` blocks inside their own
+   `.gasprj`, which makes RI available where there is no STD — but the file stores
+   only VOCal's **resampled** curve. Which standard was run, how many anchors it
+   really had, and **which column polarity it was measured on** are not recoverable
+   from the file. That last one is the same question as 3a, and it matters the same
+   way: a polar-column scale applied to a non-polar run shifts every RI by ~300.
+   Until answered, `assumed_unverified=True` /
+   `confidence="vocal_project_table_anchors_not_recoverable"`.
+
+   Worth asking whoever ran those batches. Note `藝妓咖啡` is a **different
+   instrument** (1H1-00088) from the calibrated batch (5H4-00123), so its answer
+   need not match the ketone table's.
+
+8. **`borrowed_from_registry` is unreachable dead code.** (noted 2026-08-24)
+   Tier (b) of `resolve_ri_calibration()` is implemented and tested, but nothing
+   can ever trigger it: no `ri_calibration_registry.json` exists, **nothing in
+   production calls `save_registry()`** (only tests do), and `main.py` never passes
+   `dims`, so the UI skips the tier unconditionally. Either wire it up — writing a
+   registry entry whenever `batch_own_std` succeeds would be the natural place — or
+   delete it. Leaving a tested-but-unreachable tier in the resolution chain invites
+   someone to assume it works.
 
 ---
 
@@ -987,7 +1064,15 @@ Working style preferences the user reinforced this session:
 *(Batches 3, 4 and 6 were listed here as "next" in earlier revisions; all three
 are done — see the Batch table above.)*
 
-### Immediate next actions (as of v3.1)
+### Immediate next actions (as of v3.3)
+
+**0. Pending user verification — do this first.** v3.3 shipped without the manual
+UI pass the working agreement calls for. The CLI side is verified end-to-end
+across all four `GAS/` folders and 191 tests pass, but nobody has yet *looked* at:
+the `.gasprj` RI axis on `藝妓咖啡` (RI column populated, y-axis in Retention
+Index, the new status line), the STD marked in the file list, the `GC (RT s)`
+heading, or the compound panel's fixed layout. If something looks wrong, fix
+forward from `v3.3`.
 
 **Blocked on the manager — none of these can be answered from our own data:**
 
@@ -995,27 +1080,44 @@ are done — see the Batch table above.)*
    (polar vs non-polar)? This is the last factor that shifts RI *absolutely*, by
    ~300 units across the board. Everything downstream — every match, every
    report — carries that uncertainty until answered. See open decision 3a.
+   **Now doubled**: open decision 7 asks the same question of the `.gasprj`
+   tables, for a *different instrument*, so the two answers need not agree.
 2. **Which solvent was used?** May explain the unidentified strongest peak in the
    STD (RT 329.6 s, DT_rel 1.104 — open decision 3c).
 3. **Can an n-alkane mix be run on this instrument?** That is the only route to a
-   genuinely `self_calibrated` RI rather than an adopted external scale.
+   genuinely `self_calibrated` RI rather than an adopted external scale. Now also
+   the only route to `batch_own_std` for `藝妓咖啡` / `鱸魚`, which currently rely
+   on their `.gasprj` tables.
 
 **Code work that can start now:**
 
-4. ~~Wire K0 into the folder-resolution / cache path~~ — ✅ **done in v3.2.**
-   `resolve_calibrations_cached()` resolves RI and K0 together from the same STD;
-   `identify.py` and the UI both use it. `ims_dimensions_used` on the STD went
-   from RIPrel to `{'k0': 37}`. **Now worth checking**: the K0 dimension produces
-   far more IMS candidates than RIPrel did (673 hits across 37 peaks), so the
-   ±0.05 K0 tolerance is probably too loose — it is still a placeholder
-   (open decision 4) and now has real data to be calibrated against.
-5. **UI Batches 7 and 8.** 7 is cosmetic (translucent labels, already partly
-   done via `-stipple`). 8 (Generate Report) is the last unimplemented feature;
-   content spec is in `Report_Content_Example.md`, export format still TBD.
+4. **Calibrate the tolerance windows** (open decision 4) — promoted to the top of
+   this list because it is the one place where more data has actually arrived.
+   ±0.05 K0 gives 673 hits across 37 peaks; ±5 RI has never been exercised against
+   a real library until `藝妓咖啡` started loading 117k `.ril` rows in v3.3.
+5. **UI Batch 8 (Generate Report)** — the last unimplemented feature. Content spec
+   in `Report_Content_Example.md`, export format still TBD. Note the entry point
+   already refuses the STD, so that rule does not need re-deciding. Batch 7 is
+   cosmetic and effectively done via `-stipple`.
 6. **Open decision 6** — `R001` vs `prom_frac`, two prominence gates in series.
    Needs a decision before either can be documented as intended behaviour.
+7. **Open decision 8** — either wire up `borrowed_from_registry` (write an entry
+   whenever `batch_own_std` succeeds) or delete the tier. It is currently tested
+   but unreachable.
+8. **Re-run detection on stale batches.** Anything detected before v3.3 has no
+   `ri` for the `.gasprj` folders, and anything before the 2026-08-12 anchor fix
+   has wrong `ri`. Nothing invalidates `_peaks.json` automatically.
 
-**Key files touched in current session (recent → earlier)**:
+**Key files touched in v3.3**:
+- `calibration.py`: `read_gasprj_ri_table()` / `scan_folder_for_gasprj()` /
+  `build_from_gasprj()`, the fourth resolution tier, `KOVATS_RI_FLOOR`.
+- `library.py`: `infer_polarity_from_column_name()`, `polarity_source`.
+- `main.py`: STD marking in the file list, `_gc_column_dimension()` /
+  `_sync_gc_column_heading()`, compound-panel layout + Close.
+- `reference_series.py`: the `vocal_project_table` series.
+- `identify.py`: `parsed_polarity_source` in the library provenance.
+
+**Key files touched in earlier sessions (recent → earlier)**:
 - `peaks.py` / `rules.py` / `main.py`: draft.14 — mandatory rules R004/R006
   before the prominence gate, `select_from_maxima()`, `_maxima.npz` cache,
   `_bg.png` + `canvas_geometry`, native Canvas circles, live Rules panel.

@@ -60,21 +60,39 @@ produces.
 
 ### Retention Index (RT→RI, Stage 4)
 
-Selecting a folder silently finds its **STD** run, auto-picks the 6 calibration
-peaks (this batch: **C4–C9 2-alkanones**, via the drift-relative homolog
-ladder), and fits a `log10(RT)` piecewise-linear curve. Every peak then gets an
-RI, and each heatmap's y-axis becomes a **linear Retention Index** axis while the
-x-axis stays drift-relative-to-RIP. The calibration is cached per folder and
-reused across files. The axis falls back to retention time when no usable STD is
-available.
+Selecting a folder silently resolves an RI scale for it and fits a `log10(RT)`
+piecewise-linear curve. Every peak then gets an RI, and each heatmap's y-axis
+becomes a **linear Retention Index** axis while the x-axis stays
+drift-relative-to-RIP. The calibration is cached per folder and reused across
+files.
 
-> **⚠ One RI caveat remains.** Compound identity is confirmed (supplier table with
-> CAS) and anchors are now assigned from that table's drift values rather than a
-> spacing heuristic. Still open: the table's RI may be polar-column data applied to
-> this non-polar column, which would shift every RI by a constant (~+300). Peak
-> detection and the drift (x) axis are unaffected. Results produced before
-> 2026-08-12 carry the old, mis-assigned anchors — **re-run detection**. See
-> `ketone_RI_provenance.md`.
+The scale is resolved in four tiers, and which one was used is reported as
+`ri_mode` on every peak — a derived value never passes as a measured one:
+
+| tier | source | when |
+|---|---|---|
+| `batch_own_std` | the folder's own **STD** run, 6 anchors auto-picked from the supplier table's drift values | best; used whenever a usable STD is present |
+| `vocal_project_table` | the `RI_Normalization` table inside the folder's own **`.gasprj`** | no STD, but VOCal already calibrated this batch |
+| `borrowed_from_registry` | a previous batch on the same instrument + column + method | *currently unreachable — see `status.md` open decision 8* |
+| `unavailable` | — | y-axis stays retention time; the GC column falls back to RT matching and **says so** (`GC (RT s)`) |
+
+`.gasprj` ranks above the registry because it is *this* batch's own scale, not
+another's. Both rank below the STD, whose anchors are the only ones this project
+can name and check.
+
+> **⚠ RI caveats — both still open.**
+> - **STD path**: identity is confirmed (supplier table with CAS) and anchors come
+>   from that table's drift values, not a spacing heuristic. But the table's RI may
+>   be polar-column data applied to this non-polar column, which would shift every
+>   RI by a constant (~+300). See `ketone_RI_provenance.md`.
+> - **`.gasprj` path**: the file stores only VOCal's *resampled* curve, so which
+>   standard produced it — and on which column polarity — is not recoverable. Its
+>   short-RT end is VOCal extrapolating below its own first anchor and reaches
+>   RI −631, so points below the Kovats floor (methane = 100) are trimmed out of
+>   the anchor range; peaks there still get a value, flagged as extrapolated.
+>
+> Peak detection and the drift (x) axis are unaffected by either. Results produced
+> before 2026-08-12 carry the old, mis-assigned anchors — **re-run detection**.
 
 ---
 
@@ -85,13 +103,17 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
-1. **Browse mea folder** → pick a folder of `.mea` files
+1. **Browse mea folder** → pick a folder of `.mea` files. Samples list first; the
+   folder's calibration **STD** is sorted last in grey italic with `· STD`
+   appended (identified by its header, not its filename). The status line names
+   the RI source once the background resolve finishes.
 2. Select a file. If it has been converted before, you are asked whether to
    reuse the existing `.npz` (instant) or re-read the `.mea` (~13 s)
 3. **Show Detected Peak Heatmap** → first run takes ~83 s; after that the
    results load from disk
 4. Click a circle, or the **On** column, to keep/drop a peak
 5. **Rules** → toggle a rule or edit a parameter and watch the circles update
+6. **▶** on a table row → the full compound candidate list for that peak
 
 ### Command line
 
@@ -163,7 +185,9 @@ than `peak_id`, which is reassigned whenever the baseline moves.
 ```
 
 Per folder (not per `.mea`): `_folder_calibration.json` caches the resolved
-RT→RI calibration so it is reused across every file in the folder.
+RT→RI **and K0** calibrations — both come from the same STD in one pass, so a
+batch can never end up with the two resolved from different files. Sidecar
+version 2; a version-1 sidecar is treated as stale and recomputed.
 
 The full-resolution long-table CSV is **opt-in** (`readGAS.py --write-csv`): it
 runs 0.8–1.5 GB per file and nothing in the pipeline reads it, since the `.npz`

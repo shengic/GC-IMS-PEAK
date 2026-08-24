@@ -1,6 +1,6 @@
 # GC-IMS 化合物比對工作流程 —— 第一版草稿
 
-**Version: draft.26 — by Albert Sheng**（專案版本 **3.3**）
+**Version: draft.27 — by Albert Sheng**（專案版本 **3.3**）
 **狀態：草稿，持續更新中，尚未定案**
 
 > **兩套編號並存是刻意的**：`draft.N` 是本規格自己的推進序號，被本檔內文引用 81 處、
@@ -1003,7 +1003,15 @@ peaks.py
 | `rules.py` | 7 | ✅ 完成，R001–R006，強制規則於突出度門檻前套用 |
 
 原文提到 `identify.py` 尚未更新的兩項設計：`source_file` 溯源**已完成**；雙模式 K0
-校準的**架構已完成**，但如第二階段末所述，profile 還沒由資料夾解析路徑產生。
+校準**也已完整接上**——`resolve_calibrations_cached()` 由同一支 STD 一次解出 RI 與
+K0，CLI 與 UI 共用（v3.2）。*（此段先前寫「profile 還沒由資料夾解析路徑產生」，
+該敘述在 v3.2 落地後即已過期。）*
+
+**[draft.27] 第四階段新增第四層來源**：資料夾沒有 STD 時，改讀該資料夾 `.gasprj` 的
+`RI_Normalization` 表（`ri_mode="vocal_project_table"`），排在 `batch_own_std` 之後、
+`borrowed_from_registry` 之前。另注意 **`borrowed_from_registry` 目前不可能觸發**
+（沒有 registry 檔、production code 從未呼叫 `save_registry()`、`main.py` 不傳 `dims`）
+——設計是完整的，但接線缺一段，見 `status.md` open decision 8。
 
 ### UI（`main.py`）—— draft.26 更新：僅剩 Batch 8
 
@@ -1014,15 +1022,17 @@ peaks.py
 - ◐ 半透明數字標示——數字用 Tk `-stipple` 達成；圈只能改用顏色模擬，因為 `-outlinestipple` 在 Windows 上被靜默忽略
 - ✅ 規則管理面板（第七階段 mockup 已定案），改動後約 4 ms 重算整條漏斗
 - ✅ **[draft.26 新增] 「ⓘ 軸說明」對話框**：說明兩軸的正規化，文字唯一來源為 `calibration.axis_explanation()`，故不可能與實際校正值不一致。RIP 數值取自 `_bg.json`（`rip_index` / `rip_drift_ms`）而非重算，確保講的就是畫面上這張圖
-- 化合物比對面板（第十階段 mockup 已定案：單一 ▶、三段堆疊、信心圓點、來源檔案顯示）
-- 「Generate Report」按鈕（位置已定案，內容格式範例見 `Report_Content_Example.md`，實際匯出格式仍待決）
+- ✅ 化合物比對面板（第十階段）——▶ 開啟候選清單，表格 `GC×IMS`／`GC`／`IMS` 三欄自動填值，不需點 ▶。**[draft.27]** 版面修正：表頭改一行一對欄位；底部計數與 Close 改為先佔位，預設視窗尺寸下即可見（先前被表格擠出畫面外）
+- ✅ **[draft.27] 校準 STD 在檔案清單中標示**（依表頭 `Sample=="STD"`，非檔名）並排在最後；Generate Report 拒絕它——它是樣品所依據的尺標，報告自己等於循環論證
+- ✅ **[draft.27] GC 欄標題反映實際維度**：無 RI 校準時 `match_all()` 退到保留時間比對，標題改為 `GC (RT s)`、格子帶單位、狀態列說明保留時間不可跨儀器／管柱／方法轉移。先前一律顯示 `GC (RI)`，等於把秒數掛在 RI 的名義下
+- ⬜ 「Generate Report」按鈕（位置已定案，內容格式範例見 `Report_Content_Example.md`，實際匯出格式仍待決）**← 唯一未實作的功能**
 
 ### 卡住整條鏈路的三個關鍵決策 —— draft.26：三項全部解決
 
 | # | 問題 | 現況 |
 |---|---|---|
 | 1 | ~~儀器常數（L/U/T/P）從哪來？~~ | ✅ **已解決（draft.26）**——`L`/`U` 早已可從表頭取得；`T`/`P` 由反編譯 VOCal 確認：`Start temp 1`，壓力為 ambient 與 EPC 之**和**。見第二階段 |
-| 2 | ~~STD 標準品的化合物身分~~ | ✅ **已解決（draft.24）**——經理對照表帶 CAS，確認為 2-alkanone C4–C9。衍生項：(a) 對照表 RI 的**管柱極性未確認**（疑為極性，本批為非極性，差約 +302）**← 唯一仍未解的項目**；(b) ~~錨點碳數指派錯位一格~~ ✅ 已由 `match_anchors_by_dt()` 修正（draft.24 同日），6/6 命中、平均 \|Δ\|=0.00273 |
+| 2 | ~~STD 標準品的化合物身分~~ | ✅ **已解決（draft.24）**——經理對照表帶 CAS，確認為 2-alkanone C4–C9。衍生項：(a) 對照表 RI 的**管柱極性未確認**（疑為極性，本批為非極性，差約 +302）**← 仍未解**；(b) ~~錨點碳數指派錯位一格~~ ✅ 已由 `match_anchors_by_dt()` 修正（draft.24 同日），6/6 命中、平均 \|Δ\|=0.00273。**[draft.27] (c) 新增同型問題**：走 `vocal_project_table` 的資料夾，其 `.gasprj` 校正表的**原始錨點與管柱極性同樣不可考**，且 `藝妓咖啡` 是**另一台儀器**（1H1-00088），答案未必與 (a) 相同 |
 | 3 | ~~有沒有 K0 校準標準品資料？~~ | ✅ **已解決（draft.26）**——有，且不必新測：`GAS BASE 3H_IMS K0.iml` 的已知 K0 ＋ 本批 STD ＝ IC 25.0808、CV 0.133% |
 
 原文寫「這些不是技術問題，是需要先盤點手上實際擁有的資料才能回答」——這句話後來被證明
@@ -1033,6 +1043,12 @@ peaks.py
 ---
 
 ## 修訂記錄
+
+- **draft.27**（2026-08-24，程式 tag **v3.3**）：**第四階段多一層來源，並修掉兩個「靜默降級」。**
+  (1) **`vocal_project_table`：沒有 STD 的資料夾也能有 RI。** RI 無法從量測本身導出——它的定義就是拿已知 RI 的化合物內插，而 GC-IMS 沒有質譜，峰的身分推不出來。但 VOCal 早就替那些批次存了一份尺標：資料夾內 `.gasprj` 的頂層 `RI_Normalization` 區塊，格式 `{ColNormY=RI, ColNormX=log10(Rt), ColNormisLog=true}`，**與本階段所用的 Kovats log 形式完全相同**，故其點可直接作為錨點、不需任何換算。層級置於 `batch_own_std` 之後、`borrowed_from_registry` 之前：`.gasprj` 是**本批次自己**的尺標（同儀器、同管柱、同方法、同一次量測），registry 是**別批**的；兩者皆低於 STD，因為只有那條路的錨點是本專案認得且可驗證的。實測四個資料夾：兩個走 (a)，`鱸魚` 6 錨、`藝妓咖啡` 182 錨走 (a2)。⚠ 該表是 VOCal **重採樣後**的等距格點（`log10(Rt)` 每 0.01），**原始錨點不可考**，故 `assumed_unverified=True` 且標籤為 `vocal_project_table_anchors_not_recoverable`——與對照表的「管柱極性存疑」是不同性質的不確定性。短保留時間端為 VOCal 在自身第一個真實錨點以下的外插，實測最低 **RI = −631**；依 Kovats 定義（甲烷 = 100）截去前導段，**這是定義線不是調出來的門檻**（斜率法落點僅差 2 秒，但那會是配出來的數字）。截去的區段仍可查詢並自動標 `ri_extrapolated`，沿用既有機制而非另造一套。`ColNormisLog=false` 直接拒絕，不臆測換算——猜錯會產生整條錯位卻看起來正常的 RI，而手上沒有該格式的樣本可驗證。
+  (2) **GC 欄先前把「秒」掛在 RI 的名義下。** `match_all()` 在 `peak["ri"]` 為 None 時退到 `match_rt()`，拿峰的 `retention_s` 比庫的 `Rt[sec]`（±5 s），兩條路徑寫進同一個 `gc_matches` 且呈現方式相同，而欄位標題寫死 `GC (RI)`——於是 RI 欄顯示 `—`、GC 欄顯示秒數，兩者並列卻無從分辨。**保留時間不跨儀器／管柱／方法轉移，這正是 RI 存在的理由**；實測該批每個峰在 ±5 s 內有 9–24 個候選，最接近者包括 2,6-dichlorophenol（Δ0.01 s）與 hexamethyldisiloxane（矽氧烷，其實是管柱流失）。**改為標示而非移除**（使用者裁決）：庫與樣品確實同方法時 RT 比對合理，能判斷的是使用者。
+  (3) **`.ril` 選檔對舊版表頭靜默回傳 0 筆。** 舊排版 `GC Column` 沒有 `POLARITY:` 欄位，極性因此為 None，極性退路整條不啟動。新增 `infer_polarity_from_column_name()`——**對應關係取自儀器自己的講法**（同一台機器在新版表頭裡就把 SE-54 標成 `POLARITY: np`），非本專案的化學判斷；明寫值一律優先，來源記於 `polarity_source`；認不出的固定相不猜，因為載錯極性的庫比沒有庫更糟。實測 0 → 13 檔 / 117,329 列。
+  (4) UI：校準 STD 在檔案清單中標示（依表頭非檔名）並被 Generate Report 拒絕；化合物面板版面修正。詳見待實作清單 UI 段。
 
 - **draft.26**：**第二階段 K0 兩個卡了很久的未決項同時解決，且都不是靠新測量。**(1) **`raw_parameters` 的 `T`/`P` 欄位對應**——把儀器隨附的 VOCal `.jar` 反編譯（使用者自有軟體的互通性還原工程）後確認：`T` 取 `Start temp 1`（45 °C）；`P` 是 **`10 × (Start ambient pressure + Start pressure EPC IMS)`** ＝ 1018.43 mbar，出處 `BufferedMEA.java:313`。**壓力是「和」而非任一個**，因為 EPC 記的是相對環境的表壓，管內絕對壓力等於環境壓力加上它——這代表先前所有「六個 temp 挑哪個、兩個壓力挑哪個」的討論方向本身就錯了，正確答案不在選項裡。已寫進 `dt_convert.extract_raw_tp()`，`compute_k0()` 在未給 T/P 時自動導出。**但這只解決正確性，未解決準確度**：此路徑與標準品校準結果差 +3.5%，而相鄰同系物 K0 間距約 8%，誤差達一個間距的 43%，故 `raw_parameters` 仍不適合用於鑑定——這正是本階段開頭「讀對表頭欄位 ≠ 消除機器差異」該判斷的量化證實。(2) **`standard_based` 的校準標準品**——不需使用者提供。`library_data/GAS BASE 3H_IMS K0.iml`（G.A.S. 官方基礎庫，`DtMode=1/K0`）本就帶著這六個酮的已知 K0，而本批 STD 就是這六個化合物在這台機器上的實測；兩者早就都在手上，只是沒被放在一起看。`calibration.derive_k0_instrument_constant()` 逐錨解 `IC = K0_ref · t · U`，得 **IC = 25.0808、六錨 CV = 0.133%**、各錨殘差 < 0.25%。CV 千分之一是可信的關鍵：六個獨立化合物跨越整個漂移範圍仍一致，代表「把 `ah × L²` 整體校準」的假設在這台機器上成立。CV 超出 `max_cv` 時拒絕回傳，避免拿錯庫時靜默產生假常數。**尚未完成**：`resolve_ri_calibration()` 的資料夾／快取路徑還沒產生 K0 profile，故 UI 的 `k0_mode` 仍是 `unavailable`——常數已存在但未接上使用端，這是目前單一價值最高的待辦（接上後 IMS 軸從 RIPrel 一維變兩維）。(3) **保留時間軸公式更正**：`rt_step_ms` 應為 `(averages + 1) × trigger_repetition`，舊式少了 +1 使整條 RT 軸短 16.7%。四條獨立佐證：方法總長（新式落在整數分鐘）、經理對照表 `Rt[sec]` 殘差由 −16.7% 降到 ±1%、`gc-ims-tools` 0.1.10 的 `read_mea()`、VOCal `BufferedMEA.java:316`。強度矩陣、漂移軸、找峰、**RI 皆不受影響**（錨點與查詢值同時平移 `log10(7/6)`，分段線性內插對 x 平移不變，實測差 ~1e-13）。新增 `readGAS.RT_AXIS_VERSION`，隨產物寫入並在載入舊產物時警告——真正的風險是新舊靜默混用。(4) **修正一個靜默失效**：`peaks.load_surface()` 從 `.npz` 載入時把 `meta["source"]` 設成 `.npz` 自己，導致 RI 校正解析到 `results/`（沒有 STD）而退回保留時間軸卻不報錯，產出的圖與有 RI 的那批外觀無異、座標系卻不同。改由 `export_npz()` 存 `mea_source`。(5) **UI 新增「ⓘ 軸說明」**，見待實作清單 UI 段。
 - **draft.25**：版號同步（隨程式碼 v3.1 一併調整），內容無變更。

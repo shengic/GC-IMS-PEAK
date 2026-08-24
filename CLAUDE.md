@@ -43,8 +43,13 @@
   墊高數倍並誤殺真峰。`test/test_select_from_maxima.py` 會擋住這個回歸。
 - **峰的選取狀態以 `(rt_index, dt_index)` 為鍵**,不是 `peak_id` —— 後者是基準集
   內的突出度排名,規則參數一改就重新編號。
-- **`.npz` 帶 `mea_source`**:RI 校正靠「原始 `.mea` 所在資料夾裡的 STD」解析。
-  指錯會讓校正靜默失效、y 軸無聲退回保留時間。
+- **`.npz` 帶 `mea_source`**:RI 校正靠「原始 `.mea` **所在資料夾**」解析。指錯會讓
+  校正靜默失效、y 軸無聲退回保留時間。
+- **RI 有四層來源,`.gasprj` 是其中一層**:STD → 該資料夾的 `.gasprj`
+  (`RI_Normalization` 區塊)→ registry → 無。所以 **`.gasprj` 是輸入資料,不是
+  VOCal 的殘留檔**,不得刪除或搬移。每個峰帶 `ri_mode` 標明實際用了哪一層。
+- **沒有 RI 時 GC 比對會退到保留時間**,而保留時間不跨儀器/管柱/方法轉移。欄位標題
+  必須跟著變成 `GC (RT s)` —— 把秒數掛在 RI 名義下是這裡踩過的坑。
 
 ## 環境
 
@@ -57,7 +62,8 @@
 .venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
-`results/` 已 gitignore。`.mea` 原始檔任何程式都不得修改或刪除。
+`results/` 已 gitignore。**`GAS/` 底下的 `.mea` 與 `.gasprj` 任何程式都不得修改或
+刪除**(後者存著 RI 校正表,見上)。
 
 ## 工作方式
 

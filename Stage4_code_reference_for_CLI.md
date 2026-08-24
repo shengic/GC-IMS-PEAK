@@ -204,7 +204,22 @@ def std_quality_check(header, min_peaks=5, min_top_intensity=2000, n_anchors_fou
     return (len(reasons) == 0), reasons, header.get("Status comment", "")
 ```
 
-## 9. 批次資料夾三層解析邏輯
+## 9. 批次資料夾解析邏輯（設計稿為三層；**實作已是四層**）
+
+> **[2026-08-24, v3.3 更新]** 本節的程式碼是**設計稿**，實際實作見
+> `calibration.resolve_ri_calibration()`，且已多一層：
+>
+> ```
+> (a)  batch_own_std           資料夾內有可用的 STD
+> (a2) vocal_project_table     ← 新增：讀該資料夾 .gasprj 的 RI_Normalization 表
+> (b)  borrowed_from_registry  同 instrument|column|method 的別批校正
+> (c)  unavailable
+> ```
+>
+> (a2) 排在 (b) 之前：`.gasprj` 是**本批次自己**的尺標，registry 是別批的。
+> 實測四個 `GAS/` 資料夾，兩個走 (a)、兩個走 (a2)。另注意 **(b) 目前不可能觸發**
+> ——沒有 registry 檔、production code 從未呼叫 `save_registry()`、且 `main.py`
+> 不傳 `dims`（見 `status.md` open decision 8）。
 
 ```python
 def scan_folder_for_std(folder_path):
