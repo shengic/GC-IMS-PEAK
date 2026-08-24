@@ -19,13 +19,25 @@ from main import GCIMSApp
 
 
 def _tk_root_or_skip():
+    """Create a hidden Tk root, or skip **naming the reason**.
+
+    The reason matters: a bare "no Tk display available" is right on a headless
+    CI box but also swallowed an intermittent local failure, where `tk.Tk()`
+    raises for an unrelated cause and the test silently does nothing. One retry
+    covers the transient case; the message carries the real TclError so a
+    persistent one is diagnosable instead of looking like "no display".
+    """
     import tkinter as tk
-    try:
-        root = tk.Tk()
-    except tk.TclError:
-        pytest.skip("no Tk display available")
-    root.withdraw()
-    return tk, root
+    last = None
+    for _ in range(2):
+        try:
+            root = tk.Tk()
+        except tk.TclError as e:
+            last = e
+            continue
+        root.withdraw()
+        return tk, root
+    pytest.skip(f"cannot create a Tk root: {last}")
 
 
 def _destroy(root):
@@ -172,7 +184,10 @@ def test_autofill_populates_gc_column_without_trigger():
         for name in ("_apply_cached_matches", "_autofill_gc_matches", "_match_and_cache",
                      "_attach_k0_to",
                      "_poll_match_and_cache", "_ensure_libraries_then", "_poll_libraries",
-                     "_refresh_match_columns", "_cell_value", "_peak_by_id", "_refresh_row"):
+                     "_refresh_match_columns", "_cell_value", "_peak_by_id", "_refresh_row",
+                     # _refresh_match_columns retitles the GC column per the
+                     # dimension actually used (RI vs the RT fallback).
+                     "_sync_gc_column_heading", "_gc_column_dimension"):
             setattr(app, name, getattr(GCIMSApp, name).__get__(app, _Shim))
         app._row_tags = GCIMSApp._row_tags   # staticmethod
 
@@ -348,3 +363,213 @@ def test_peak_view_is_the_default_when_results_exist():
         if not has_results:
             assert "Show Detected Peak Heatmap" in app.status_label.texts[-1], \
                 "沒有現成結果時，必須告訴使用者要按哪個按鈕"
+
+
+def test_panel_footer_and_close_button_fit_the_default_window():
+    """The count line and Close must be visible **without resizing the window**.
+
+    Reported 2026-08-24: with 469 GC candidates the "Showing 0 of 469…" line was
+    off-screen until the user dragged the window taller. Cause was pack order —
+    the candidate tree was packed first with `expand=True` and asked for 14 rows,
+    so the window's natural height exceeded its own geometry and whatever was
+    packed last (the footer) fell off the bottom.
+
+    The invariant that fixes it, and what this test locks: the window's requested
+    height must fit inside the geometry it sets for itself, and the two bottom
+    rows must be packed `side="bottom"` so the tree — which has a scrollbar — is
+    what gives up space when the window is small, not them.
+    """
+    tk, root = _tk_root_or_skip()
+    try:
+        # Enough candidates to overflow the tree, as in the report.
+        cands = [{"Name": f"C{i}", "CAS": f"X{i}", "Formula": "C6H12O",
+                  "RI": 900 + i * 0.01, "delta_ri": i * 0.01,
+                  "match_dimensions": ["ri"], "source_file": "a.ril"}
+                 for i in range(469)]
+        result = {"gc_dimension": "ri", "ims_dimension": None,
+                  "gc_matches": cands, "ims_matches": [], "combined_matches": []}
+        shim = _panel_shim(root)
+        shim._render_match_panel(PEAK, result, {"ril_strategy": "column_name"})
+        win = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+        win.update_idletasks()
+
+        # The window fits itself: nothing is pushed outside the default geometry.
+        geo_h = int(win.geometry().split("+")[0].split("x")[1])
+        assert win.winfo_reqheight() <= geo_h, (
+            f"panel wants {win.winfo_reqheight()}px inside a {geo_h}px window — "
+            "the bottom rows will be off-screen again")
+
+        slaves = win.pack_slaves()
+        bottom = [w for w in slaves if w.pack_info()["side"] == "bottom"]
+        # The count line is one of the bottom-packed widgets and carries the count.
+        footers = [w for w in bottom if isinstance(w, tk.Label)
+                   and "Showing" in w.cget("text")]
+        assert footers, "the 'Showing N of M' line is not packed at the bottom"
+        assert "of 469" in footers[0].cget("text")
+
+        # Close button exists, sits in a bottom-packed bar, and destroys the window.
+        buttons = [c for w in bottom for c in w.winfo_children()
+                   if isinstance(c, tk.Button) and c.cget("text") == "Close"]
+        assert buttons, "no Close button in the compound panel"
+
+        # The expanding tree is packed last, so it is what shrinks.
+        assert slaves[-1].pack_info()["expand"] in (1, "1", True)
+
+        # Drop the panel's BooleanVars while the interpreter is still up. This test
+        # closes its window mid-test, so `_destroy()`'s teardown sweep never sees
+        # them; collecting them here keeps `Variable.__del__` from firing later
+        # against a dead interpreter (the hazard `_destroy`'s docstring describes).
+        # Hygiene, not a fix for the intermittent root-creation failure — that one
+        # is transient and handled by the retry in `_tk_root_or_skip`.
+        import gc
+        win.__dict__.pop("_filter_vars", None)
+        gc.collect()
+
+        buttons[0].invoke()
+        assert not win.winfo_exists()
+    finally:
+        _destroy(root)
+
+
+def test_panel_header_is_one_field_per_line():
+    """Header shows one name/value pair per row, not several packed into a line.
+
+    Requested 2026-08-24: the first two lines used to read
+    `Intensity=4508   Retention time=389.7 s   Drift time=5.59 ms`, which had to
+    be scanned to find any one value.
+    """
+    tk, root = _tk_root_or_skip()
+    try:
+        peak = {"peak_id": 12, "ri": 916.8, "retention_s": 389.7,
+                "drift_relative": 1.234, "intensity": 4508, "drift_ms": 5.59}
+        result = {"gc_dimension": "ri", "ims_dimension": None, "gc_matches": [],
+                  "ims_matches": [], "combined_matches": []}
+        shim = _panel_shim(root)
+        shim._render_match_panel(peak, result, {})
+        win = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+        win.update_idletasks()
+
+        hdr = win.pack_slaves()[0]
+        cells = {}
+        for child in hdr.winfo_children():
+            info = child.grid_info()
+            if info:
+                cells[(int(info["row"]), int(info["column"]))] = child.cget("text")
+
+        # Every field label sits in column 0 with its value beside it in column 1,
+        # and no cell carries more than one pair.
+        fields = {v.rstrip(":"): cells.get((r, 1))
+                  for (r, c), v in cells.items() if c == 0 and v.endswith(":")}
+        assert fields["Intensity"] == "4508"
+        assert fields["Retention time"] == "389.7 s"
+        assert fields["Drift time"] == "5.59 ms"
+        assert fields["Drift rel. RIP"] == "1.234"
+        assert fields["RI"].startswith("916.8")
+        assert all("=" not in (t or "") for t in cells.values())
+    finally:
+        _destroy(root)
+
+
+def _table_shim(root):
+    """Shim carrying just what the GC-heading logic touches."""
+    from tkinter.ttk import Treeview
+    from main import AppState, GCIMSApp, PEAK_TABLE_COLUMNS
+
+    class _Shim:
+        pass
+    app = _Shim()
+    app.root = root
+    app.state = AppState()
+    app.peak_tree = Treeview(root, columns=PEAK_TABLE_COLUMNS, show="headings")
+    for c in PEAK_TABLE_COLUMNS:
+        app.peak_tree.heading(c, text=c)
+    app.peak_tree.heading("gc", text="GC (RI)")
+
+    class _L:
+        text = ""
+
+        def config(self, **k):
+            self.text = k.get("text", self.text)
+    app.status_label = _L()
+    for name in ("_gc_column_dimension", "_sync_gc_column_heading", "_cell_value"):
+        setattr(app, name, getattr(GCIMSApp, name).__get__(app, _Shim))
+    return app
+
+
+def test_gc_column_says_RT_when_there_is_no_RI_calibration():
+    """No STD → match_all falls back to retention time; the column must say so.
+
+    Found 2026-08-24 on GAS/藝妓咖啡, which has no STD: RI resolved to
+    `unavailable`, so every peak's `ri` was None and `match.match_all()` took the
+    RT fallback — comparing the peak's `retention_s` against the library's
+    `Rt[sec]` at ±5 s. The cell rendered the library value in the same format as
+    an RI match while the heading still read "GC (RI)", so seconds were displayed
+    under an RI label with nothing indicating the downgrade.
+
+    Retention time does not transfer across instrument / column / temperature
+    program — that is what RI exists to normalise — so this must be visible.
+    """
+    tk, root = _tk_root_or_skip()
+    try:
+        app = _table_shim(root)
+        app.state.peaks = [{
+            "peak_id": 1, "ri": None, "retention_s": 59.2,
+            "matches": {"gc_dimension": "rt", "ims_dimension": None,
+                        "gc_matches": [{"Name": "Acetaldehyde", "Rt[sec]": 58.276,
+                                        "delta_rt": 0.94,
+                                        "match_dimensions": ["rt"]}],
+                        "ims_matches": [], "combined_matches": []}}]
+        app._sync_gc_column_heading()
+
+        assert app._gc_column_dimension() == "rt"
+        assert app.peak_tree.heading("gc")["text"] == "GC (RT s)"
+        # The cell carries the unit too, so a copied value is unambiguous.
+        assert app._cell_value("gc", app.state.peaks[0]) == "58.276 s (Δ0.94)"
+        # And the reason is stated, not just the label changed.
+        assert "No STD" in app.status_label.text
+        assert "not transferable" in app.status_label.text
+    finally:
+        _destroy(root)
+
+
+def test_gc_column_says_RI_when_calibrated_and_stays_quiet():
+    """With RI available the heading is unchanged and no warning is raised."""
+    tk, root = _tk_root_or_skip()
+    try:
+        app = _table_shim(root)
+        app.state.peaks = [{
+            "peak_id": 1, "ri": 916.8, "retention_s": 389.7,
+            "matches": {"gc_dimension": "ri", "ims_dimension": "k0",
+                        "gc_matches": [{"Name": "2-Butanone", "RI": 916.5,
+                                        "delta_ri": 0.3,
+                                        "match_dimensions": ["ri"]}],
+                        "ims_matches": [], "combined_matches": []}}]
+        app._sync_gc_column_heading()
+
+        assert app._gc_column_dimension() == "ri"
+        assert app.peak_tree.heading("gc")["text"] == "GC (RI)"
+        assert app._cell_value("gc", app.state.peaks[0]) == "916.5 (Δ0.30)"
+        assert app.status_label.text == ""      # nothing to warn about
+    finally:
+        _destroy(root)
+
+
+def test_gc_heading_prefers_RI_when_a_folder_has_both():
+    """A mixed set (some peaks RI-matched, some RT) must not be labelled RT.
+
+    `gc_dimension` is per peak, so a folder where only some peaks carry an RI
+    could report either. RI wins: the column is RI-capable, and the RT rows are
+    individually visible by their " s" unit.
+    """
+    tk, root = _tk_root_or_skip()
+    try:
+        app = _table_shim(root)
+        app.state.peaks = [
+            {"peak_id": 1, "matches": {"gc_dimension": "rt", "gc_matches": []}},
+            {"peak_id": 2, "matches": {"gc_dimension": "ri", "gc_matches": []}},
+        ]
+        app._sync_gc_column_heading()
+        assert app._gc_column_dimension() == "ri"
+        assert app.peak_tree.heading("gc")["text"] == "GC (RI)"
+    finally:
+        _destroy(root)

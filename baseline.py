@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 baseline.py  —  保留時間方向的基線扣除（非對稱最小平方，AsLS）
-Version: 3.2 — by Albert Sheng
+Version: 3.3 — by Albert Sheng
 
 為什麼需要這個
 --------------

@@ -1,11 +1,15 @@
 """
 main.py  —  GC-IMS Desktop UI (Tk)
-Version: 3.2 — by Albert Sheng
+Version: 3.3 — by Albert Sheng
 
 A desktop application for browsing, reading, and analyzing GC-IMS .mea files.
 Workflow: browse folder → select .mea (auto-read) → show detected peaks → inspect.
 
 Changelog:
+  3.3 — 檔案清單把校準用的 STD 標示出來（依表頭 Sample=="STD"，非檔名）並排在最後，
+      Generate Report 拒絕它；GC 欄標題改為反映實際維度（無 RI 校準時退到保留時間
+      比對，標題變 "GC (RT s)" 並在狀態列說明不可跨儀器/管柱/方法轉移）；化合物候選
+      視窗改一行一對欄位、底部計數與 Close 改為先佔位（原本會被表格擠出畫面外）。
   3.2 — K0 校正接進資料夾解析路徑：選資料夾時與 RI 一次解出並存進 state，
       峰在比對前由 `_attach_k0_to()` 補上 k0_value，IMS 軸因此從只有
       RIPrel 一維變成可走 K0。
@@ -55,6 +59,7 @@ from tkinter import (
     filedialog, messagebox, ttk, Button, Canvas, Checkbutton, Frame, Label, Tk,
     Text, END, Toplevel, Menu, BooleanVar, StringVar, TclError,
 )
+from tkinter import font as tkfont
 from tkinter.ttk import Treeview, PanedWindow
 
 import numpy as np
@@ -129,6 +134,9 @@ COORD_LABELS = {
     # Batch 2: identification columns
     "on": "On",
     "gc_ims": "GC×IMS",
+    # 「(RI)」不是固定的——沒有 STD 可校準時 match_all() 會退到保留時間比對，欄位
+    # 顯示的就是庫的 Rt[sec] 而不是 RI。標題由 _gc_column_dimension() 依實際用到的
+    # 維度改寫（見該函式），這裡只是還沒比對前的起始值。
     "gc": "GC (RI)",
     "ims": "IMS",
     "trigger": "▶",
@@ -200,6 +208,10 @@ class AppState:
         # 第四階段：本資料夾的 RT→RI 校準表（選資料夾時背景解析一次，跨檔案共用）
         self.ri_calibration = None
         self.ri_calibration_folder = None
+        # 本資料夾裡哪些 .mea 是校準用的 STD（normcase 後的絕對路徑集合）。
+        # 由 calibration.scan_folder_for_std() 依**表頭** Sample=="STD" 判定，
+        # 不是檔名——見 populate_file_list()。
+        self.std_files = set()
         # 第二階段：同一次解析得到的 K0 profile。峰的 k0_value 要靠它補上，
         # 否則 match_all() 只能退回 RIPrel 漂移那條路。
         self.k0_profile = None
@@ -722,6 +734,13 @@ class GCIMSApp:
         self.file_tree.heading("#0", text="Filename")
         self.file_tree.pack(fill="both", expand=True)
         self.file_tree.bind("<<TreeviewSelect>>", self.on_file_selected)
+        # 校準用的 STD 以灰色斜體與行末的「· STD」標示（見 populate_file_list）。
+        # 字型物件必須留參照：tkfont.Font 在被回收時會刪掉底層 Tcl 字型，
+        # tag_configure 只記名字，字型一沒人持有整列就會退回預設樣式。
+        self._std_row_font = tkfont.nametofont("TkDefaultFont").copy()
+        self._std_row_font.configure(slant="italic")
+        self.file_tree.tag_configure("std_file", foreground="#777777",
+                                     font=self._std_row_font)
 
         # ---- Center pane: main image (heatmap → overlay after detection) ---
         # weight 2 (was 3): narrower heatmap pane so the peak table (right) gets
@@ -963,13 +982,20 @@ class GCIMSApp:
 
         if isinstance(cal, dict) and cal.get("mode") == "multi_point_loglinear":
             self.state.ri_calibration = cal
-            n = cal.get("anchor_selection", {}).get("n_clean_anchors", "?")
+            # 錨點的**來源**跟著 ri_mode 走，不能寫死成 "ketone anchors"：資料夾沒有
+            # STD 時校正來自 .gasprj 內建的 RI 表（實測 182 點），那不是酮錨點。
+            if mode == "vocal_project_table":
+                n = cal.get("n_anchors", "?")
+                src = f"{n} points from {cal.get('gasprj_source', '.gasprj')}"
+            else:
+                n = cal.get("anchor_selection", {}).get("n_clean_anchors", "?")
+                src = f"{n} ketone anchors"
             # 警語文字取自系列定義（reference_series 的 caveat_short），不寫死在這裡：
             # 旗標的意義會隨 provenance 改變，寫死就會留下已經不成立的理由。
             caveat = cal.get("ri_caveat") if cal.get("assumed_unverified") else None
             flag = f" — ⚠ {caveat}" if caveat else ""
             self.status_label.config(
-                text=f"✓ RI calibration ready ({mode}, {n} ketone anchors){flag} — "
+                text=f"✓ RI calibration ready ({mode}, {src}){flag} — "
                      f"heatmap & table now in Retention Index")
             # 若已載入某檔的峰，立即重繪帶上 RI
             if self.state.peaks:
@@ -981,11 +1007,42 @@ class GCIMSApp:
                      "showing retention time")
 
     def populate_file_list(self, folder):
-        """List all .mea files in folder."""
+        """List the folder's .mea files: samples first, calibration STDs last and marked.
+
+        **Marked, not hidden.** The STD is a real measurement that goes through the
+        same detection path as any sample — `_start_folder_calibration()` runs
+        `peaks.py` on it, and the RI anchors are read back from its own
+        `_peaks.json`. Being able to open it is currently the only way to check
+        which six peaks became the anchors, and that assignment is the
+        least-verified step in the RI chain (status.md open decision 3; it is how
+        the anchor off-by-one was caught). Hiding it would also make a failed STD
+        detection look like "no RI axis" with nothing to inspect. It is marked so
+        it is not mistaken for a sample, and `on_generate_report()` declines it.
+
+        **STD is decided by the header field `Sample == "STD"`, never by filename.**
+        `calibration.scan_folder_for_std()` is the single place that judgement
+        lives (operators mistype file names — see its docstring). Re-deciding it
+        here by filename would let this list disagree with the file the
+        calibration actually used, in either direction.
+        """
         self.file_tree.delete(*self.file_tree.get_children())
         mea_files = sorted(Path(folder).glob("*.mea"))
-        for mea_file in mea_files:
-            self.file_tree.insert("", "end", text=mea_file.name, values=(str(mea_file),))
+        try:
+            std_paths = {os.path.normcase(os.path.abspath(p))
+                         for p in calibration.scan_folder_for_std(folder)}
+        except OSError:
+            std_paths = set()      # 掃不到表頭時照常列檔，不要讓清單整個空掉
+        self.state.std_files = std_paths
+
+        def _is_std(p):
+            return os.path.normcase(os.path.abspath(str(p))) in std_paths
+
+        for mea_file in [f for f in mea_files if not _is_std(f)]:
+            self.file_tree.insert("", "end", text=mea_file.name,
+                                  values=(str(mea_file),))
+        for mea_file in [f for f in mea_files if _is_std(f)]:
+            self.file_tree.insert("", "end", text=f"{mea_file.name}   · STD",
+                                  values=(str(mea_file),), tags=("std_file",))
 
     def _clear_main_canvas(self):
         """Wipe the canvas back to empty while the next file loads.
@@ -1009,19 +1066,30 @@ class GCIMSApp:
         self.state.highlight_id = None
         self.main_canvas_label.config(text="(loading…)")
 
+    def is_std_file(self, path):
+        """這個 .mea 是不是本資料夾的校準 STD（依表頭判定，見 populate_file_list）。"""
+        if not path:
+            return False
+        return os.path.normcase(os.path.abspath(str(path))) in (self.state.std_files or set())
+
     def on_file_selected(self, event):
         """User selected a file → auto-trigger background read (workflow §第八階段)."""
         selection = self.file_tree.selection()
         if not selection:
             return
         item = selection[0]
-        file_path = self.file_tree.item(item, "values")[0]
+        values = self.file_tree.item(item, "values")
+        if not values:
+            return                      # 非檔案列（分組節點等）——沒有路徑可讀
+        file_path = values[0]
         self.state.selected_mea_file = file_path
         self.state.reset_after_file_selection()
         self._clear_main_canvas()
         self.peak_tree.delete(*self.peak_tree.get_children())
         self.update_peaks_header()
-        self.status_label.config(text=f"Selected: {Path(file_path).name}")
+        note = ("  — STD: this folder's calibration source, not a sample"
+                if self.is_std_file(file_path) else "")
+        self.status_label.config(text=f"Selected: {Path(file_path).name}{note}")
         self.ui_state = UIState.FILE_SELECTED
         self.update_button_state()
         # Auto-read（workflow：取消 Read File 獨立按鈕，13 秒隱性等待可接受）
@@ -1776,6 +1844,8 @@ class GCIMSApp:
 
         # Update header with matrix dimensions
         self.update_peaks_header()
+        # 有快取比對結果時,GC 欄標題要立刻反映實際維度,不能等背景比對回來
+        self._sync_gc_column_heading()
         self.sort_column = None
         self.sort_reverse = False
 
@@ -1810,14 +1880,16 @@ class GCIMSApp:
             if not gc_hits:
                 return "—"
             best = gc_hits[0]
+            # RT 退路的值是**秒**、不是 RI。加上單位,格子自己就分得出來——欄位
+            # 標題也會跟著改（見 _sync_gc_column_heading），兩處一致。
             if "rt" in best.get("match_dimensions", []):
-                val, delta = best.get("Rt[sec]"), best.get("delta_rt")
+                val, delta, unit = best.get("Rt[sec]"), best.get("delta_rt"), " s"
             else:
-                val, delta = best.get("RI"), best.get("delta_ri")
+                val, delta, unit = best.get("RI"), best.get("delta_ri"), ""
             if val is None:
                 return "—"
             d = f" (Δ{delta:.2f})" if delta is not None else ""
-            return f"{val:g}{d}"
+            return f"{val:g}{unit}{d}"
         if col == "ims":
             # Closest IMS (drift) library value + Δ, so it reads against the
             # peak's own Drift rel. RIP column. Uses the RIPrel drift match (no K0
@@ -2046,8 +2118,46 @@ class GCIMSApp:
         if then:
             then()
 
+    def _gc_column_dimension(self):
+        """實際用到的 GC 維度：'ri' / 'rt' / None（還沒比對或全部落空）。
+
+        `match.match_all()` 只在 `peak["ri"]` 有值時走 RI；沒有 RI 校準（資料夾沒
+        STD、也沒有可借的 registry）時它會**退到保留時間**，拿峰的 `retention_s`
+        去比庫裡的 `Rt[sec]`。兩者都寫進同一個 `gc_matches`，格子的呈現也一樣，
+        所以不看 `gc_dimension` 就分不出來。
+        """
+        dims = {(p.get("matches") or {}).get("gc_dimension")
+                for p in (self.state.peaks or [])}
+        if "ri" in dims:
+            return "ri"
+        return "rt" if "rt" in dims else None
+
+    def _sync_gc_column_heading(self):
+        """把 GC 欄標題改成實際用的維度，並在退到 RT 時於狀態列說明為什麼。
+
+        **為什麼要動標題**：標題寫死 "GC (RI)"，但沒有 STD 時格子裡是庫的
+        `Rt[sec]`（秒），不是 RI。使用者看到的是「RI 欄有數字」而實際上 RI 欄是
+        「—」、GC 欄是秒——兩個不同座標系長得一模一樣。這正是本專案在別處一再
+        防的無聲降級（`mea_source`、`rt_axis_version`、`k0_mode` 都是同一件事）。
+
+        **為什麼不直接停用 RT 退路**：庫與樣品真的同機同管柱同方法時，RT 比對是
+        合理的；能判斷的是使用者，不是這支程式。所以照顯示，但不讓它冒充 RI。
+        """
+        dim = self._gc_column_dimension()
+        label = {"ri": "GC (RI)", "rt": "GC (RT s)"}.get(dim, "GC (RI)")
+        try:
+            self.peak_tree.heading("gc", text=label)
+        except TclError:
+            return
+        if dim == "rt":
+            self.status_label.config(
+                text="⚠ No STD in this folder — RI uncalibrated. The GC column is "
+                     "retention-time matching against the library's Rt[sec], which "
+                     "is not transferable across instrument / column / method.")
+
     def _refresh_match_columns(self):
         """Re-render every table row now that peaks carry `matches`."""
+        self._sync_gc_column_heading()
         for item in self.peak_tree.get_children():
             vals = self.peak_tree.item(item, "values")
             try:
@@ -2123,7 +2233,9 @@ class GCIMSApp:
 
         win = Toplevel(self.root)
         win.title(f"Peak #{peak.get('peak_id')} — compound candidates")
-        win.geometry("720x480")
+        # 高度從 480 加到 620：表頭改成「一行一對」後變高，而底部的 Close 與
+        # 「Showing N of M」計數必須在**預設**尺寸下就看得見，不能要求使用者先拉大視窗。
+        win.geometry("780x620")
         # Register for one-window-per-peak dedup; drop it when the window closes.
         pid = peak.get("peak_id")
         self._match_windows[pid] = win
@@ -2139,14 +2251,45 @@ class GCIMSApp:
         ims_txt = {"drift_rel": f"drift vs RIP-relative ({len(ims_hits)} hit(s))",
                    "k0": f"K0 ({len(ims_hits)} hit(s))",
                    None: "no drift hit within tolerance"}.get(ims_dim, str(ims_dim))
-        head = (f"Peak #{peak.get('peak_id')}   "
-                f"Drift rel. RIP={peak.get('drift_relative', '—')}   RI={ri_txt}\n"
-                f"Intensity={peak.get('intensity', '—')}   "
-                f"Retention time={peak.get('retention_s', '—')} s   "
-                f"Drift time={peak.get('drift_ms', '—')} ms\n"
-                f"GC: {dim_txt}   |   IMS: {ims_txt}   |   combined (both axes): {len(combined)}")
-        Label(win, text=head, justify="left", anchor="w",
-              font=("Georgia", 9), bg="white").pack(fill="x", padx=8, pady=(8, 2))
+        # 一行一對 name/value。先前是三行、每行擠三對 `name=value`,要找某個值得
+        # 逐字掃描,而且欄位一多就換行到看不出哪個值屬於哪個名稱。改成兩欄 grid：
+        # 左欄欄位名、右欄值,值靠左對齊成一直線。
+        def _val(v, unit=""):
+            return "—" if v is None else f"{v}{unit}"
+
+        hdr = Frame(win, bg="white")
+        hdr.pack(fill="x", padx=8, pady=(8, 2))
+        Label(hdr, text=f"Peak #{peak.get('peak_id')}", anchor="w", bg="white",
+              font=("Georgia", 10, "bold")).grid(row=0, column=0, columnspan=2,
+                                                 sticky="w", pady=(0, 2))
+        summary = (
+            ("Drift rel. RIP", _val(peak.get("drift_relative"))),
+            ("RI", ri_txt),
+            ("Intensity", _val(peak.get("intensity"))),
+            ("Retention time", _val(peak.get("retention_s"), " s")),
+            ("Drift time", _val(peak.get("drift_ms"), " ms")),
+            ("GC dimension", dim_txt),
+            ("IMS dimension", ims_txt),
+            ("Combined (both axes)", str(len(combined))),
+        )
+        for i, (field, value) in enumerate(summary, start=1):
+            Label(hdr, text=f"{field}:", anchor="w", bg="white", fg="gray30",
+                  font=("Georgia", 9)).grid(row=i, column=0, sticky="w")
+            Label(hdr, text=value, anchor="w", bg="white",
+                  font=("Georgia", 9)).grid(row=i, column=1, sticky="w", padx=(10, 0))
+
+        if gc_dim == "rt":
+            # 這個面板列的是化合物**名字**,比表格的數字更容易被當成結論,所以退到
+            # RT 時要在這裡明講一次。保留時間不跨儀器/管柱/方法轉移——RI 存在的
+            # 理由就是把這些差異正規化掉,沒有 RI 就沒有這層保護。
+            Label(win,
+                  text="⚠ No RI calibration (no STD in this folder) — these GC "
+                       "candidates come from retention-time proximity to the "
+                       "library's Rt[sec].\n    Retention time does not transfer "
+                       "across instrument, column or temperature program; treat "
+                       "these names as unverified.",
+                  fg="firebrick", justify="left", anchor="w",
+                  font=("Georgia", 8), bg="white").pack(fill="x", padx=8)
 
         if peak.get("ri_assumed_unverified"):
             # 內容來自 reference_series 的 caveat_short，隨資料走；沒有就退回通用句。
@@ -2175,9 +2318,31 @@ class GCIMSApp:
                    "source": "Source file"}
         widths = {"match": 70, "name": 190, "cas": 90, "formula": 80,
                   "libval": 70, "delta": 55, "source": 150}
+        # **順序是這裡的重點,不是排版偏好。** pack 依呼叫順序配置空間,最後才輪到
+        # 剩下的；先前 tree 以 expand=True 先packed、footer 後packed,視窗一不夠高就是
+        # footer 被擠出畫面外——「Showing N of M」因此要拉大視窗才看得到。
+        # 改成底部的 Close 列與 footer 先以 side="bottom" 佔位,tree 最後 pack 並吸收
+        # 剩餘空間,不夠高時縮的是表格(它本來就有捲軸),不是那兩列。
+        bar = Frame(win, bg="white")
+        bar.pack(side="bottom", fill="x", padx=8, pady=(0, 8))
+        Button(bar, text="Close", command=win.destroy,
+               font=("Georgia", 9), width=10).pack(side="right")
+        win.bind("<Escape>", lambda e: win.destroy())
+
+        foot_lbl = Label(win, justify="left", anchor="w",
+                         font=("Georgia", 8), fg="gray30", bg="white")
+        foot_lbl.pack(side="bottom", fill="x", padx=8, pady=(0, 4))
+        # 這段字很長(容差、上限、選庫策略),固定不換行就會被右邊界切掉。跟著視窗
+        # 寬度重算 wraplength,縮窗時換行而不是消失。
+        win.bind("<Configure>",
+                 lambda e, w=win, l=foot_lbl: (l.config(wraplength=max(200, w.winfo_width() - 24))
+                                               if e.widget is w else None), add="+")
+
         frame = Frame(win, bg="white")
         frame.pack(fill="both", expand=True, padx=8, pady=6)
-        tree = Treeview(frame, columns=cols, show="headings", height=14)
+        # height=8（原 14）：這是**要求**高度,視窗放大時 expand=True 仍會撐開。原本的
+        # 14 列讓視窗的最小需求高度超過預設高度,底部兩列一開始就在畫面外。
+        tree = Treeview(frame, columns=cols, show="headings", height=8)
         for c in cols:
             tree.heading(c, text=headers[c])
             tree.column(c, width=widths[c], anchor="w", stretch=(c == "name"))
@@ -2186,10 +2351,6 @@ class GCIMSApp:
         tree.pack(side="left", fill="both", expand=True)
         vs.pack(side="right", fill="y")
         tree.tag_configure("combined", background="#e7f5e7")
-
-        foot_lbl = Label(win, justify="left", anchor="w",
-                         font=("Georgia", 8), fg="gray30", bg="white")
-        foot_lbl.pack(fill="x", padx=8, pady=(0, 8))
 
         def _row(cand, label):
             name = cand.get("Name") or cand.get("NAME") or "?"
@@ -2735,6 +2896,21 @@ class GCIMSApp:
 
         Batch 8 placeholder — export format not yet finalized.
         """
+        # A calibration STD is not a sample: it is the source of the RI/K0 scale
+        # the samples are reported against, so reporting it as a result would be
+        # circular. The check lives here (rather than only in Batch 8's exporter)
+        # so the rule is stated at the entry point and cannot be forgotten when
+        # the exporter is written.
+        if self.is_std_file(self.state.selected_mea_file):
+            messagebox.showinfo(
+                "STD — calibration run, not a sample",
+                f"{Path(self.state.selected_mea_file).name} is this folder's "
+                "calibration STD (header Sample=STD).\n\n"
+                "It supplies the RI anchors and the K0 instrument constant that "
+                "the samples are reported against, so it is not itself reported.\n\n"
+                "Select a sample .mea to generate a report."
+            )
+            return
         messagebox.showinfo(
             "Generate Report — not yet implemented",
             "Report generation is planned for UI Batch 8 of the Identify Workflow\n"

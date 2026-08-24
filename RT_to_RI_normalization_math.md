@@ -1,6 +1,6 @@
 # RT → RI 正規化實作說明 —— 供 Claude Code CLI 參考
 
-**Version: 3.1 — by Albert Sheng**
+**Version: 3.3 — by Albert Sheng**
 
 **背景**：六個校正錨點已經確認（見 `GC-IMS_Identify_Workflow.md` draft.21 第四階段第 5、13 點），本文件只講「拿到六個錨點之後，怎麼把任何一個峰的 RT 換算成 RI」這一步的數學與實作，其他背景（化合物身分、STD 檔案解析等）不重複，請對照 workflow md 一起看。
 

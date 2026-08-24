@@ -1,6 +1,12 @@
 """
 library.py  —  GC-IMS Identify Workflow 第三階段：.ril / .iml 資料庫讀取
-Version: 3.1 — by Albert Sheng
+Version: 3.3 — by Albert Sheng
+
+變更記錄：
+  3.3  — 新增 infer_polarity_from_column_name()：舊版 `GC Column` 表頭沒有
+         `POLARITY:` 欄位（實測 GAS/藝妓咖啡 全批），極性因此為 None，
+         select_ril_paths() 的極性退路整條不啟動、回傳 0 筆 .ril 而毫無跡象。
+         推測只在表頭沒寫時補位，顯式值一律優先，來源記在 polarity_source。
 
 依 GC-IMS_Identify_Workflow.md §第三階段（draft.13 定案）：
   - .ril（21 欄，Tab-separated，CAS/NAME/Formula/RI/...）
@@ -215,12 +221,58 @@ def load_iml(path):
 # --------------------------------------------------------------------------- #
 # .mea 表頭 GC Column 欄位解析（workflow §第三階段第 3 點）
 # --------------------------------------------------------------------------- #
+# 固定相名稱 → 極性。**只在表頭沒有 `POLARITY:` 欄位時**當退路用。
+#
+# 為什麼需要：`.mea` 的 `GC Column` 有至少兩種排版。新版帶顯式極性
+#     'FS-SE-54-CB-1, L: 30.00m, ID: 0.53mm, FT: 0.50µm, POLARITY: np'
+# 舊版（實測 GAS/藝妓咖啡 全批 14 檔）沒有：
+#     'FS-SE54-CB-0.5, 15m x 0,32ID'
+# 後者讓 polarity=None，於是 select_ril_paths() 的極性退路整條不啟動，回傳
+# strategy='none' 與 **0 筆 .ril**——RI 維度連庫都沒有，卻沒有任何訊息。
+#
+# 對應關係不是猜的：SE-54 在**同一台儀器自己的表頭**裡就標成 `POLARITY: np`
+# （見上面的新版字串），所以這裡把 SE-54 判為 np 是照著儀器自己的講法，不是本
+# 專案的化學判斷。其餘項目沿用 select_ril_paths() 既有的關鍵字慣例。
+#
+# 比對在**去掉分隔符後**的字串上做（'FS-SE54-CB-0.5' → 'fsse54cb05'），因為同一
+# 種固定相在不同檔案裡寫成 SE-54 / SE54 / SE 54 都有。
+_PHASE_POLARITY = (
+    # (正規化後的關鍵字, 極性)  —— 由具體到一般，第一個命中者為準
+    ("wax", "p"), ("carbowax", "p"), ("peg", "p"), ("ffap", "p"), ("innowax", "p"),
+    ("se54", "np"), ("se30", "np"), ("db5", "np"), ("hp5", "np"), ("rtx5", "np"),
+    ("ov1", "np"), ("ov101", "np"), ("zb5", "np"), ("bpx5", "np"), ("cpsil", "np"),
+    ("db1", "np"), ("silox", "np"),
+)
+
+
+def _normalize_phase(text):
+    """去掉分隔符與空白並轉小寫，讓 SE-54 / SE54 / SE 54 都能比對到同一個 key。"""
+    return "".join(ch for ch in (text or "").lower() if ch.isalnum())
+
+
+def infer_polarity_from_column_name(column_name):
+    """由管柱型號名稱推測極性，回傳 'np' / 'p' / None（認不出來就 None）。
+
+    **只在表頭沒有顯式 `POLARITY:` 時才該呼叫**——顯式值一律優先，這裡是退路。
+    認不出來就回 None，不亂猜：寧可讓上游看到「沒有極性」，也不要憑一個猜出來的
+    極性去載入錯誤固定相的 RI 庫（RI 是管柱相依量，載錯庫等於比對錯的尺標）。
+    """
+    norm = _normalize_phase(column_name)
+    if not norm:
+        return None
+    for key, pol in _PHASE_POLARITY:
+        if key in norm:
+            return pol
+    return None
+
+
 def parse_gc_column_header(gc_column_value):
     """
     解析 .mea 表頭 'GC Column' 欄位，取出五個子資訊。
 
-    輸入格式（實測範例）:
+    輸入格式（實測範例，兩種排版都要吃）:
         'FS-SE-54-CB-1, L: 30.00m, ID: 0.53mm, FT: 0.50µm, POLARITY: np'
+        'FS-SE54-CB-0.5, 15m x 0,32ID'                     ← 無 POLARITY 欄位
 
     回傳
     ----
@@ -229,7 +281,14 @@ def parse_gc_column_header(gc_column_value):
         length         長度字串（e.g. '30.00m'）
         inner_diameter 內徑字串（e.g. '0.53mm'）
         film_thickness 膜厚字串（e.g. '0.50µm'）
-        polarity       極性字串，正規化為小寫（e.g. 'np' / 'p'）
+        polarity       極性字串，正規化為小寫（e.g. 'np' / 'p'）；表頭沒寫時退而
+                       由 infer_polarity_from_column_name() 推得
+        polarity_source 極性哪來的：'header'（表頭明寫）/
+                       'inferred_from_column_name'（由型號推得）/ None（兩者皆無）
+
+    **顯式優先、推測補位、來源可辨識**：表頭有寫就用表頭的，不覆蓋；沒寫才推。
+    `polarity_source` 讓下游能區分兩者——沿用本專案 k0_mode / ri_mode 的慣例，
+    值可以是推出來的，但不能讓人以為它是量到的。
 
     Raises
     ------
@@ -247,6 +306,7 @@ def parse_gc_column_header(gc_column_value):
         "inner_diameter": None,
         "film_thickness": None,
         "polarity": None,
+        "polarity_source": None,
     }
     if not parts:
         return result
@@ -269,6 +329,14 @@ def parse_gc_column_header(gc_column_value):
             result["film_thickness"] = val
         elif key == "POLARITY":
             result["polarity"] = val.lower()
+            result["polarity_source"] = "header"
+
+    # 表頭沒寫極性才推——顯式值一律優先（見 docstring）
+    if result["polarity"] is None:
+        inferred = infer_polarity_from_column_name(result["column_name"])
+        if inferred:
+            result["polarity"] = inferred
+            result["polarity_source"] = "inferred_from_column_name"
     return result
 
 

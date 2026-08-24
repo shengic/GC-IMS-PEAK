@@ -1,6 +1,6 @@
 # Stage 4（RT→RI 校準）程式碼片段彙整 —— 供 Claude Code CLI 參考
 
-**Version: 3.1 — by Albert Sheng**
+**Version: 3.3 — by Albert Sheng**
 
 **性質聲明**：以下都是 claude.ai 對話中討論、驗證過邏輯的**片段/雛型**，不是完整可直接執行的模組——變數命名、錯誤處理、與既有 `readGAS.py`/`peaks.py` 的實際介面銜接，都還需要 CLI 依專案現況調整。請配合 `Stage4_RT-RI_briefing_for_CLI.md` 跟 `GC-IMS_Identify_Workflow.md`（draft.18）第四階段一起讀，後者是設計權威版本，這份只是程式碼骨架集中存放。
 

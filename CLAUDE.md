@@ -48,9 +48,13 @@
 
 ## 環境
 
+專案根目錄至今搬過四個磁碟機(`J:` → `K:` → `F:` → 現在的 `C:\GC-IMS-PEAK`),寫死
+絕對路徑的指令每次都要跟著改而且會無聲失敗,所以一律用**相對於專案根目錄**的寫法
+(PowerShell 與 bash 皆可直接執行):
+
 ```bash
-"F:/GC-IMS-PEAK/.venv/Scripts/python.exe" -m pytest test/ -q     # 全套測試
-"F:/GC-IMS-PEAK/.venv/Scripts/python.exe" -m pip install -r requirements.txt
+.venv/Scripts/python.exe -m pytest test/ -q     # 全套測試(現 191 項,約 9 s;冷啟動約 20 s)
+.venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
 `results/` 已 gitignore。`.mea` 原始檔任何程式都不得修改或刪除。

@@ -1,6 +1,11 @@
 # GC-IMS 二維資料找峰專案：工作流、方法論與流程圖
 
-**Version: ver.02 — by Albert Sheng**
+**Version: ver.02 — by Albert Sheng**（專案版本 **3.3**；本檔為封存文件，見下）
+
+> **本檔的 `ver.02` 不再前進**。它是最早的影像模式藍本，其founding前提（只拿得到
+> 2D 熱圖影像、無法取得 `.mea` 數值矩陣）**已不成立**——`readGAS.py` 直接解析
+> `.mea`。保留它是為了方法論記錄，不是現行設計；現行權威是
+> `GC-IMS_Identify_Workflow.md`。`ver.02` 被本專案文件引用 19 處，故維持原編號。
 
 本文件彙整自一系列設計討論，作為 GC-IMS（或同類二維風味分析資料）峰偵測模組的架構藍本。 定位：**可校準的儀器（calibratable instrument）**，而非黑盒模型。所有方法選擇以「可解釋、可校準、可嵌入 SaaS」為最高原則。
 

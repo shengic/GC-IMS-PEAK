@@ -1,6 +1,6 @@
 """
 peaks.py  —  GC-IMS 峰偵測（第一層：偵測 / 測量；measure-only v1）
-Version: 3.1 — by Albert Sheng
+Version: 3.3 — by Albert Sheng
 
 變更記錄：
   3.1  — load_surface() 從 .npz 載入時改用 npz 內的 mea_source 當 meta["source"]，

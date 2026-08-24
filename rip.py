@@ -1,6 +1,6 @@
 """
 rip.py  —  GC-IMS Identify Workflow 第一階段：RIP 正規化
-Version: 3.1 — by Albert Sheng
+Version: 3.3 — by Albert Sheng
 
 依 GC-IMS_Identify_Workflow.md §第一階段（draft.13 定案）：
   - find_rip(intensity, start=200) → (rip_index, rip_intensity)

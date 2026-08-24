@@ -1,6 +1,6 @@
 """
 identify.py  —  GC-IMS Identify Workflow 第六階段：整合輸出
-Version: 3.2 — by Albert Sheng
+Version: 3.3 — by Albert Sheng
 
 依 GC-IMS_Identify_Workflow.md §第六階段：
   輸入：_peaks.json（來自 peaks.py，已含 drift_relative 由 rip 整合）
@@ -104,7 +104,7 @@ def select_library_files(data_dir, header):
     gc_col = header.get("GC Column", "")
     drift_gas = header.get("Drift Gas", "")
     parsed = library.parse_gc_column_header(gc_col) if gc_col else {
-        "column_name": None, "polarity": None,
+        "column_name": None, "polarity": None, "polarity_source": None,
     }
 
     ril_paths, ril_strategy = library.select_ril_paths(
@@ -119,6 +119,9 @@ def select_library_files(data_dir, header):
         "drift_gas_header": drift_gas,
         "parsed_column_name": parsed["column_name"],
         "parsed_polarity": parsed["polarity"],
+        # 極性是表頭明寫的還是由型號推的（見 library.parse_gc_column_header）。
+        # 推來的極性決定了載哪些 .ril，也就決定了 RI 拿什麼尺標比——必須可追溯。
+        "parsed_polarity_source": parsed.get("polarity_source"),
         "ril_strategy": ril_strategy,
         "iml_strategy": iml_strategy,
     }

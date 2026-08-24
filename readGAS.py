@@ -1,6 +1,6 @@
 """
 readGAS.py  —  G.A.S. FlavourSpec® .mea 解析 + 繪製 2D 熱圖
-Version: 3.1 — by Albert Sheng
+Version: 3.3 — by Albert Sheng
 
 變更記錄：
   3.1  — axes 新增 source（原始 .mea 絕對路徑），export_npz() 存成 mea_source，讓

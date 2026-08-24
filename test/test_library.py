@@ -93,6 +93,7 @@ def test_library_smoke():
         "inner_diameter": "0.53mm",
         "film_thickness": "0.50µm",
         "polarity": "np",
+        "polarity_source": "header",
     }
 
     # ---- select_ril_paths ----
@@ -158,6 +159,53 @@ def test_library_smoke():
 
     print()
     print("[OK] all library.py smoke checks passed")
+
+
+# --------------------------------------------------------------------------- #
+# 極性推測：舊版 GC Column 排版沒有 POLARITY 欄位（實測 GAS/藝妓咖啡 全批）
+# --------------------------------------------------------------------------- #
+def test_polarity_inferred_when_header_omits_it():
+    """舊排版 'FS-SE54-CB-0.5, 15m x 0,32ID' 沒有 POLARITY:，要能推出 np。
+
+    後果不是「少一個欄位」而已：polarity=None 會讓 select_ril_paths() 的極性退路
+    整條不啟動，回傳 strategy='none' 與 0 筆 .ril——RI 維度連庫都沒有，而畫面上
+    沒有任何跡象。實測該資料夾原本 0 筆，推出極性後 13 個檔、117k 列。
+    """
+    parsed = library.parse_gc_column_header("FS-SE54-CB-0.5, 15m x 0,32ID")
+    assert parsed["column_name"] == "FS-SE54-CB-0.5"
+    assert parsed["polarity"] == "np"
+    assert parsed["polarity_source"] == "inferred_from_column_name"
+
+
+def test_explicit_polarity_is_never_overwritten_by_inference():
+    """表頭明寫的極性優先，且來源標記要能分辨兩者。
+
+    這條是防呆：推測只該補位、不該蓋掉量到的東西。若哪天推測表寫錯，明寫的值
+    仍必須贏——不然錯誤會擴散到本來正確的批次。
+    """
+    parsed = library.parse_gc_column_header("SOME-WAX-COLUMN, POLARITY: np")
+    assert parsed["polarity"] == "np"          # 表頭說 np，即使名字裡有 'wax'
+    assert parsed["polarity_source"] == "header"
+
+
+def test_unknown_phase_infers_nothing():
+    """認不出的固定相回 None，不亂猜。
+
+    載錯極性的 .ril 等於拿另一種固定相的尺標比 RI，比「沒有庫」更糟——後者看得
+    出來，前者會產出看似合理的數字。
+    """
+    parsed = library.parse_gc_column_header("MYSTERY-PHASE-9000, 10m")
+    assert parsed["polarity"] is None
+    assert parsed["polarity_source"] is None
+    assert library.infer_polarity_from_column_name("MYSTERY-PHASE-9000") is None
+
+
+def test_phase_name_separators_do_not_matter():
+    """SE-54 / SE54 / SE 54 是同一種固定相，寫法不該改變結果。"""
+    for name in ("FS-SE-54-CB-1", "FS-SE54-CB-0.5", "FS SE 54"):
+        assert library.infer_polarity_from_column_name(name) == "np", name
+    for name in ("DB-WAX", "HP-INNOWAX", "Carbowax 20M"):
+        assert library.infer_polarity_from_column_name(name) == "p", name
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 """
 test_readGAS.py  —  G.A.S. .mea 檔案結構探測器 (probe / diagnostic)
-Version: 3.1 — by Albert Sheng
+Version: 3.3 — by Albert Sheng
 
 目的：在寫正式的 readGAS.py（含繪圖）之前，先「看清楚」這個 .mea 到底長怎樣。
 本程式 **不繪圖、不假設格式**，只做檢查並把結果印出來，讓你把輸出貼回給我，

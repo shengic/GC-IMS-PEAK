@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 peak_with_number.py — Render a GC-IMS overlay with peak circles AND peak-id numbers.
-Version: 3.1 — by Albert Sheng
+Version: 3.3 — by Albert Sheng
 
 Changelog:
   3.1 — 移除熱圖右上角的軸標註（改由 UI 的「ⓘ 軸說明」呈現）。

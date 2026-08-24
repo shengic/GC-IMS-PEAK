@@ -126,3 +126,114 @@ class TestFileOperationsFallback:
         peaks_csv, error_csv = load_peaks_from_csv(str(sample_peaks_csv))
         assert error_csv is None
         assert len(peaks_csv) == 3
+
+
+class TestSTDFileListing:
+    """The MEA file box marks the calibration STD instead of hiding it.
+
+    Decision (2026-08-24): the STD stays listed — it goes through the same
+    detection path as a sample and inspecting its peaks is the only way to check
+    the RI anchor assignment — but it is marked, sorted last, and refused by
+    Generate Report. See `GCIMSApp.populate_file_list`.
+
+    These drive the real `populate_file_list` / `is_std_file` against a fake
+    Treeview, so they need no Tk display. What they actually lock down is that
+    the marking follows the **header** (`Sample=STD`), not the filename.
+    """
+
+    class _FakeTree:
+        """Records insert() calls the way ttk.Treeview would accept them."""
+
+        def __init__(self):
+            self.rows = []
+
+        def delete(self, *items):
+            self.rows = []
+
+        def get_children(self):
+            return []
+
+        def insert(self, parent, index, text="", values=(), tags=()):
+            self.rows.append({"text": text, "values": values, "tags": tuple(tags)})
+
+    @staticmethod
+    def _app_shim(tree):
+        """Bind the real methods to a shim carrying just what they touch."""
+        from main import AppState, GCIMSApp
+
+        class _Shim:
+            pass
+
+        shim = _Shim()
+        shim.state = AppState()
+        shim.file_tree = tree
+        shim.populate_file_list = GCIMSApp.populate_file_list.__get__(shim)
+        shim.is_std_file = GCIMSApp.is_std_file.__get__(shim)
+        return shim
+
+    @staticmethod
+    def _write_mea(folder, name, sample):
+        """A stub .mea: `_read_header_lite` only ever reads the ASCII header."""
+        p = Path(folder) / name
+        p.write_bytes(
+            f'Machine type = FlavourSpec\r\nSample = "{sample}"\r\n'
+            f"Chunks count = 10\r\n".encode("latin-1")
+        )
+        return p
+
+    def test_std_is_marked_last_and_samples_keep_order(self, tmp_path):
+        self._write_mea(tmp_path, "260625_141215_STD.mea", "STD")
+        self._write_mea(tmp_path, "260625_143022_A_1_2.mea", "A_1_2")
+        self._write_mea(tmp_path, "260625_141900_A_1_1.mea", "A_1_1")
+
+        tree = self._FakeTree()
+        shim = self._app_shim(tree)
+        shim.populate_file_list(str(tmp_path))
+
+        assert [r["text"] for r in tree.rows] == [
+            "260625_141900_A_1_1.mea",
+            "260625_143022_A_1_2.mea",
+            "260625_141215_STD.mea   · STD",
+        ]
+        assert tree.rows[-1]["tags"] == ("std_file",)
+        assert all(r["tags"] == () for r in tree.rows[:-1])
+        # The row still carries its path, so the STD remains openable.
+        assert tree.rows[-1]["values"][0].endswith("260625_141215_STD.mea")
+
+    def test_marking_follows_the_header_not_the_filename(self, tmp_path):
+        """The two ways a filename convention would get it wrong, both covered.
+
+        `scan_folder_for_std` judges by `Sample=STD` precisely because operators
+        mistype names; if this list re-decided by filename it could disagree with
+        the file the calibration actually used, in either direction.
+        """
+        # Named STD, but the header says it is a sample.
+        self._write_mea(tmp_path, "260625_150000_STD_rerun.mea", "A_2_1")
+        # A real STD whose name says nothing.
+        self._write_mea(tmp_path, "260625_151000_kalibrierung.mea", "STD")
+
+        tree = self._FakeTree()
+        shim = self._app_shim(tree)
+        shim.populate_file_list(str(tmp_path))
+
+        marked = [r for r in tree.rows if r["tags"] == ("std_file",)]
+        assert len(marked) == 1
+        assert marked[0]["text"].startswith("260625_151000_kalibrierung.mea")
+        assert shim.is_std_file(str(tmp_path / "260625_151000_kalibrierung.mea"))
+        assert not shim.is_std_file(str(tmp_path / "260625_150000_STD_rerun.mea"))
+
+    def test_folder_without_std_lists_everything_unmarked(self, tmp_path):
+        self._write_mea(tmp_path, "260625_141900_A_1_1.mea", "A_1_1")
+        tree = self._FakeTree()
+        shim = self._app_shim(tree)
+        shim.populate_file_list(str(tmp_path))
+
+        assert len(tree.rows) == 1
+        assert tree.rows[0]["tags"] == ()
+        assert shim.state.std_files == set()
+
+    def test_is_std_file_handles_no_selection(self, tmp_path):
+        """Generate Report calls this with whatever is selected — possibly nothing."""
+        shim = self._app_shim(self._FakeTree())
+        assert not shim.is_std_file(None)
+        assert not shim.is_std_file("")

@@ -1,6 +1,11 @@
 """
 reference_series.py  —  第四階段 RT→RI 校正的「參照系列定義」（可插拔）
-Version: 3.1 — by Albert Sheng
+Version: 3.3 — by Albert Sheng
+
+變更記錄：
+  3.3  — 新增 `vocal_project_table` 系列：資料夾沒有 STD 時，RI 由該資料夾的
+         `.gasprj` 內建校正表帶入（ri_values 逐資料夾給，不預填）。加這個系列
+         不需要動 calibration.py 的內插演算法——這正是本模組存在的目的。
 
 calibration.py 的核心邏輯**只依賴這裡的介面**，不假設任何特定化合物系列——
 換系列（烷烴 → 酮 → 自訂對照表）只要換 series_key 或填資料，不動校正演算法。
@@ -189,6 +194,33 @@ REFERENCE_SERIES = {
         "kind": "table",
         "ri_values": None,
         "note": "直接指定各錨點 RI 值，繞過任何系列假設（最可信）",
+    },
+    # VOCal 專案檔（.gasprj）內建的 RI normalization 表。資料夾裡沒有 STD 時，
+    # 這是唯一「屬於本批次自己」的 RI 尺標（同儀器、同管柱、同方法、同一天）。
+    # ri_values 由 calibration.build_from_gasprj() 逐資料夾帶入，這裡不預填。
+    #
+    # assumed=True 的理由與 ketone 不同，要分清楚：ketone 是「不確定管柱極性」，
+    # 這裡是**完全不知道這條曲線怎麼來的**——.gasprj 只存重採樣後的格點
+    # （實測 203 點、log10(Rt) 等距 0.01），原始錨點是哪幾個化合物、幾點、誰量的，
+    # 檔案裡沒有。所以它比 STD 自建校正弱，但仍屬本批次，優於借別批的尺標。
+    "vocal_project_table": {
+        "assumed": True,
+        "kind": "table",
+        "ri_values": None,
+        "confidence": "vocal_project_table_anchors_not_recoverable",
+        "caveat_short": ("RI 來自 .gasprj 內建校正表，原始錨點與其來源不可考；"
+                         "非本專案自 STD 建立"),
+        "provenance": (
+            "來源：批次資料夾內 VOCal 專案檔（.gasprj）的 RI_Normalization 區塊，"
+            "格式 {ColNormY=RI, ColNormX=log10(Rt)}、ColNormisLog=true——與本專案第四"
+            "階段所用的 Kovats log 形式相同，故可直接當錨點使用。"
+            "⚠ 該表是 VOCal **重採樣後**的格點（實測 log10(Rt) 等距 0.01、203 點），"
+            "不是原始錨點：用什麼標準品、幾個點、管柱極性為何，檔案裡都沒有記錄，"
+            "無法回推。短保留時間端為 VOCal 在第一個真實錨點以下的外插，實測出現"
+            "負 RI（最低 −631），已於載入時依 Kovats 下限（甲烷 RI=100）截去。"
+        ),
+        "note": ("[2026-08-24] 無 STD 資料夾的 RI 來源。層級介於 batch_own_std 與 "
+                 "borrowed_from_registry 之間：本批次自己的尺標，但出處不可考。"),
     },
 }
 

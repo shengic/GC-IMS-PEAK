@@ -184,8 +184,8 @@ def test_load_peaks(sample_peaks_json):
 ## Common Issues
 
 ### `ModuleNotFoundError: No module named 'main'`
-- Make sure you're running pytest from the project root (`F:\GC-IMS-PEAK\`)
-- Or add `F:\GC-IMS-PEAK` to `PYTHONPATH`
+- Make sure you're running pytest from the project root (`C:\GC-IMS-PEAK\`)
+- Or add the project root to `PYTHONPATH`
 
 ### `ModuleNotFoundError: No module named 'PIL'`
 - Install Pillow: `pip install Pillow`

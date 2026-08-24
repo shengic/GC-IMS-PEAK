@@ -1,7 +1,14 @@
 # GC-IMS-PEAK — Status & Session Handoff
 
-**Last updated**: 2026-08-12 (session with Claude) — code tagged **v3.2**
-**Project root**: `F:/GC-IMS-PEAK` (was `K:/` in earlier sessions — paths below updated)
+**Last updated**: 2026-08-24 (session with Claude) — code tagged **v3.3**
+*(Note on earlier entries: they say "tagged v3.1"/"v3.2", but no such git tags were
+ever created — the repo went straight from `v3` to `v3.3`. Those names existed only
+in file headers and in this file's prose. Treat pre-v3.3 version names as labels,
+not as tags you can check out.)*
+**Project root**: `C:\GC-IMS-PEAK`. The root has moved four times (`J:` → `K:` →
+`F:` → `C:`), so **commands here use paths relative to the project root** rather
+than a drive letter that goes stale silently. Older entries below still quote the
+absolute path that was current when they were written; treat those as history.
 **Purpose**: catch a new session up on where the Identify Workflow implementation
 stands, what has been decided, what is testable now, and what to do next. Pair
 with `GC-IMS_Identify_Workflow.md` (the authoritative spec) — this file is the
@@ -31,11 +38,241 @@ progress tracker, not the design.
   Batches 7, 8 pending. (Batch 5 = the ▶ compound-match panel: clicking a peak's
   ▶ loads the `.ril`/`.iml` libraries and lists candidate compounds via
   `match.match_all`.)
-- **165** pytest checks passing across `test/` (~9 s; added `test_calibration.py`,
-  `test_rt_axis.py`).
+- **191** pytest checks passing across `test/` (~9 s warm, ~20 s cold; added `test_calibration.py`,
+  `test_rt_axis.py`, `test_baseline.py`).
 - Project uses `.venv` at project root; install with
-  `"F:/GC-IMS-PEAK/.venv/Scripts/python.exe" -m pip install -r requirements.txt`.
-  VS Code auto-detects this venv.
+  `.venv/Scripts/python.exe -m pip install -r requirements.txt` from the project
+  root. VS Code auto-detects this venv.
+- **Retention-time baseline correction exists but is off by default** —
+  `peaks.py --baseline` (AsLS). See the entry immediately below.
+
+### What changed on 2026-08-24 (latest) — RI without an STD, from the folder's own `.gasprj`
+
+**Follow-on from the entry below.** Once it was clear `藝妓咖啡` could only produce
+RT matches, the question became whether RI is obtainable there at all. **From the
+measurement alone: no** — RI is defined by interpolating against compounds of
+known RI, and GC-IMS has no MS, so peak identity cannot come from the data. That
+is the same gap the workflow calls the one thing genuinely blocking the chain.
+
+**But VOCal had already stored an RI scale for that batch.** Both `.gasprj` files
+in the folder carry a top-level `RI_Normalization` block —
+`{ColNormY: RI, ColNormX: log10(Rt), ColNormisLog: true}` — which is *exactly* the
+form this module's §第四階段 already uses (Kovats log, piecewise linear). So the
+points drop straight in as anchors with no conversion.
+
+**New tier `vocal_project_table`, placed between STD and registry:**
+
+```
+(a)  batch_own_std          folder has a usable STD          ← unchanged, still wins
+(a2) vocal_project_table    the folder's own .gasprj         ← NEW
+(b)  borrowed_from_registry same instrument|column|method
+(c)  unavailable            → RT fallback
+```
+
+Above the registry deliberately: `.gasprj` is **this batch's own** scale (same
+instrument, column, method, same run), the registry holds **another batch's**.
+Both rank below the STD, because only that path has anchors this project can name
+and check.
+
+Measured across all four `GAS/` folders — STD still wins wherever one exists, and
+the two folders that had no RI now have one:
+
+| folder | STD | .gasprj | ri_mode | anchors |
+|---|---|---|---|---|
+| Coffee-bean | 1 | 1 | `batch_own_std` | 6 |
+| 嘉義大學＿咖啡發酵 | 2 | 0 | `batch_own_std` | 6 |
+| 海洋大學…鱸魚 | 0 | 3 | `vocal_project_table` | 6 |
+| 藝妓咖啡 | 0 | 2 | `vocal_project_table` | 182 |
+
+(The 鱸魚 `.gasprj` yielding exactly 6 anchors is a nice confirmation — those are
+the original points whose RI values `ketone_RI_provenance.md` records as having
+been *borrowed* from that project.)
+
+**What the table is, and is not.** It is VOCal's **resampled** curve — 203 points
+on a uniform 0.01 grid in `log10(Rt)`, not the original anchors. Which standard
+produced it, how many points it really had, and its column polarity are **not
+recoverable from the file**. So `assumed_unverified=True` with its own label,
+`vocal_project_table_anchors_not_recoverable` — a different reason from ketone's
+(that one is "polarity unconfirmed", this one is "provenance unknown entirely").
+
+**The negative-RI tail is trimmed at the Kovats floor, not at a tuned threshold.**
+The short-RT end is VOCal extrapolating below its first real anchor and goes
+badly wrong — 13 points below zero, minimum **−631**. Methane is RI 100 *by
+definition* on the Kovats scale, so anything under it is not a small RI but a
+meaningless one; `KOVATS_RI_FLOOR = 100` cuts the leading run and
+`n_points_dropped_below_kovats_floor` records how many went (203 → 182 on this
+batch, leaving Rt 14.4–931 s). A slope-based rule was considered and lands in
+almost the same place (16.2 s vs 14.4 s) but would have been a tuned number;
+the definitional one is defensible without measurement.
+
+**Trimmed out of the anchor range, not deleted** — peaks below it still get an RI
+by boundary extrapolation and are automatically flagged `ri_extrapolated`, reusing
+the existing extrapolate-and-flag machinery rather than inventing a second one.
+Same for the other end: the table stops at Rt 931 s while this batch's RT axis
+runs to ~1800 s, so late peaks extrapolate and are flagged (verified: 1200 s and
+1800 s both flag, 500 s does not).
+
+**`ColNormisLog: false` is refused rather than guessed.** That would mean X holds
+`Rt` rather than `log10(Rt)`; guessing wrong yields a wholly displaced but
+normal-looking RI axis, and there is no such sample on hand to verify against.
+
+Implemented as `read_gasprj_ri_table()` / `scan_folder_for_gasprj()` /
+`build_from_gasprj()` in `calibration.py`, plus a `vocal_project_table` entry in
+`reference_series.py` — the series mechanism took it without any change to the
+interpolation code, which is what that indirection was for. The UI status line
+now names the source (`182 points from …gasprj`) instead of the hardcoded
+"ketone anchors", which would have been wrong for this path. 6 tests in
+`test_calibration.py`, including STD-outranks-`.gasprj` and the Kovats trim.
+
+**Still open**: this makes an RI axis available, it does not make it *verified*.
+Running an STD on that instrument and method remains the only route to
+`batch_own_std` there. Also note `borrowed_from_registry` is still effectively
+dead code — no registry file exists, nothing in production calls `save_registry()`,
+and `main.py` never passes `dims`, so tier (b) cannot fire from the UI at all.
+
+### What changed on 2026-08-24 (later) — ⚠ the GC column was showing RT under an "RI" heading
+
+**Found by the user asking a good question**: `GAS/藝妓咖啡` has no STD, so how was
+the GC column producing values at all? It shouldn't have been — not RI ones.
+
+**1. The GC column silently degrades to retention-time matching.**
+`match.match_all()` uses RI only when `peak["ri"]` is not None; otherwise it falls
+through to `match_rt()`, comparing the peak's `retention_s` against the library's
+`Rt[sec]` at ±5 s. Both land in the same `gc_matches` list and rendered
+identically, while the column heading was the hardcoded string `"GC (RI)"`. So the
+table displayed **seconds under an RI label**, with the RI column itself showing
+`—` right next to it. Same class of silent fallback as the `.npz`/`mea_source` bug
+and the RT-axis version marker.
+
+**Why it matters here specifically**: retention time is not transferable — that is
+the entire reason RI exists — and this batch differs from the library's conditions
+on all three axes that move RT.
+
+| | 藝妓咖啡 | 嘉義大學＿咖啡發酵 |
+|---|---|---|
+| instrument serial | 1H1-00088 | 5H4-00123 |
+| column | FS-SE54-CB-0.5, 15 m × 0.32 | FS-SE-54-CB-1, 30 m × 0.53 |
+| method | COFFEE_30 | COFFEE-40RAW |
+| RT span | 1800 s | 3000 s |
+
+Measured on that folder's real peaks: every peak drew **9–24 library hits inside
+±5 s**, with implausible nearest matches (2,6-dichlorophenol at Δ0.01 s,
+hexamethyldisiloxane — which is column bleed — methanol at RT 72 s). With 1000
+`.iml` rows spread across the RT range, ±5 s almost always finds *something*; a
+small Δ means numeric proximity, not identification.
+
+**Fixed by labelling, not by removing the fallback** (user decision): the heading
+becomes **`GC (RT s)`** when the RT path is in use, cells carry the ` s` unit, the
+status bar states that RI is uncalibrated and RT is not transferable, and the ▶
+panel — where compound *names* appear — gets an explicit warning. The fallback
+itself is legitimate when library and sample really do share a method, and only
+the user can know that. `_gc_column_dimension()` reads the actual
+`gc_dimension`, preferring `ri` if any peak has it.
+
+**2. That folder was also loading 0 `.ril` rows — invisibly.** Its `GC Column`
+header uses an older layout with **no `POLARITY:` field**
+(`FS-SE54-CB-0.5, 15m x 0,32ID`), so `parse_gc_column_header()` returned
+`polarity=None`, the name matched no `.ril` filename, and the polarity fallback
+never fired → `strategy='none'`, zero rows. The RI dimension had no library at
+all, and nothing said so.
+
+`infer_polarity_from_column_name()` now maps the stationary phase to a polarity
+when the header omits it (SE-54/DB-5/HP-5/… → `np`; WAX/Carbowax/PEG/FFAP → `p`),
+comparing on the separator-stripped name so SE-54 / SE54 / SE 54 all hit.
+**The mapping is not this project's chemistry judgement** — the same instrument
+writes `POLARITY: np` for SE-54 in its own newer-format header, so this follows
+the instrument's own labelling. Explicit header values always win and are never
+overwritten; `polarity_source` (`header` / `inferred_from_column_name` / `None`)
+travels into `identify.py`'s `library_summary.selection`, per the project's rule
+that a derived value must stay distinguishable from a measured one. An
+unrecognised phase infers nothing — loading the *wrong* polarity's `.ril` is worse
+than loading none, because it produces plausible-looking numbers off the wrong
+scale. **Measured: 0 → 13 files / 117,329 `.ril` rows on that folder.**
+
+**3. Fixed an intermittent Tk test skip while in there.** `tk.Tk()` occasionally
+raised during the suite, and the skip reason said "no Tk display available" —
+indistinguishable from a genuinely headless box. Root creation in isolation is
+fine (300 cycles, no failure), so it is transient; `_tk_root_or_skip()` now
+retries once and reports the real `TclError` if it still fails. 10 consecutive
+suite runs clean afterwards. This was likely also the cause of the intermittent
+skips recorded on 2026-08-12 further down this file.
+
+### What changed on 2026-08-24 — STD marked in the file list; stale paths swept
+
+**The MEA file box now marks the calibration STD instead of listing it as an
+ordinary sample**: sorted last, grey italic, `· STD` appended, a status-bar note
+on selection, and `Generate Report` declines it (reporting the STD would be
+circular — it *is* the scale the samples are reported against).
+
+**It is marked, not hidden**, which was the actual decision to make here. The STD
+is a real measurement that goes through the same detection path as a sample —
+`_start_folder_calibration()` runs `peaks.py` on it and the anchors come from its
+own `_peaks.json` — and opening it is currently the only way to see which six
+peaks became the anchors. That assignment is the least-verified step in the whole
+RI chain (open decision 3 below) and is exactly what the anchor off-by-one turned
+on. Hiding it would also turn a failed STD detection into "no RI axis" with
+nothing to inspect.
+
+**The marking follows the header, never the filename.**
+`calibration.scan_folder_for_std()` decides by `Sample == "STD"` because
+operators mistype names; re-deciding it in the UI by filename would let the list
+disagree with the file the calibration actually used, in either direction. Both
+directions are locked by `test/test_file_operations.py::TestSTDFileListing`
+(4 tests, no Tk display needed — they drive the real `populate_file_list()`
+against a fake tree).
+
+**Also swept**: the project root moved `F:` → `C:`, so every doc command is now
+relative to the project root instead of naming a drive letter that goes stale
+silently (this is the fourth move: `J:` → `K:` → `F:` → `C:`), and `baseline.py`
+— which had landed in the code with no mention in any document — is now recorded
+here, in `README.md` and in `GC-IMS_Pipeline_Implementation.md`.
+
+### What changed after v3.2 — retention-time baseline correction (AsLS), opt-in
+
+**New module `baseline.py`** (commit `1f4ca59`): asymmetric least squares
+(Eilers & Boelens 2005) along the retention-time axis, one drift channel at a
+time. **Nothing existing changes behaviour** — `peaks.py` needs an explicit
+`--baseline` for any of it to run, and the parameters used are recorded in
+`_peaks.json` under `params["baseline"]` (`None` = not corrected), so corrected
+and uncorrected results cannot be confused after the fact.
+
+**Why it was needed.** The only background handling the project had was "floor =
+85th percentile", which is a *horizontal* line and cannot subtract a *sloped*
+one. GC-IMS drifts in the RT direction by construction: the temperature ramp
+increases column bleed over time and lifts the baseline with it. `prominence =
+peak height − saddle height` is a relative quantity and survives a uniform
+offset, but **a baseline that slopes within one peak's width lifts the saddle**,
+so prominence is systematically underestimated — and the later a peak elutes,
+the more it is suppressed.
+
+**λ is measured, not borrowed.** gc-ims-tools uses `1e7`; on this project's data
+that eats wide peaks, because AsLS treats anything smoother than the baseline it
+permits as baseline. The widest real peak in `260625_141215_STD` has an RT-direction
+σ of **222 rows** (median 63) — at `1e7` it loses 37% of its height. Scanning λ at
+the real row count gives **1e11** (widest peak keeps 99.9%, baseline residual
+median 0.44 against a baseline of order 100). **Two premises to re-measure if they
+change**: peak width (new column or new temperature program) and the RT row count
+(λ's effect depends on sampling density — verified it behaves differently at
+n=6000 vs n=20413).
+
+**Measured effect on the final peak set: small.** 47 → 46 peaks, all six RI
+anchors retained, prominence threshold 98.5 → 98.1 — as expected, since
+prominence already cancels a slowly varying background. What actually changes is
+the **candidate pool**: floor 218.6 → 64.2, raw local maxima 277k → 192k. **For
+peak-volume integration (quantitation) it is a prerequisite**, not a nicety —
+integrating without it counts the pedestal as signal.
+
+**Implementation notes.** Two things differ from the reference implementation: a
+banded pentadiagonal solver (`solveh_banded`, O(n), verified against a sparse
+solve in `test_baseline.py`) and `row_stride` downsampling — the baseline is a
+low-frequency quantity by construction, so solving it every 8th row and
+interpolating back takes the real file from ~107 s to ~16 s. `correct_rt_baseline()`
+does not mutate its input, and `asls()` returns the **baseline itself** rather
+than the corrected signal, so callers can inspect or overlay it.
+
+6 tests in `test/test_baseline.py` cover the banded-vs-sparse equivalence, peak
+height preservation above a local baseline, flat input left alone, the λ floor
+set by the widest real peak, stride-invariance, and non-mutation of the input.
 
 ### What changed on 2026-08-12 (later, tagged v3.1) — RT axis was wrong; K0 solved by decompiling VOCal
 
@@ -312,7 +549,9 @@ automatically from a folder's STD.
 - **Folder resolution + cache (draft.17):** `resolve_ri_calibration()` is 3-tier
   (`batch_own_std` / `borrowed_from_registry` / `unavailable`), symmetric with
   Stage 2 `k0_mode`; session + `_folder_calibration.json` sidecar cache reused
-  across files.
+  across files. *(A fourth tier, `vocal_project_table`, was added 2026-08-24 —
+  see the entry at the top of this file. This 2026-07-27 entry is left as it was
+  written.)*
 - **Heatmaps show linear RI:** rows are resampled uniform-in-RI so the RI axis is
   linear (not log). Applies to the main canvas backdrop (`_bg.png`), the numbered
   overlay, and the original heatmap. Circles are placed in RI (`_bg.json` records
@@ -405,10 +644,11 @@ in the editor while another process is editing it.
 
 | # | Stage | Module | Status | Notes |
 |---|---|---|---|---|
+| 0 | RT baseline correction | `baseline.py` | **Done — opt-in, off by default** | Not a workflow stage; it runs before stage 1 when `peaks.py --baseline` is given. AsLS per drift channel, λ=1e11 measured on this batch's widest peak (**not** gc-ims-tools' 1e7, which eats σ≈222-row peaks). Effect on the final peak set is small (47→46) because prominence is already relative; it changes the candidate pool (floor 218.6→64.2) and is a prerequisite for peak-volume integration. Parameters recorded in `_peaks.json` `params["baseline"]`. |
 | 1 | RIP normalization | `rip.py` | Done | `find_rip()` + `attach_drift_relative()`. Integrated into `peaks.py` ver.03. RIP found at dt_index=680 (4.53 ms) on the test .mea. |
 | 2 | K0 conversion | `dt_convert.py` | **Done — constant derived; not yet wired into the folder cache** | Three modes: `standard_based` / `raw_parameters` / `unavailable`. T/P field mapping **resolved** via VOCal decompilation (`extract_raw_tp()`: `Start temp 1`; pressure = 10×(ambient + EPC)), so `raw_parameters` now runs unaided — but lands +3.5% off, unusable for matching. `standard_based` is the usable path: `calibration.derive_k0_instrument_constant()` gives **IC = 25.0808, CV 0.133%** from the STD against `GAS BASE 3H_IMS K0.iml`. Remaining gap: the profile is not produced by `resolve_ri_calibration()`'s folder/cache path, so the UI still reports `k0_mode=unavailable`. |
 | 3 | Library readers | `library.py` | Done | `.ril` 21 cols / `.iml` 16 cols. `source_file` provenance auto-propagates via dict copy. `resolve_data_dir()` priority chain: explicit arg → `GCIMS_LIBRARY_DIR` env → `<PROJECT>/library_data/` → legacy VOCal folder → None. **Selection is deliberately asymmetric**: `.ril` is column-specific (RI depends on the stationary phase), `.iml` is not (RIPrel drift is instrument-level) → all `.iml` are loaded. Drift-gas cross-check applied row-level, conservatively (only rows tagged as another gas are dropped; untagged kept — 39 of 201 RIPrel rows carry no tag). Both CLI and UI go through `identify.load_libraries()`. |
-| 4 | RT→RI conversion | `calibration.py` + `reference_series.py` | **Done — values from the supplier table; column polarity unverified** | Anchors selected by **`match_anchors_by_dt()`** against the table's `Dt` (6/6, mean \|Δ\| 0.00273, RT-vs-carbon monotonicity checked), replacing the DT_rel spacing heuristic which picked the wrong six. `log10(RT)` piecewise-linear interp (extrapolate+flag), 3-tier folder resolution + cache. STD = C4–C9 2-alkanones (CAS-confirmed). RI values are the manager's table; `assumed_unverified` now flags **column polarity**, not identity (see `ketone_RI_provenance.md`). Wired into `identify.py` + UI; heatmaps show a linear RI y-axis; `axis_explanation()` backs the UI's ⓘ dialog. |
+| 4 | RT→RI conversion | `calibration.py` + `reference_series.py` | **Done — values from the supplier table; column polarity unverified** | Anchors selected by **`match_anchors_by_dt()`** against the table's `Dt` (6/6, mean \|Δ\| 0.00273, RT-vs-carbon monotonicity checked), replacing the DT_rel spacing heuristic which picked the wrong six. `log10(RT)` piecewise-linear interp (extrapolate+flag), **4-tier** folder resolution + cache (STD → the folder’s own `.gasprj` `RI_Normalization` table → registry → unavailable). STD = C4–C9 2-alkanones (CAS-confirmed). RI values are the manager's table; `assumed_unverified` now flags **column polarity**, not identity (see `ketone_RI_provenance.md`). Wired into `identify.py` + UI; heatmaps show a linear RI y-axis; `axis_explanation()` backs the UI's ⓘ dialog. |
 | 5 | Tolerance-window match | `match.py` | Done — **now 2-D** | `gc_matches` / `ims_matches` / `combined_matches` (intersect by CAS). GC = RI (or Rt fallback). **IMS now works without K0**: `match_drift_rel()` compares `peak.drift_relative` vs library `Dt[a.u.]` where `DtMode=="RIPrel"` (drift relative to RIP — same quantity peaks carry). `match_all` prefers K0 if `k0_value` present, else RIPrel; reports `ims_dimension`. Combined = agree on both axes → collapses hundreds of RI-only hits to a few. Tolerances placeholder (RI ±5, Rt ±5s, drift ±0.05, K0 ±0.05); `identify.py --drift-tol` overrides the drift one. |
 | 6 | Integration | `identify.py` | Done | CLI-runnable. Full pipeline: peaks.json → header → K0 → rules → library → match → `_peaks_identified.json`. Provenance carried through (`k0_mode`, `source_file`, `match_dimensions`, `gc_dimension`). |
 | 7 | Rule engine | `rules.py` | Done | R001–**R006** registered. Three rule types (per_peak / per_peak_with_context / batch) + a `mandatory` flag. `mark_rules()` marks `rule_active` without removing; `apply_rules()` = mark + filter (kept for `identify.py`). R004/R006 are mandatory and applied **before** the prominence gate inside `peaks.py`. |
@@ -448,6 +688,11 @@ batches. Each batch: I code, user runs `python main.py` and reports visually.
 ```bash
 # 1. detect peaks (~83 s on a full-sized .mea)
 python peaks.py "GAS/嘉義大學＿咖啡發酵/260625_141215_STD.mea" --top-n 100
+
+# optional: subtract the sloped RT baseline first (+~16 s; off by default)
+python peaks.py "GAS/嘉義大學＿咖啡發酵/260625_141215_STD.mea" --baseline
+#   --baseline-lam 1e11   smoothness; the default is measured, do not guess
+#   --baseline-stride 8   solve every n-th row and interpolate back
 
 # 2. run identify pipeline (needs peaks.json from step 1)
 python identify.py results/260625_141215_STD_peaks.json
@@ -501,7 +746,7 @@ Flow:
    screen greyed. R004/R006 are shown locked (`always on`).
 9. **Generate Report** still a placeholder (Batch 8).
 
-Verified by 165 passing tests plus a scratch smoke script that drives the real Tk
+Verified by 191 passing tests plus a scratch smoke script that drives the real Tk
 app (circle click, drag-vs-click, table sync, state round-trip). Full visual QA
 by the user still pending.
 
@@ -510,11 +755,12 @@ by the user still pending.
 ## Key files (refreshed at v3.1 — the annotations below were years of "NEW" tags)
 
 ```
-F:/GC-IMS-PEAK/
+C:/GC-IMS-PEAK/
 ├── CLAUDE.md                 # auto-loaded every session; points here. Keep short
 ├── main.py                   # Tk UI — batches 1–7 done, 8 (Report) pending
 ├── readGAS.py                # .mea parser + RT_AXIS_VERSION (the (averages+1) fix)
 ├── peaks.py                  # detection, _bg.png/_bg.json, _maxima.npz, --bg-only
+├── baseline.py               # opt-in AsLS baseline along RT (peaks.py --baseline)
 ├── peak_with_number.py       # static numbered overlay (report export, not the canvas)
 ├── gas_utils.py              # file-picker + path resolution
 ├── rip.py                    # stage 1 — RIP normalization
@@ -531,10 +777,11 @@ F:/GC-IMS-PEAK/
 ├── ui_settings.json          # user library_dir (gitignored)
 ├── results/                  # all artefacts (gitignored)
 ├── GAS/                      # raw .mea — never modified or deleted by this project
-└── test/                     # 165 tests
+└── test/                     # 191 tests
     ├── test_rt_axis.py            # locks the (averages+1) formula + version marker
     ├── test_select_from_maxima.py # locks "R004/R006 before the prominence gate"
     ├── test_calibration.py        # stage 4, incl. the anchor off-by-one evidence
+    ├── test_baseline.py           # AsLS: banded=sparse, λ floor, stride invariance
     └── test_{rip,dt_convert,library,rules,match,identify,peak_table,
         peak_selection,match_panel,state_machine,subprocess,ui_ri,
         ui_validators,file_operations}.py
@@ -546,14 +793,14 @@ CLI) / `UI.md` (Tk spec) / `ketone_RI_provenance.md` (where the RI numbers came
 from). `GC-IMS_Peak_Finding_Workflow.md` is the original image-mode blueprint;
 its founding premise no longer holds and it is kept only as a methodology record.
 
-Total test count: **165 pass in ~9 s** (all under `pytest test/`).
+Total test count: **191 pass in ~9 s** (all under `pytest test/`).
 
 > **Intermittent skips are expected, not a regression.** Several tests call
 > `pytest.skip` when their inputs are absent — `test_identify.py` and
 > `test_library.py` need the real `.mea` / `library_data/`, `test_match_panel.py`
 > needs a Tk display. Running the suite *while a detection batch is rewriting
 > `results/`* will show 1–2 skips that vanish on re-run. Seen twice on
-> 2026-08-12; both times a plain re-run gave a clean 165. If you see a skip,
+> 2026-08-12; both times a plain re-run gave a clean full count. If you see a skip,
 > re-run before investigating.
 
 The load-bearing tests — these encode decisions that were expensive to reach, so

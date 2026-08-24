@@ -1,6 +1,6 @@
 """
 rules.py  —  GC-IMS Identify Workflow 第七階段：候選峰篩選規則引擎
-Version: 3.1 — by Albert Sheng
+Version: 3.3 — by Albert Sheng
 
 依 GC-IMS_Identify_Workflow.md §第七階段（draft.13 定案）：
   - RULE_REGISTRY + @register_rule 裝飾器

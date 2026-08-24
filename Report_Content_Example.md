@@ -1,6 +1,6 @@
 # GC-IMS Peak Identification Report
 
-**Version: 3.1 — by Albert Sheng**
+**Version: 3.3 — by Albert Sheng**
 
 **這是「Generate Report」按鈕輸出內容的範例——示範內容結構，不是實際格式決定**
 （CSV／JSON／docx／PDF 等實際匯出格式仍待後續討論，這份只是要讓您看「裡面該有什麼」）

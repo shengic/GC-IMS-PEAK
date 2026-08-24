@@ -1,8 +1,14 @@
 """
 calibration.py  —  GC-IMS Identify Workflow 第四階段：RT→RI 轉換（保留時間正規化）
-Version: 3.2 — by Albert Sheng
+Version: 3.3 — by Albert Sheng
 
 變更記錄：
+  3.3  — 新增第四層 RI 來源 `vocal_project_table`：資料夾沒有 STD 時，改讀該
+         資料夾 `.gasprj` 內建的 RI_Normalization 表（{ColNormY=RI,
+         ColNormX=log10(Rt)}，與本模組同形，可直接當錨點）。排在 STD 之後、
+         registry 之前——它是本批次自己的尺標，registry 是別批的。短保留時間端
+         VOCal 的外插會產生負 RI，依 Kovats 下限（甲烷=100）截去前導點，被截去
+         的區域仍可查詢但標為 ri_extrapolated。見 read_gasprj_ri_table()。
   3.2  — 新增 resolve_k0_profile() 與 resolve_calibrations_cached()：RI 與 K0 由
          同一次解析、同一支 STD 產出（K0 沿用 RI 選中的 STD，避免同批次兩種
          校正出處不一致而無徵兆）。K0 不做 registry 借用——instrument_constant
@@ -1114,6 +1120,133 @@ def scan_folder_for_std(folder_path):
     return stds
 
 
+# Kovats 定義下的 RI 下限：甲烷 = 100（RI = 100·n，n 為碳數）。低於此值不是
+# 「很小的 RI」而是**沒有意義的外插**——VOCal 在第一個真實錨點以下延伸曲線時會
+# 產生這種值，實測 260422 批次最低到 −631。用這條線截斷不是調參數，是照定義。
+KOVATS_RI_FLOOR = 100.0
+
+
+def read_gasprj_ri_table(path, ri_floor=KOVATS_RI_FLOOR):
+    """讀 VOCal `.gasprj` 的 RI_Normalization 表，回傳 (anchor_rts, ri_values, meta)。
+
+    `.gasprj` 是 JSON（不是 zip），頂層有 `RI_Normalization`：
+        {"ColNormName": "RI normalization",
+         "ColNormisLog": true,
+         "Values": [{"ColNormY": <RI>, "ColNormX": <log10(Rt 秒)>}, ...]}
+
+    與本模組第四階段用的形式**完全相同**（RI 對 log10(Rt) 分段線性），所以這些點
+    可以直接當錨點，不需要任何換算。
+
+    `ColNormisLog` 為 false 時拒絕載入而不是自行改算：那代表 X 存的是 Rt 本身而非
+    log10(Rt)，兩者差一個對數——猜錯會產生看起來正常但整條錯位的 RI。實測手上的
+    檔案都是 true，沒有 false 的樣本可以驗證，所以不寫沒被驗證過的分支。
+
+    截斷（見 KOVATS_RI_FLOOR）：短保留時間端是 VOCal 的外插，會出現負 RI。低於
+    甲烷 100 的前導點一律去掉，並把去掉幾點記進 meta——**只砍頭段**，中間或尾端
+    若出現異常值不動它，那代表這張表有別的問題，該讓上層看見而不是默默修掉。
+
+    回傳
+    ----
+    (anchor_rts, ri_values, meta) : (list[float], list[float], dict)
+        兩個清單依 RT 遞增且等長；表不存在/格式不符時回 ([], [], meta) 並在
+        meta["reason"] 說明。
+    """
+    meta = {"gasprj": os.path.basename(path)}
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            doc = json.load(f)
+    except (OSError, ValueError) as e:
+        meta["reason"] = f"讀取失敗：{e}"
+        return [], [], meta
+
+    block = doc.get("RI_Normalization") if isinstance(doc, dict) else None
+    if not isinstance(block, dict):
+        meta["reason"] = "檔內沒有 RI_Normalization 區塊"
+        return [], [], meta
+    if not block.get("ColNormisLog"):
+        meta["reason"] = ("ColNormisLog 非 true——X 軸不是 log10(Rt)，"
+                          "本專案沒有此格式的樣本可驗證，拒絕臆測換算")
+        return [], [], meta
+
+    pts = []
+    for v in block.get("Values") or []:
+        try:
+            x, y = float(v["ColNormX"]), float(v["ColNormY"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        pts.append((x, y))
+    if len(pts) < 2:
+        meta["reason"] = f"可用點數 {len(pts)} < 2，無法建曲線"
+        return [], [], meta
+
+    pts.sort()                                   # 依 log10(Rt) 遞增 = 依 RT 遞增
+    meta["n_points_raw"] = len(pts)
+    meta["ri_range_raw"] = [round(min(y for _, y in pts), 2),
+                            round(max(y for _, y in pts), 2)]
+
+    kept = [(x, y) for i, (x, y) in enumerate(pts)
+            if y >= ri_floor or any(yy >= ri_floor for _, yy in pts[:i])]
+    # 上面的條件等價於「從第一個 RI >= floor 的點開始全留」——只砍頭段（見 docstring）
+    meta["n_points_dropped_below_kovats_floor"] = len(pts) - len(kept)
+    meta["ri_floor"] = ri_floor
+    if len(kept) < 2:
+        meta["reason"] = f"截去 RI < {ri_floor} 的前導點後只剩 {len(kept)} 點"
+        return [], [], meta
+
+    anchor_rts = [10.0 ** x for x in (p[0] for p in kept)]
+    ri_values = [p[1] for p in kept]
+    meta["n_points"] = len(kept)
+    meta["rt_range_s"] = [round(anchor_rts[0], 2), round(anchor_rts[-1], 2)]
+    meta["ri_range"] = [round(ri_values[0], 2), round(ri_values[-1], 2)]
+    meta["colnorm_name"] = block.get("ColNormName")
+    # 等距格點 = VOCal 重採樣後的曲線，不是原始錨點。記下來，讓 provenance 說得出
+    # 「這不是六個化合物」——不記的話這張表看起來會像高解析度的實測錨點。
+    steps = {round(kept[i + 1][0] - kept[i][0], 6) for i in range(len(kept) - 1)}
+    meta["resampled_uniform_grid"] = (len(steps) == 1)
+    meta["log_rt_step"] = next(iter(steps)) if len(steps) == 1 else None
+    return anchor_rts, ri_values, meta
+
+
+def scan_folder_for_gasprj(folder_path):
+    """資料夾內的 `.gasprj`，帶 RI_Normalization 者優先、較新者優先。
+
+    一個資料夾常同時有使用者存的專案檔與 `Auto_Project_Backup.gasprj`；實測兩者的
+    RI 表逐點相同，但沒有理由假設永遠如此，所以取較新的那個並把全部檔名記進
+    provenance。
+    """
+    if not os.path.isdir(folder_path):
+        return []
+    files = glob.glob(os.path.join(folder_path, "*.gasprj"))
+    return sorted(files, key=lambda f: -os.path.getmtime(f))
+
+
+def build_from_gasprj(folder_path, series_key="vocal_project_table"):
+    """由資料夾內的 `.gasprj` 建 RI 校正表，回傳 (cal|None, detail)。
+
+    給「資料夾裡沒有 STD」用的第四階段來源。回傳的 cal 與 STD 建的同構
+    （multi_point_loglinear），差別只在 provenance：`series_used` 標成
+    `vocal_project_table`、`assumed_unverified=True`，理由是原始錨點不可考。
+    """
+    detail = {"gasprj_files": [os.path.basename(f)
+                              for f in scan_folder_for_gasprj(folder_path)]}
+    for path in scan_folder_for_gasprj(folder_path):
+        rts, ris, meta = read_gasprj_ri_table(path)
+        if not rts:
+            detail.setdefault("rejected", []).append(meta)
+            continue
+        cal = build_calibration(rts, series_key, ri_values=ris)
+        if cal.get("mode") != "multi_point_loglinear":
+            detail.setdefault("rejected", []).append(
+                dict(meta, reason=cal.get("reason")))
+            continue
+        cal["gasprj_source"] = meta["gasprj"]
+        cal["gasprj_table"] = meta
+        detail["used"] = meta
+        return cal, detail
+    detail.setdefault("reason", "資料夾內沒有可用的 .gasprj RI 表")
+    return None, detail
+
+
 def extract_registry_dims(header):
     """從表頭抽出 registry key 的三維（儀器＋管柱＋方法），比照 Stage 2 綁定精神。"""
     machine = header.get("Machine type", "?")
@@ -1207,12 +1340,20 @@ def resolve_ri_calibration(folder_path, dims=None,
                            start_carbon=None, ri_values=None,
                            max_days_gap=None, today_date=None, **kw):
     """
-    三層解析（draft.18 §12），回傳 (calibration_dict|None, ri_mode, detail)。
+    四層解析（draft.18 §12 的三層 + 2026-08-24 新增的 .gasprj 層），
+    回傳 (calibration_dict|None, ri_mode, detail)。
 
     (a) 批次內有 STD 且至少一支可用       → ri_mode="batch_own_std"
-    (b) 無可用 STD 但 registry 有同組合   → ri_mode="borrowed_from_registry"
+    (a2) 無可用 STD，但資料夾內的 .gasprj  → ri_mode="vocal_project_table"
+        帶 VOCal 自己的 RI_Normalization 表
+    (b) 以上皆無但 registry 有同組合      → ri_mode="borrowed_from_registry"
         （帶 days_gap；max_days_gap 超過視同不可用）
     (c) 皆無                              → ri_mode="unavailable"（None）
+
+    **(a2) 排在 (b) 之前是刻意的**：`.gasprj` 是**本批次自己**的尺標（同儀器、同管柱、
+    同方法、同一次量測），registry 則是**別批**的。同批次的來源即使出處不可考，也
+    比借別批的可靠——後者至少還要賭那三個維度真的沒變。兩者都排在 (a) 之後，因為
+    只有 STD 那條路的錨點是本專案自己認得、可驗證的。
 
     與 Stage 2 k0_mode 三態對稱；RI/K0 各自獨立標記 provenance，缺一不整峰放棄。
     dims: {"instrument","column","method"}，(b) 借用時才需要。
@@ -1231,7 +1372,16 @@ def resolve_ri_calibration(folder_path, dims=None,
         if cal is not None:
             cal["ri_mode"] = "batch_own_std"
             return cal, "batch_own_std", detail
-        detail["note_a"] = "資料夾內有 STD 但皆不可用，改試 registry"
+        detail["note_a"] = "資料夾內有 STD 但皆不可用，改試 .gasprj / registry"
+
+    # (a2) 本資料夾的 .gasprj 內建 RI 表（見 docstring：排在 registry 之前）
+    gasprj_cal, gasprj_detail = build_from_gasprj(folder_path)
+    detail["gasprj"] = gasprj_detail
+    if gasprj_cal is not None:
+        gasprj_cal["ri_mode"] = "vocal_project_table"
+        gasprj_cal["ri_confidence_note"] = (
+            f"RI 表取自 {gasprj_cal.get('gasprj_source')}；原始錨點不可考，非本批 STD 自建")
+        return gasprj_cal, "vocal_project_table", detail
 
     # (b) registry 借用
     if dims:

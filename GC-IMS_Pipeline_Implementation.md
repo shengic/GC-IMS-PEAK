@@ -1,6 +1,6 @@
 # GC-IMS Peak-Finding Pipeline — Implementation Notes
 
-**Version: 3.1 — by Albert Sheng**
+**Version: 3.3 — by Albert Sheng**
 
 **Purpose of this document:** a self-contained, portable record of the working code built for
 reading G.A.S. FlavourSpec® GC-IMS `.mea` files, exporting them, and detecting peaks. It is
@@ -11,7 +11,8 @@ workflow, and — in detail — how peaks are evaluated.
 Companion design document: `GC-IMS_Peak_Finding_Workflow.md` (the methodology/architecture blueprint).
 This file is the **implementation** counterpart.
 
-- Project root: `F:\GC-IMS-PEAK` (was `J:\` / `K:\` in earlier sessions)
+- Project root: `C:\GC-IMS-PEAK` (was `J:\` / `K:\` / `F:\` in earlier sessions — the
+  drive letter has moved four times, so prefer paths relative to the project root)
 - Platform: Windows 11, Python 3.13 in `.venv` at the project root
 - Status: raw-data mode working (parse → export → detect → interactive selection).
   Threshold calibration not yet done.
@@ -172,6 +173,7 @@ for and no calibration could be resolved.
 | `readGAS.py` | script | **parse + export**: `.mea` → matrix, npz, heatmap (CSV opt-in) |
 | `peaks.py` | script | **detect**: matrix → peak list, maxima cache, backdrop, JSON |
 | `main.py` | script | **desktop UI**: canvas with live circles, Rules panel, peak table |
+| `baseline.py` | module | opt-in AsLS baseline subtraction along RT (`peaks.py --baseline`); off by default, parameters recorded in `_peaks.json` |
 | `rip.py` | module | stage 1 — RIP location + `drift_relative` |
 | `dt_convert.py` | module | stage 2 — K0 conversion (three modes) |
 | `library.py` | module | stage 3 — `.ril` / `.iml` readers |
@@ -303,6 +305,13 @@ i.e. it reports metrics and applies only light, uncalibrated gates. Threshold ca
 - `load_surface(path)` → `(intensity, drift_ms, retention_s, meta)`.
 
 ### Pipeline inside `detect_peaks(...)`
+0. **RT baseline subtraction (opt-in, `--baseline`)** — happens in `main()` before any of the
+   below, so `detect_peaks()` simply receives a corrected surface. AsLS per drift channel
+   (`baseline.py`). Off by default; when on, `params["baseline"]` in `_peaks.json` records λ,
+   p, stride and the resulting baseline median/max, so a corrected run is never mistaken for
+   an uncorrected one. Rationale: the 85th-percentile floor is a *horizontal* line and cannot
+   remove the *sloped* rise from column bleed, which lifts a peak's saddle and therefore
+   understates the prominence of late-eluting peaks.
 1. **RIP** — `rip.find_rip()` before anything else (fail-fast). Must be recomputed per file;
    the RIP drifts with temperature/pressure, so caching it across a batch is a silent error.
 2. **Smooth** — `gaussian_filter(intensity, sigma)` (default `sigma=1.0`). Breaks int16 value
@@ -357,6 +366,9 @@ Steps 5–9 also live in `select_from_maxima()`, which the UI calls directly aga
 | `--min-distance N` | 3 | min pixel spacing between peaks (dedup) |
 | `--top-n N` | 0 | keep only N most prominent (0 = all) |
 | `--rules-config P` | `rules_config.json` | rule set; missing file falls back to built-in defaults |
+| `--baseline` | off | subtract the sloped RT baseline first (AsLS, `baseline.py`). Adds ~16 s. Small effect on the final peak set (47→46) since prominence is already relative; large effect on the candidate pool (floor 218.6→64.2), and required before peak-volume integration |
+| `--baseline-lam F` | `baseline.DEFAULT_LAM` (1e11) | baseline stiffness. **Measured on this batch's widest peak (σ≈222 rows), not borrowed** — gc-ims-tools' 1e7 removes 37% of such a peak. Re-measure if the column, temperature program, or RT row count changes |
+| `--baseline-stride N` | 8 | solve the baseline every N-th row and interpolate back (107 s → 16 s on a real file; the baseline is low-frequency by construction) |
 | `--bg-only` | off | rebuild `_bg.png` + `_bg.json` from a `.npz` and stop — no detection |
 | `--mark-n N` | 0 | overlay marks only top N (0 = all) |
 | `--cmap NAME` | viridis | overlay colormap |
@@ -457,15 +469,33 @@ Converts a peak's retention time to a **Retention Index**. Runs off a batch
 4. `build_calibration()` stores `log10(RT)` anchors; `make_rt_to_ri()` is the one
    shared `RT→(RI, extrapolated)` function used by peak values **and** the heatmap
    axis. Out-of-range = **extrapolate + flag** (never clamp).
-5. `resolve_ri_calibration(folder)` is 3-tier — `batch_own_std` /
-   `borrowed_from_registry` (`ri_calibration_registry.json`, with `days_gap`) /
-   `unavailable` — with a session + `_folder_calibration.json` sidecar cache.
+5. `resolve_ri_calibration(folder)` is 4-tier — `batch_own_std` /
+   **`vocal_project_table`** / `borrowed_from_registry`
+   (`ri_calibration_registry.json`, with `days_gap`) / `unavailable` — with a
+   session + `_folder_calibration.json` sidecar cache.
+
+   `vocal_project_table` (added 2026-08-24) reads the `RI_Normalization` block
+   out of a `.gasprj` in the batch folder — `{ColNormY: RI, ColNormX: log10(Rt),
+   ColNormisLog: true}`, the same Kovats-log form used here, so its points become
+   anchors directly. It ranks **above** the registry because it is *this* batch's
+   own scale (same instrument/column/method/run) whereas the registry holds
+   another batch's; both rank below the STD, whose anchors are the only ones this
+   project can name and verify. The table is VOCal's *resampled* curve (a uniform
+   0.01 grid in `log10(Rt)`), not the original anchors — what calibrated it is not
+   recoverable, hence `assumed_unverified=True` /
+   `vocal_project_table_anchors_not_recoverable`. Leading points below
+   `KOVATS_RI_FLOOR = 100` (methane, the scale's definitional floor) are trimmed,
+   because VOCal extrapolates below its first real anchor and emits negative RI;
+   trimmed points remain queryable but flag `ri_extrapolated`.
+   `ColNormisLog: false` is refused rather than converted on a guess.
 
 **Series (`reference_series.REFERENCE_SERIES`):** `ketone` (this project;
 RI `[589.4,688.6,784.2,892.2,996.5,1095.6]`, `assumed=True`,
 `confidence="borrowed_cross_referenced"`), `n_alkane` (generic 100·n mechanism),
-`custom` (user RI values). Provenance (`assumed_unverified`, `ri_confidence`)
-rides on the calibration and every peak, symmetric with stage-2 `k0_mode`.
+`custom` (user RI values), `vocal_project_table` (RI values supplied per folder
+from a `.gasprj`; `assumed=True` because the anchors behind the curve are not
+recoverable). Provenance (`assumed_unverified`, `ri_confidence`) rides on the
+calibration and every peak, symmetric with stage-2 `k0_mode`.
 
 **Per-peak fields added** (`attach_ri`): `ri`, `ri_mode`
 (`multi_point_loglinear` / `single_point_relative` / `unavailable`),

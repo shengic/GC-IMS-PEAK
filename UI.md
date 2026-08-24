@@ -1,8 +1,9 @@
 # GC-IMS Tk UI Specification
 
-Version: **v3.1** (Stage 4 RT→RI in the UI; axis info moved to the ⓘ dialog)
+Version: **v3.3** (STD marked in the file list; GC column names its own dimension;
+compound panel layout fixed)
 
-**Status**: ✅ **COMPLETE & TESTED** — 165 unit tests passing.
+**Status**: ✅ **COMPLETE & TESTED** — 191 unit tests passing.
 
 This document defines the user interface behavior for the GC-IMS peak-finding desktop app.
 It is a design/specification document with concrete implementation guidance for a Tk/PIL-based desktop application.
@@ -247,6 +248,32 @@ Behavior:
 - allow single selection
 - selected row must be highlighted
 - the selected file path becomes the active input for read and peak detection actions
+
+#### 5.2.1 Calibration STD: marked, not hidden (v3.2, 2026-08-24)
+
+The folder's calibration **STD** is listed like any other file, but **sorted last
+and marked** — grey italic, with `· STD` appended to the name — and selecting it
+adds "STD: this folder's calibration source, not a sample" to the status bar.
+`Generate Report` refuses it, since the STD supplies the scale that samples are
+reported against and reporting it would be circular.
+
+Marked rather than hidden, deliberately:
+
+- The STD goes through the **same detection path as a sample** —
+  `_start_folder_calibration()` runs `peaks.py` on it and the RI anchors are read
+  back from its own `_peaks.json`. Opening it is the only way to check which six
+  peaks became the anchors, which is the least-verified step in the RI chain
+  (`status.md` open decision 3), and is how the anchor off-by-one was caught.
+- If it were hidden, a failed STD detection would present as "no RI axis" with
+  nothing to inspect — the same class of silent fallback the `.npz` `mea_source`
+  field and the `rt_axis_version` marker exist to prevent.
+
+**An STD is identified by the header field `Sample == "STD"`, never by filename.**
+`calibration.scan_folder_for_std()` owns that judgement (operators mistype file
+names); deciding it again in the UI by filename would let the list disagree with
+the file the calibration actually used — a file named `STD` that is a sample, or
+a real STD whose name says nothing. Both directions are covered by
+`test/test_file_operations.py::TestSTDFileListing`.
 
 ### 5.3 Image Display Area (Updated v1.2+)
 
@@ -1211,7 +1238,7 @@ class ImageViewerDialog:
 Suggested project layout after UI implementation:
 
 ```
-F:\GC-IMS-PEAK\
+C:\GC-IMS-PEAK\
   ├── gas_utils.py          (existing)
   ├── readGAS.py            (existing)
   ├── peaks.py              (existing)
@@ -1357,6 +1384,43 @@ and loading go through `identify.load_libraries()`, shared with the CLI — the 
 used to keep its own copy of that logic and the two had drifted apart. Caveats
 surfaced: peak RI is borrowed/assumed, and the tolerances (RI ±5, drift ±0.05)
 are placeholders.
+
+**Candidate window layout (fixed 2026-08-24).** Three corrections after use:
+
+- **One name/value pair per line.** The header was three lines of
+  `Intensity=4508   Retention time=389.7 s   Drift time=5.59 ms`; it is now a
+  two-column grid (field name, value) so a value can be found by position instead
+  of by reading.
+- **The count line and Close stay on screen at the default size.** With 469 GC
+  candidates the `Showing N of M …` line sat below the window edge until the user
+  resized. The cause was pack order, not window size: the candidate tree was
+  packed first with `expand=True` and requested 14 rows, so the window's natural
+  height exceeded its own geometry and the last-packed widget fell off the bottom.
+  The bottom bar and count line are now packed `side="bottom"` **before** the
+  tree, and the tree's requested height is 8 rows — so the widget that gives up
+  space when the window shrinks is the one with a scrollbar. The footer's
+  `wraplength` tracks the window width, so the long tolerance line wraps rather
+  than being clipped. Locked by
+  `test_panel_footer_and_close_button_fit_the_default_window`, which asserts the
+  window's requested height fits inside the geometry it sets for itself.
+- **A Close button**, bottom-right, plus `Escape`.
+
+**The GC column names the dimension it is actually using (2026-08-24).** The
+heading was the fixed string `GC (RI)`, but `match.match_all()` falls back to
+retention-time matching whenever `peak["ri"]` is None (no STD in the folder, no
+borrowable registry entry) — comparing the peak's `retention_s` against the
+library's `Rt[sec]`. Both results render identically, so the table showed
+**seconds under an RI heading** while the RI column beside it read `—`.
+
+Now: the heading switches to **`GC (RT s)`**, cells carry the ` s` unit, the
+status bar explains that RI is uncalibrated and that retention time does not
+transfer across instrument / column / temperature program, and the ▶ panel adds a
+warning above the candidate list (that is where compound *names* appear, which
+read as conclusions more readily than numbers do). The fallback is not removed —
+it is valid when the library and the sample share a method, and only the user
+knows that. `_gc_column_dimension()` reports the dimension in use, preferring
+`ri` when any peak has one. Locked by
+`test_gc_column_says_RT_when_there_is_no_RI_calibration` and its two siblings.
 
 ### v3 — Stage 4 RT→RI in the UI
 

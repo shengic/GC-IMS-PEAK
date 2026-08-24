@@ -834,3 +834,128 @@ def test_ri_and_k0_resolve_from_the_same_std(tmp_path):
     assert k0_detail["std_used"] == ri_cal["std_file"], (
         "K0 必須沿用 RI 選中的 STD；掃描順序的第一支是 260101，"
         "若這裡是 260101 就代表 prefer_std 沒生效")
+
+
+# --------------------------------------------------------------------------- #
+# .gasprj RI 表：資料夾沒有 STD 時的 RI 來源（2026-08-24）
+# --------------------------------------------------------------------------- #
+def _write_gasprj(path, values, is_log=True):
+    """最小 .gasprj：只需要 RI_Normalization，真檔還有一堆無關區塊。"""
+    import json as _json
+    path.write_text(_json.dumps({
+        "ObjectType": "LAV Project",
+        "RI_Normalization": {
+            "ColNormName": "RI normalization",
+            "ColNormisLog": is_log,
+            "Values": [{"ColNormY": y, "ColNormX": x} for x, y in values],
+        },
+    }), encoding="utf-8")
+
+
+def test_gasprj_table_becomes_a_calibration(tmp_path):
+    """沒有 STD 的資料夾，改由 .gasprj 的 RI_Normalization 取得 RI。"""
+    import math
+    vals = [(math.log10(rt), ri) for rt, ri in
+            ((100.0, 600.0), (200.0, 750.0), (400.0, 900.0), (800.0, 1050.0))]
+    _write_gasprj(tmp_path / "proj.gasprj", vals)
+
+    c, mode, detail = cal.resolve_ri_calibration(str(tmp_path))
+    assert mode == "vocal_project_table"
+    assert c["mode"] == "multi_point_loglinear"
+    assert c["n_anchors"] == 4
+    # 出處與不確定性都要帶著走
+    assert c["assumed_unverified"] is True
+    assert c["ri_confidence"] == "vocal_project_table_anchors_not_recoverable"
+    assert c["gasprj_source"] == "proj.gasprj"
+    # 錨點之間內插得回原值
+    rt_to_ri = cal.make_rt_to_ri(c)
+    ri, extrap = rt_to_ri(200.0)
+    assert abs(ri - 750.0) < 1e-6 and not extrap
+
+
+def test_std_outranks_gasprj(tmp_path, monkeypatch):
+    """同時有 STD 與 .gasprj → 一定走 STD。
+
+    STD 那條路的錨點是本專案自己認得、可驗證的；.gasprj 的原始錨點不可考。
+    順序寫死在 resolve_ri_calibration()，這條測試擋住有人把它掉過來。
+    """
+    import math
+    _write_gasprj(tmp_path / "proj.gasprj",
+                  [(math.log10(rt), ri) for rt, ri in
+                   ((100.0, 600.0), (400.0, 900.0), (800.0, 1050.0))])
+    (tmp_path / "std.mea").write_bytes(b'Sample = "STD"\r\nChunks count = 10\r\n')
+
+    series = rs.REFERENCE_SERIES["ketone"]
+    std_peaks = [{"retention_s": rt, "drift_relative": dt, "intensity": 5000,
+                  "active": True}
+                 for rt, dt in zip((389.7, 467.0, 609.5, 813.4, 1107.2, 1523.4),
+                                   series["dt_values"])]
+    monkeypatch.setattr(cal, "_default_std_peaks_loader",
+                        lambda p, **k: (std_peaks, {"Sample": "STD"}))
+
+    c, mode, _ = cal.resolve_ri_calibration(str(tmp_path), series_key="ketone")
+    assert mode == "batch_own_std"
+    assert c["n_anchors"] == 6
+    assert "gasprj_source" not in c
+
+
+def test_gasprj_negative_RI_extrapolation_is_trimmed_at_the_kovats_floor(tmp_path):
+    """短保留時間端 VOCal 外插出的負 RI 必須被截掉。
+
+    實測 GAS/藝妓咖啡：203 點中最低 RI = −631。RI 是 Kovats 尺標，甲烷 = 100
+    **依定義**是下限，低於它的不是「很小的 RI」而是沒有意義的外插值。截斷用這條
+    定義線，不是調出來的門檻；砍掉幾點記在 meta 裡，不靜默丟資料。
+    """
+    import math
+    vals = ([(math.log10(rt), ri) for rt, ri in
+             ((9.0, -631.0), (11.0, -17.0), (14.0, 95.0))]        # 外插垃圾
+            + [(math.log10(rt), ri) for rt, ri in
+               ((20.0, 250.0), (100.0, 650.0), (900.0, 1095.0))])  # 真實區段
+    p = tmp_path / "proj.gasprj"
+    _write_gasprj(p, vals)
+
+    rts, ris, meta = cal.read_gasprj_ri_table(str(p))
+    assert meta["n_points_raw"] == 6
+    assert meta["n_points_dropped_below_kovats_floor"] == 3
+    assert min(ris) >= cal.KOVATS_RI_FLOOR
+    assert abs(rts[0] - 20.0) < 1e-9
+    # 被截掉的區域仍能查詢，但必須標成外插——不刪資料、只標不確定
+    c = cal.build_calibration(rts, "vocal_project_table", ri_values=ris)
+    _, extrap = cal.make_rt_to_ri(c)(10.0)
+    assert extrap is True
+
+
+def test_gasprj_non_log_x_axis_is_refused(tmp_path):
+    """ColNormisLog=false → 拒絕載入，不自行臆測換算。
+
+    那代表 X 存的是 Rt 本身而非 log10(Rt)。猜錯不會報錯，只會產生整條錯位但看起來
+    正常的 RI——本專案手上沒有 false 的樣本可驗證，所以不寫沒驗證過的分支。
+    """
+    _write_gasprj(tmp_path / "proj.gasprj",
+                  [(100.0, 600.0), (400.0, 900.0)], is_log=False)
+    c, mode, detail = cal.resolve_ri_calibration(str(tmp_path))
+    assert mode == "unavailable" and c is None
+    assert "ColNormisLog" in detail["gasprj"]["rejected"][0]["reason"]
+
+
+def test_gasprj_records_that_the_table_is_resampled_not_original_anchors(tmp_path):
+    """等距格點要被認出來並記進 provenance。
+
+    VOCal 存的是重採樣後的曲線（實測 log10(Rt) 等距 0.01、203 點），不是原始錨點。
+    不記這件事，這張表看起來會像一組高解析度的實測錨點。
+    """
+    import math
+    x0 = math.log10(20.0)
+    vals = [(x0 + 0.01 * i, 250.0 + 5.0 * i) for i in range(40)]
+    p = tmp_path / "proj.gasprj"
+    _write_gasprj(p, vals)
+    _, _, meta = cal.read_gasprj_ri_table(str(p))
+    assert meta["resampled_uniform_grid"] is True
+    assert abs(meta["log_rt_step"] - 0.01) < 1e-9
+
+
+def test_folder_without_std_or_gasprj_stays_unavailable(tmp_path):
+    """兩者皆無 → RI 仍是 unavailable，不能生出數字來。"""
+    (tmp_path / "sample.mea").write_bytes(b'Sample = "A_1"\r\nChunks count = 10\r\n')
+    c, mode, _ = cal.resolve_ri_calibration(str(tmp_path))
+    assert mode == "unavailable" and c is None

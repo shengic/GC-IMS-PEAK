@@ -1,6 +1,6 @@
 # GC-IMS-PEAK
 
-**Version: 3.1 — by Albert Sheng**
+**Version: 3.3 — by Albert Sheng**
 
 Desktop toolkit for **GC-IMS (Gas Chromatography–Ion Mobility Spectrometry)**
 peak detection and compound matching. Reads raw `.mea` files, detects peaks by
@@ -138,6 +138,7 @@ than `peak_id`, which is reassigned whenever the baseline moves.
 | `main.py` | Tkinter desktop application |
 | `readGAS.py` | `.mea` → intensity matrix, `.npz`, heatmap PNG |
 | `peaks.py` | prominence detection, maxima cache, canvas backdrop |
+| `baseline.py` | opt-in AsLS baseline subtraction along RT (`peaks.py --baseline`) |
 | `rules.py` | rule engine, R001–R006, mandatory-rule enforcement |
 | `rip.py` / `dt_convert.py` | RIP normalisation, K0 conversion |
 | `calibration.py` | Stage 4 RT→RI: STD anchor selection, log-linear interp, folder resolution + cache |
@@ -146,7 +147,7 @@ than `peak_id`, which is reassigned whenever the baseline moves.
 | `peak_with_number.py` | static numbered image for the report (not the canvas) |
 | `gas_utils.py` | file-picker helpers |
 | `rules_config.json` | per-rule `enabled` + params |
-| `test/` | pytest suite (165 tests) |
+| `test/` | pytest suite (191 tests) |
 
 ### Output files (per `.mea`, written to `results/`)
 
@@ -179,12 +180,14 @@ so measurement data never gets committed.
 pytest test/ -q
 ```
 
-165 tests cover the rule engine and mandatory-rule enforcement, the selection
+191 tests cover the rule engine and mandatory-rule enforcement, the selection
 funnel and its ordering constraint, peak selection state and its coordinate
 keying, the state machine, file I/O, peak-table rendering, UI validators, and the
 Stage-4 RT→RI calibration (anchor selection, log-linear interp, extrapolate+flag,
 pinning, folder resolution/cache, and the linear-RI axis resampling), plus the
-retention-time axis formula and its version marker (`test_rt_axis.py`).
+retention-time axis formula and its version marker (`test_rt_axis.py`) and the
+AsLS baseline correction (`test_baseline.py`: banded solver against a sparse
+reference, peak-height preservation, the measured λ floor, stride invariance).
 
 ---
 
