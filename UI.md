@@ -3,7 +3,7 @@
 Version: **v3.3** (STD marked in the file list; GC column names its own dimension;
 compound panel layout fixed)
 
-**Status**: ✅ **COMPLETE & TESTED** — 191 unit tests passing.
+**Status**: ✅ **COMPLETE & TESTED** — 238 unit tests passing.
 
 This document defines the user interface behavior for the GC-IMS peak-finding desktop app.
 It is a design/specification document with concrete implementation guidance for a Tk/PIL-based desktop application.

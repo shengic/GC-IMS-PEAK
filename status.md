@@ -38,7 +38,7 @@ progress tracker, not the design.
   Batches 7, 8 pending. (Batch 5 = the ▶ compound-match panel: clicking a peak's
   ▶ loads the `.ril`/`.iml` libraries and lists candidate compounds via
   `match.match_all`.)
-- **191** pytest checks passing across `test/` (~9 s warm, ~20 s cold; added `test_calibration.py`,
+- **238** pytest checks passing across `test/` (~9 s warm, ~20 s cold; added `test_calibration.py`,
   `test_rt_axis.py`, `test_baseline.py`).
 - Project uses `.venv` at project root; install with
   `.venv/Scripts/python.exe -m pip install -r requirements.txt` from the project
@@ -46,7 +46,33 @@ progress tracker, not the design.
 - **Retention-time baseline correction exists but is off by default** —
   `peaks.py --baseline` (AsLS). See the entry immediately below.
 
-### 2026-08-24 (latest) — evidence that the supplier RI table is a polar scale; **no code changed**
+### 2026-08-24 (latest) — library selection now follows the RI scale in use
+
+**Fixes open decision 9 without settling decision 3a.** Matching compares a
+peak's RI against a library's RI; those must share a scale or a ±5 hit lands on
+whatever compound's RI in *the other* scale happens to coincide — wrong reliably,
+not noisily. Peak RI was on the supplier (polar-looking) scale while `.ril`
+selection loaded non-polar libraries from the header's `POLARITY: np`.
+
+Rather than hardcode a side, `library.detect_ri_scale_polarity()` votes the
+calibration series' known compounds (CAS + RI) against `library_data` on both
+phase families, and `identify.select_library_files()` selects `.ril` accordingly.
+The supplier table votes **6/6 polar**; the non-polar 鱸魚 values vote **6/6
+non-polar** — it follows the values in use.
+
+Measured on the STD's own 2-butanone (identity certain): previously **407 hits
+across 151 compounds with 2-butanone absent**; now **415 hits across 56
+compounds, 2-butanone present**.
+
+Also: `areas2.check_class_labels()` reports `.gasprj` `Class` values that
+disagree with the filename — **3 of 15** in Coffee-bean (`E_1_2` tagged `E 1-1`,
+`C_1_2` tagged `C 1-1`, `C_1_3` tagged `C 1-2`). Reported, never auto-corrected:
+which side is right is a question about the raw data, and silently changing it
+would be worse than leaving it visible. Group statistics rest on those labels.
+
+RI values, anchor selection and the STD path are all unchanged.
+
+### 2026-08-24 — evidence that the supplier RI table is a polar scale
 
 **Documentation-only entry.** Reading `.gasprj` for the v3.3 RI tier surfaced a
 `Compounds` block — operator-annotated peaks with CAS, RI, Rt, drift, and the
@@ -802,7 +828,7 @@ Flow:
 10. **Generate Report** still a placeholder (Batch 8). It declines the STD with
     an explanation — reporting the calibration source would be circular.
 
-Verified by 191 passing tests plus a scratch smoke script that drives the real Tk
+Verified by 238 passing tests plus a scratch smoke script that drives the real Tk
 app (circle click, drag-vs-click, table sync, state round-trip). **Full visual QA
 by the user is still pending, including everything v3.3 changed** — see
 "Immediate next actions" item 0.
@@ -837,7 +863,7 @@ C:/GC-IMS-PEAK/
 │                             #   also .gasprj: VOCal projects. Read-only, but now
 │                             #   load-bearing — RI_Normalization is the stage-4
 │                             #   source for folders with no STD
-└── test/                     # 191 tests
+└── test/                     # 238 tests
     ├── test_rt_axis.py            # locks the (averages+1) formula + version marker
     ├── test_select_from_maxima.py # locks "R004/R006 before the prominence gate"
     ├── test_calibration.py        # stage 4, incl. the anchor off-by-one evidence
@@ -853,7 +879,7 @@ CLI) / `UI.md` (Tk spec) / `ketone_RI_provenance.md` (where the RI numbers came
 from). `GC-IMS_Peak_Finding_Workflow.md` is the original image-mode blueprint;
 its founding premise no longer holds and it is kept only as a methodology record.
 
-Total test count: **191 pass in ~9 s** (all under `pytest test/`).
+Total test count: **238 pass in ~9 s** (all under `pytest test/`).
 
 > **[v3.3] The Tk flakiness is fixed, the data-dependent skips are not.**
 > `tk.Tk()` occasionally raised mid-suite and the reason read "no Tk display
@@ -1114,9 +1140,35 @@ These are things I cannot resolve — user needs to decide or provide data.
    | supplier RI (current) | select **polar** `.ril` (`Full_Polar`, `NIST2020 RI DB-Wax`, `Standard polar`) | query and reference on one scale; contradicts the column header |
    | non-polar libraries (current) | the RI values | contradicts the user's 2026-08-24 decision |
 
-   **Status: the user has chosen to keep both as they are for now.** Recorded so
-   the inconsistency is known in advance rather than inferred later from bad
-   matches.
+   **✅ RESOLVED 2026-08-24 — without choosing a side.** The fix is not to pick
+   polar or non-polar RI values (that is a chemistry question, not a programming
+   one) but to make **library selection follow whichever RI scale is actually in
+   use**. `library.detect_ri_scale_polarity()` takes the calibration series'
+   known compounds (CAS + RI) and looks each one up in `library_data` on both
+   phase families, then votes. `identify.select_library_files()` uses that
+   polarity for `.ril` instead of the header's, and records header polarity,
+   detected polarity, which was used, and a `polarity_conflict` flag.
+
+   Measured on the supplier table: **6/6 votes polar**, and the values sit almost
+   exactly on the library's polar entries (2-butanone 916.8 vs 908.0, 2-heptanone
+   1181.4 vs 1182.0). Fed the non-polar 鱸魚 values instead, the same function
+   returns **6/6 non-polar** — it follows the data, it does not take a side.
+
+   Effect on the STD's own 2-butanone, whose identity is certain:
+
+   | | `.ril` loaded | hits | compounds | 2-butanone recovered |
+   |---|---|---|---|---|
+   | before | 13 non-polar files | 407 | 151 | **no** |
+   | after | 106 polar files | 415 | **56** | **yes** |
+
+   Detection needs a series carrying compound identities, so it works for
+   `ketone` and returns `None` for `.gasprj`-derived curves (no identities in the
+   file) — in which case selection falls back to the header, as before. Fewer
+   than 2 usable probes, or a tie, also returns `None`: guessing wrong would put
+   the whole batch on the wrong phase, which is worse than not knowing.
+
+   **The RI values themselves are untouched** — the user's decision to keep the
+   supplier table stands, and decision 3a remains open.
 
 ---
 
@@ -1162,7 +1214,7 @@ are done — see the Batch table above.)*
 
 **0. Pending user verification — do this first.** v3.3 shipped without the manual
 UI pass the working agreement calls for. The CLI side is verified end-to-end
-across all four `GAS/` folders and 191 tests pass, but nobody has yet *looked* at:
+across all four `GAS/` folders and 238 tests pass, but nobody has yet *looked* at:
 the `.gasprj` RI axis on `藝妓咖啡` (RI column populated, y-axis in Retention
 Index, the new status line), the STD marked in the file list, the `GC (RT s)`
 heading, or the compound panel's fixed layout. If something looks wrong, fix

@@ -79,7 +79,26 @@ def parse_raw_tp_arg(arg):
 # --------------------------------------------------------------------------- #
 # 選庫檔
 # --------------------------------------------------------------------------- #
-def select_library_files(data_dir, header):
+def _ri_scale_polarity(data_dir, ri_calibration):
+    """實際在用的那套 RI 值屬於哪個相位家族。回傳 (polarity|None, detail)。
+
+    只有「系列帶已知化合物身分」的校正（如 `ketone`，六個成員各有 CAS）才判斷得出來；
+    `.gasprj` 來的曲線沒有化合物身分，回 None，選庫就退回表頭極性。
+    """
+    if not isinstance(ri_calibration, dict):
+        return None, {"reason": "no calibration"}
+    series = ri_calibration.get("series_used")
+    meta = calibration.rs.REFERENCE_SERIES.get(series or "", {})
+    cas = meta.get("cas_numbers")
+    ris = ri_calibration.get("ri_values") or meta.get("ri_values")
+    if not cas or not ris:
+        return None, {"reason": f"series {series!r} 沒有帶 CAS/RI，無法判斷尺標"}
+    pol, detail = library.detect_ri_scale_polarity(cas, ris, data_dir)
+    detail["series"] = series
+    return pol, detail
+
+
+def select_library_files(data_dir, header, ri_calibration=None):
     """
     依 .mea 表頭的 GC Column / Drift Gas 從 data_dir 挑 .ril 與 .iml 檔。
 
@@ -107,9 +126,20 @@ def select_library_files(data_dir, header):
         "column_name": None, "polarity": None, "polarity_source": None,
     }
 
+    # **選庫的極性要跟著「實際在用的 RI 尺標」走，不是跟著表頭的管柱極性。**
+    # 比對是拿峰的 RI 對庫的 RI，兩者不在同一套尺標上時，±5 命中的是「另一個化合物的
+    # RI 恰好等於本峰的 RI」——錯得穩定而不是錯得隨機。實測：拿 STD 自己的 2-butanone
+    # （身分確定）在非極性庫查供應商尺標的 916.84，回來 176 個候選、**沒有一個是
+    # 2-butanone**，而它就在同一批檔案裡（RI 549–622）。
+    #
+    # 這裡**不替使用者決定該用哪一套 RI 值**——那是化學問題。只保證查詢與參考同尺標。
+    scale_pol, scale_detail = _ri_scale_polarity(data_dir, ri_calibration)
+    eff_pol = scale_pol or parsed["polarity"]
     ril_paths, ril_strategy = library.select_ril_paths(
-        data_dir, column_name=parsed["column_name"], polarity=parsed["polarity"],
+        data_dir, column_name=parsed["column_name"], polarity=eff_pol,
     )
+    if scale_pol and parsed["polarity"] and scale_pol != parsed["polarity"]:
+        ril_strategy += f" [ri_scale={scale_pol}, header={parsed['polarity']} — 依尺標]"
     # IMS 漂移不綁管柱 → 全載（見上方 docstring）
     iml_paths = sorted(glob.glob(os.path.join(data_dir, "*.iml")))
     iml_strategy = "all (IMS drift is instrument-relative, not GC-column-specific)"
@@ -124,10 +154,16 @@ def select_library_files(data_dir, header):
         "parsed_polarity_source": parsed.get("polarity_source"),
         "ril_strategy": ril_strategy,
         "iml_strategy": iml_strategy,
+        # 三個都記下來：表頭說什麼、實際尺標是什麼、最後用了哪個。不一致時下游看得見。
+        "ri_scale_polarity": scale_pol,
+        "ri_scale_detection": scale_detail,
+        "effective_ril_polarity": eff_pol,
+        "polarity_conflict": bool(scale_pol and parsed["polarity"]
+                                  and scale_pol != parsed["polarity"]),
     }
 
 
-def load_libraries(data_dir, header):
+def load_libraries(data_dir, header, ri_calibration=None):
     """
     選檔 + 讀檔 + 載流氣體交叉核對，一次做完。**CLI 與 UI 共用這一份**，避免兩邊
     的比對候選集悄悄分歧。
@@ -142,7 +178,7 @@ def load_libraries(data_dir, header):
     (ril_rows, iml_rows, info)
         info 為 select_library_files() 的 strategy_dict 再加上載入/篩選後的計數。
     """
-    ril_paths, iml_paths, info = select_library_files(data_dir, header)
+    ril_paths, iml_paths, info = select_library_files(data_dir, header, ri_calibration)
     ril_rows = library.load_ril_many(ril_paths)
     iml_rows_all = library.load_iml_many(iml_paths)
 
@@ -261,7 +297,8 @@ def identify(peaks_doc, mea_path,
             "找不到 library 資料夾（library_data/ 空或不存在，"
             "且未指定 --library-dir）；先放入 .ril/.iml 或明確指定路徑"
         )
-    ril_rows, iml_rows, select_info = load_libraries(resolved_lib_dir, header)
+    ril_rows, iml_rows, select_info = load_libraries(
+        resolved_lib_dir, header, ri_calibration=ri_calibration)
 
     # ---- 第五階段：逐峰比對 ----
     gc_dims, ims_dims = [], []

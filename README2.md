@@ -128,7 +128,8 @@ results/<folder>_area_matrix2.csv   矩陣（UTF-8 BOM，Excel 直接開）
 |---|---|
 | `areas2.py` | 邏輯，headless，可 CLI 執行 |
 | `main2.py` | Tk 介面 |
-| `test/test_areas2.py` | 測試（27 項） |
+| `test/test_areas2.py` | 邏輯測試（31 項） |
+| `test/test_main2.py` | 介面測試（13 項，需 Tk display） |
 | `Area_Matrix2.md` | 設計與實作細節 |
 | `status2.md` | 進度與交接 |
 | `README2.md` | 本檔 |
@@ -140,6 +141,9 @@ results/<folder>_area_matrix2.csv   矩陣（UTF-8 BOM，Excel 直接開）
 
 ## 已知限制
 
+- **`Class` 標籤可能與檔名不一致**：跑批次時會自動比對並寫進 Progress log
+  （實測 Coffee-bean 3/15 不一致）。**只報不改**——哪一邊對是原始資料的問題。
+  分組統計建立在 `Class` 上，做組間比較前請先確認。
 - **沒有跨檔保留時間對齊**：靠方框夠寬吸收漂移，與 VOCal 手畫寬框同樣作法。
 - **`volume` 不是嚴謹的峰體積積分**：方框內高於 floor 的簡單加總，沒有峰形擬合。
 - **K0 沒有用在區域命名上**：K0 需要逐峰 `dt_index`，區域層級沒有單一值。

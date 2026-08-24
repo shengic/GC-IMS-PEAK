@@ -568,6 +568,17 @@ class AreaMatrixApp:
         areas2.write_matrix_csv(self.result, csv, metric=self.metric.get())
         p = self.result["provenance"]
         caveat = f"   ⚠ {p['ri_caveat']}" if p.get("ri_caveat") else ""
+
+        # 兩個會讓結論悄悄變錯的狀況，跑完一定要講出來——它們都不會讓程式失敗。
+        for w in (self.result.get("class_warnings") or []):
+            self._log(f"⚠ Class 與檔名不一致：{w['file']}  "
+                      f"Class='{w['class']}'  檔名='{w['from_filename']}'")
+        if self.result.get("class_warnings"):
+            self._log("   分組統計建立在 Class 上——做組間比較前請先確認哪一邊才對。")
+        nm = p.get("naming") or {}
+        if nm.get("polarity_conflict"):
+            self._log(f"⚠ 選庫極性依**實際 RI 尺標**（{nm.get('ri_scale_polarity')}）"
+                      f"而非表頭管柱極性——兩者不一致。見 status.md open decision 9。")
         self._log(f"Wrote {js}")
         self._log(f"Wrote {csv}")
         self.status.config(

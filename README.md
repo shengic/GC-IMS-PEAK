@@ -94,6 +94,18 @@ can name and check.
 > Peak detection and the drift (x) axis are unaffected by either. Results produced
 > before 2026-08-12 carry the old, mis-assigned anchors — **re-run detection**.
 
+**Library selection follows the RI scale, not the column header.** Matching
+compares a peak's RI against a library's RI, so both must be on the same scale —
+otherwise a ±5 hit lands on whatever compound's RI in *the other* scale happens
+to coincide, which is wrong reliably rather than noisily.
+`library.detect_ri_scale_polarity()` votes the calibration's known compounds
+against `library_data` on both phase families and picks `.ril` accordingly,
+recording header polarity, detected polarity and a `polarity_conflict` flag in
+the output. It does **not** choose which RI values are correct — that is a
+chemistry question; it only guarantees query and reference share a scale. When
+the scale can't be determined (no compound identities, too few probes, or a tie)
+it falls back to the header rather than guessing.
+
 ---
 
 ## Quick start
@@ -169,7 +181,7 @@ than `peak_id`, which is reassigned whenever the baseline moves.
 | `peak_with_number.py` | static numbered image for the report (not the canvas) |
 | `gas_utils.py` | file-picker helpers |
 | `rules_config.json` | per-rule `enabled` + params |
-| `test/` | pytest suite (191 tests) |
+| `test/` | pytest suite (238 tests) |
 
 ### Output files (per `.mea`, written to `results/`)
 
@@ -204,7 +216,7 @@ so measurement data never gets committed.
 pytest test/ -q
 ```
 
-191 tests cover the rule engine and mandatory-rule enforcement, the selection
+238 tests cover the rule engine and mandatory-rule enforcement, the selection
 funnel and its ordering constraint, peak selection state and its coordinate
 keying, the state machine, file I/O, peak-table rendering, UI validators, and the
 Stage-4 RT→RI calibration (anchor selection, log-linear interp, extrapolate+flag,

@@ -210,3 +210,56 @@ def test_phase_name_separators_do_not_matter():
 
 if __name__ == "__main__":
     test_library_smoke()
+
+
+# --------------------------------------------------------------------------- #
+# RI 尺標極性偵測（2026-08-24）—— 選庫要跟著實際的尺標走，不是跟著表頭
+# --------------------------------------------------------------------------- #
+def test_ril_family_puts_db_wax_on_the_polar_side():
+    """`NIST2020 RI DB-Wax.ril` 同時含 `db-` 與 `wax`，必須判成極性。
+
+    關鍵字比對順序寫反就會把整批 wax 檔誤判成非極性——而那正是選庫的依據。
+    """
+    assert library.ril_family("NIST2020 RI DB-Wax.ril") == "p"
+    assert library.ril_family("NIST2020 RI DB-5.ril") == "np"
+    assert library.ril_family("AVERAGE LOW POLAR.ril") == "np"
+    assert library.ril_family("NIST2014 carbowax 20m.ril") == "p"
+    assert library.ril_family("MERGED NIST2020 RI SNP.ril") is None   # 認不出就 None
+
+
+def test_detect_ri_scale_polarity_follows_the_values_not_a_hardcoded_side():
+    """同一組化合物、兩套 RI 值 → 兩個不同答案。**程式不替使用者選邊。**
+
+    比對是拿峰的 RI 對庫的 RI，兩者必須同尺標。實測踩過的錯：峰的 RI 用供應商對照表
+    （極性尺標），庫卻依表頭 `POLARITY: np` 載入非極性——拿 STD 自己的 2-butanone
+    去查，176 個候選裡沒有 2-butanone，而它就在同一批檔案裡（RI 549–622）。
+    """
+    if VOCAL_DATA is None:
+        import pytest
+        pytest.skip("需要真實的 library_data")
+    import reference_series as rs
+    k = rs.REFERENCE_SERIES["ketone"]
+    pol_supplier, d1 = library.detect_ri_scale_polarity(
+        k["cas_numbers"], k["ri_values"], VOCAL_DATA)
+    pol_nonpolar, d2 = library.detect_ri_scale_polarity(
+        k["cas_numbers"],
+        [589.4, 688.6, 784.2, 892.2, 996.5, 1095.6], VOCAL_DATA)
+    assert pol_supplier == "p", d1
+    assert pol_nonpolar == "np", d2
+    assert d1["n_probes"] == 6 and d2["n_probes"] == 6
+
+
+def test_detect_ri_scale_refuses_to_guess_when_evidence_is_thin():
+    """探針太少或平手 → 回 None，退回表頭極性。
+
+    猜錯的代價是整批用錯相位的庫，比「不知道」嚴重得多。
+    """
+    if VOCAL_DATA is None:
+        import pytest
+        pytest.skip("需要真實的 library_data")
+    pol, d = library.detect_ri_scale_polarity(["C78933"], [916.8], VOCAL_DATA)
+    assert pol is None and "不猜" in d["reason"]
+    pol, d = library.detect_ri_scale_polarity([], [], VOCAL_DATA)
+    assert pol is None
+    pol, d = library.detect_ri_scale_polarity(["C78933"], [916.8], "no/such/dir")
+    assert pol is None

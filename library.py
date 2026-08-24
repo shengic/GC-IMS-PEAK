@@ -40,6 +40,7 @@ Version: 3.3 — by Albert Sheng
 """
 
 import os
+import re
 
 
 # --------------------------------------------------------------------------- #
@@ -448,6 +449,103 @@ def select_iml_paths(data_dir, column_name=None, polarity=None):
         if hits:
             return hits, "polarity_fallback"
     return [], "none"
+
+
+# --------------------------------------------------------------------------- #
+# .ril 相位家族分類 + RI 尺標極性偵測
+#
+# 為什麼需要這一段（實際踩到的錯，不是預防性設計）：
+# 比對是拿「峰的 RI」對「庫的 RI」。**兩者必須在同一套尺標上**，否則 ±5 的容許窗命中的
+# 是「另一個化合物的 RI 恰好等於本峰的 RI」——錯得穩定，不是錯得隨機。
+#
+# 本專案實際發生過：峰的 RI 來自供應商對照表（證據指向**極性**尺標），而 `.ril` 依表頭
+# `POLARITY: np` 載入**非極性**庫。拿 STD 自己的 2-butanone（身分百分之百確定）去查，
+# 回來 176 個候選、**沒有一個是 2-butanone**，最接近的是 α-pinene 與各種吡嗪；而
+# 2-butanone 就在同一批檔案裡，RI 549–622，離查詢值 318。
+#
+# 解法**不是**替使用者決定該用哪一套 RI 值——那是化學問題，不是程式問題。解法是讓選庫
+# 跟著「實際在用的尺標」走：拿校正系列裡**已知身分的化合物**（CAS + RI），去 library_data
+# 查它們在極性/非極性兩個相位家族的值，看落在哪一邊。這樣不論使用者選哪套 RI 值，
+# 查詢與參考永遠在同一套尺標上。
+# --------------------------------------------------------------------------- #
+RIL_FAMILY_KEYWORDS = {
+    # 非極性（甲基/苯基聚矽氧烷家族）
+    "np": ("low polar", "db-5", "hp-5", "hp-1", "ov-101", "ov-1", "ps-089",
+           "se-5", "se-3", "cp-sil", "zb-5", "rtx-5", "non-polar", "nonpolar"),
+    # 極性（PEG / wax 家族）
+    "p": ("wax", "carbowax", "innowax", "peg", "ffap"),
+}
+
+
+def ril_family(filename):
+    """由 `.ril` 檔名判斷它屬於哪個相位家族：'np' / 'p' / None（認不出來）。
+
+    先比對極性關鍵字再比非極性——`"NIST2020 RI DB-Wax.ril"` 同時含 `db-` 與 `wax`，
+    順序反過來會把它誤判成非極性。
+    """
+    low = os.path.basename(str(filename)).lower()
+    if any(k in low for k in RIL_FAMILY_KEYWORDS["p"]):
+        return "p"
+    if any(k in low for k in RIL_FAMILY_KEYWORDS["np"]):
+        return "np"
+    return None
+
+
+def _family_reference(data_dir, cas_wanted):
+    """{正規化 CAS: {'np': 中位 RI, 'p': 中位 RI}}，只收兩個家族都有值的 CAS。"""
+    import statistics
+    want = {re.sub(r"[^0-9]", "", c or "") for c in cas_wanted}
+    want.discard("")
+    acc = {}
+    for path in _list_files(data_dir, ".ril"):
+        fam = ril_family(path)
+        if fam is None:
+            continue
+        for row in load_ril(path):
+            cas = re.sub(r"[^0-9]", "", row.get("CAS") or "")
+            if cas in want and row.get("RI") is not None:
+                acc.setdefault(cas, {"np": [], "p": []})[fam].append(row["RI"])
+    return {c: {k: statistics.median(v) for k, v in d.items() if v}
+            for c, d in acc.items()}
+
+
+def detect_ri_scale_polarity(cas_numbers, ri_values, data_dir):
+    """判斷一組「已知化合物 + 其 RI」屬於哪個相位家族的尺標。
+
+    作法：每個化合物在 `library_data` 裡查它在非極性/極性兩家族的中位 RI，看給定的
+    RI 離哪邊近，投一票。**用的是使用者自己的 library_data，不是外部文獻**——這既是
+    最相關的參照，也讓判斷可以被重跑驗證。
+
+    回傳 (polarity, detail)：polarity ∈ {'np', 'p', None}。票數不足或兩邊票數相同時
+    回 None——**寧可回「不知道」也不要猜**，猜錯會讓選庫整批用錯相位。
+
+    參數
+    ----
+    cas_numbers : list[str]   化合物 CAS（與 ri_values 一一對應）
+    ri_values   : list[float] 該尺標下的 RI
+    data_dir    : str         .ril 所在資料夾
+    """
+    detail = {"n_probes": 0, "votes": {"np": 0, "p": 0}, "per_compound": []}
+    if not cas_numbers or not ri_values or not os.path.isdir(data_dir or ""):
+        detail["reason"] = "缺 CAS/RI 或找不到 library 資料夾"
+        return None, detail
+    ref = _family_reference(data_dir, cas_numbers)
+    for cas, ri in zip(cas_numbers, ri_values):
+        key = re.sub(r"[^0-9]", "", cas or "")
+        r = ref.get(key)
+        if not r or len(r) < 2 or ri is None:
+            continue
+        vote = "np" if abs(ri - r["np"]) < abs(ri - r["p"]) else "p"
+        detail["votes"][vote] += 1
+        detail["n_probes"] += 1
+        detail["per_compound"].append(
+            {"cas": key, "ri": ri, "lib_np": round(r["np"], 1),
+             "lib_p": round(r["p"], 1), "vote": vote})
+    np_v, p_v = detail["votes"]["np"], detail["votes"]["p"]
+    if detail["n_probes"] < 2 or np_v == p_v:
+        detail["reason"] = f"票數不足或平手（np={np_v}, p={p_v}）→ 不猜"
+        return None, detail
+    return ("np" if np_v > p_v else "p"), detail
 
 
 # 載流氣體標記的別名表。key 為正規化後的氣體名，value 為該氣體在 .iml row 裡

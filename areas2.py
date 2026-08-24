@@ -455,6 +455,7 @@ def measure_areas_in_file(mea_path, areas, floor=None, use_baseline=True,
 # 階段 E：替區域命名（沿用既有比對）
 # --------------------------------------------------------------------------- #
 def name_areas(areas, mea_path, library_dir=None, preserve_names=False,
+               ri_calibration=None,
                ri_tol=match_mod.DEFAULT_RI_TOLERANCE,
                drift_tol=match_mod.DEFAULT_DRIFTREL_TOLERANCE, verbose=True):
     """用既有的 `match.match_all()` 替每個區域找候選化合物，就地寫回 `name` / `cas`。
@@ -471,7 +472,9 @@ def name_areas(areas, mea_path, library_dir=None, preserve_names=False,
             log("  [info] 找不到 library 資料夾，區域維持 area N（矩陣不受影響）")
         return {"named": 0, "reason": "library dir unavailable"}
     header = identify.read_mea_header(mea_path)
-    ril_rows, iml_rows, info = identify.load_libraries(data_dir, header)
+    # 同 main.py：選庫極性跟著實際的 RI 尺標，不是表頭的管柱極性
+    ril_rows, iml_rows, info = identify.load_libraries(
+        data_dir, header, ri_calibration=ri_calibration)
     named = 0
     for a in areas:
         probe = {"ri": a.get("ri_center"),
@@ -502,7 +505,9 @@ def name_areas(areas, mea_path, library_dir=None, preserve_names=False,
             a.setdefault("matched_name", None)
             a.setdefault("matched_cas", None)
     return {"named": named, "n_ril_rows": len(ril_rows), "n_iml_rows": len(iml_rows),
-            "ril_files": info.get("ril_files"), "ril_strategy": info.get("ril_strategy")}
+            "ril_files": info.get("ril_files"), "ril_strategy": info.get("ril_strategy"),
+            "ri_scale_polarity": info.get("ri_scale_polarity"),
+            "polarity_conflict": info.get("polarity_conflict")}
 
 
 def attach_ri_to_areas(areas, ri_cal):
@@ -661,6 +666,15 @@ def build_matrix(folder, from_gasprj=None, use_baseline=True, baseline_lam=None,
     if skip_detect and not from_gasprj:
         raise ValueError("skip_detect 只能搭配 from_gasprj——共識區域必須先找峰")
 
+    # `Class` 是手打的，實測 Coffee-bean 15 筆有 3 筆與檔名對不上。分組統計若建立在
+    # 錯的標籤上，結論會錯而且看不出來——所以一定要講出來。只報不改（見函式說明）。
+    class_warnings = check_class_labels([os.path.basename(m) for m in samples], class_of)
+    if class_warnings and verbose:
+        log(f"  ⚠ {len(class_warnings)}/{len(samples)} 個檔案的 Class 與檔名不一致：")
+        for w in class_warnings[:5]:
+            log(f"      {w['file']}  Class='{w['class']}'  檔名='{w['from_filename']}'")
+        log("      （只回報不自動修正——哪一邊對是原始資料的問題）")
+
     total = len(samples)
     steps = total * (1 if skip_detect else 2)
     per_file_peaks, per_file_meta = {}, {}
@@ -710,7 +724,8 @@ def build_matrix(folder, from_gasprj=None, use_baseline=True, baseline_lam=None,
         log(f"  區域中心補上 RI：{n_ri}/{len(areas)}")
 
     name_report = name_areas(areas, samples[0], library_dir=library_dir,
-                             preserve_names=bool(from_gasprj), verbose=verbose)
+                             preserve_names=bool(from_gasprj),
+                             ri_calibration=ri_cal, verbose=verbose)
     name_report["preserved_gasprj_names"] = bool(from_gasprj)
     if verbose:
         log(f"命名：{name_report.get('named', 0)}/{len(areas)} 個區域比對到化合物")
@@ -739,6 +754,7 @@ def build_matrix(folder, from_gasprj=None, use_baseline=True, baseline_lam=None,
         "classes": {os.path.basename(m): class_of.get(os.path.basename(m), "")
                     for m in samples},
         "excluded": excluded,
+        "class_warnings": class_warnings,
         "n_areas": len(areas), "n_files": len(samples),
         "areas": areas, "matrix": matrix,
         "provenance": {
@@ -851,6 +867,33 @@ def short_file_label(basename):
     b = os.path.splitext(str(basename))[0]
     m = re.match(r"^\d{6}_\d{6}_(.+)$", b)
     return m.group(1) if m else b
+
+
+def check_class_labels(files, class_of):
+    """比對 `.gasprj` 的 `Class` 與檔名裡的樣品代號，回傳不一致清單。
+
+    為什麼要查：`Class` 是**手打的**，實測 Coffee-bean 15 筆有 3 筆對不上——
+    `260625_122837_E_1_2.mea` 被標成 `E 1-1`、`..._C_1_2.mea` 標成 `C 1-1`、
+    `..._C_1_3.mea` 標成 `C 1-2`。分組統計如果建立在錯的標籤上，結論就是錯的，
+    而且**看不出來**。
+
+    **只回報，不自動修正**：哪一邊才對是原始資料的問題（可能是檔名打錯，也可能是
+    Class 打錯），程式沒有依據能判斷。靜默改掉比留著錯更糟。
+
+    比對方式：把兩邊都正規化成只留英數並轉小寫（`E 1-2` → `e12`，
+    `260625_122837_E_1_2` → 取日期時間後的 `E_1_2` → `e12`），再比。
+    """
+    out = []
+    for b in files:
+        raw = (class_of.get(b) or "").strip()
+        if not raw:
+            continue
+        from_name = short_file_label(b)
+        a = re.sub(r"[^0-9a-z]", "", raw.lower())
+        c = re.sub(r"[^0-9a-z]", "", from_name.lower())
+        if a != c:
+            out.append({"file": b, "class": raw, "from_filename": from_name})
+    return out
 
 
 def class_group_key(cls):

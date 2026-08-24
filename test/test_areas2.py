@@ -390,7 +390,9 @@ def test_gasprj_area_names_are_never_overwritten_by_our_match():
         areas2.library = types.SimpleNamespace(resolve_data_dir=lambda explicit=None: "x")
         areas2.identify = types.SimpleNamespace(
             read_mea_header=lambda p: {},
-            load_libraries=lambda d, h: ([], [], {"ril_files": [], "ril_strategy": "t"}))
+            # 簽章多了 ri_calibration：選庫極性要跟著實際的 RI 尺標走
+            load_libraries=lambda d, h, ri_calibration=None: (
+                [], [], {"ril_files": [], "ril_strategy": "t"}))
 
         areas = [{"area_id": 1, "name": "1- butanol", "drift_center": 1.18,
                   "rt_center_s": 725.0, "ri_center": 1144.9}]
@@ -512,3 +514,45 @@ def test_skip_detect_reports_unknown_detection_not_zero(tmp_path, monkeypatch):
     assert r["provenance"]["skip_detect"] is True
     # 矩陣照樣是滿的——那才是這支應用的重點
     assert r["matrix"]["a.mea"][1]["volume"] == 5.0
+
+
+# --------------------------------------------------------------------------- #
+# Class 標籤與檔名不一致（實測 Coffee-bean 15 筆有 3 筆）
+# --------------------------------------------------------------------------- #
+def test_class_label_mismatch_is_detected():
+    """`Class` 是手打的，會與檔名對不上——實測 3/15。
+
+    分組統計建立在 `Class` 上，標籤錯了結論就錯，而且**看不出來**：程式不會失敗、
+    數字看起來也正常。所以一定要主動查出來講。
+    """
+    files = ["260625_113647_E_1_1.mea", "260625_122837_E_1_2.mea",
+             "260624_180224_C_1_2.mea"]
+    class_of = {files[0]: "E 1-1",      # 對得上
+                files[1]: "E 1-1",      # 檔名是 E_1_2 → 不一致
+                files[2]: "C 1-1"}      # 檔名是 C_1_2 → 不一致
+    w = areas2.check_class_labels(files, class_of)
+    assert [x["file"] for x in w] == [files[1], files[2]]
+    assert w[0]["class"] == "E 1-1" and w[0]["from_filename"] == "E_1_2"
+
+
+def test_class_check_normalises_separators_before_comparing():
+    """`E 1-2` 與檔名的 `E_1_2` 是同一件事，不可以被當成不一致。"""
+    files = ["260625_122837_E_1_2.mea"]
+    assert areas2.check_class_labels(files, {files[0]: "E 1-2"}) == []
+    assert areas2.check_class_labels(files, {files[0]: "e1-2"}) == []
+
+
+def test_class_check_ignores_files_without_a_label():
+    """沒有 Class 的檔案不算不一致——那是「沒有標」，不是「標錯」。"""
+    files = ["260625_122837_E_1_2.mea"]
+    assert areas2.check_class_labels(files, {}) == []
+    assert areas2.check_class_labels(files, {files[0]: ""}) == []
+
+
+def test_class_labels_are_reported_never_silently_corrected():
+    """只回報不修正：哪一邊才對是原始資料的問題，程式沒有依據判斷。"""
+    files = ["260624_180224_C_1_2.mea"]
+    class_of = {files[0]: "C 1-1"}
+    before = dict(class_of)
+    areas2.check_class_labels(files, class_of)
+    assert class_of == before          # 輸入原封不動

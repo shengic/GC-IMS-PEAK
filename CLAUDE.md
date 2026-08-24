@@ -48,6 +48,10 @@
 - **RI 有四層來源,`.gasprj` 是其中一層**:STD → 該資料夾的 `.gasprj`
   (`RI_Normalization` 區塊)→ registry → 無。所以 **`.gasprj` 是輸入資料,不是
   VOCal 的殘留檔**,不得刪除或搬移。每個峰帶 `ri_mode` 標明實際用了哪一層。
+- **選庫的極性跟著「實際在用的 RI 尺標」走,不是表頭的管柱極性**。比對是拿峰的 RI
+  對庫的 RI,兩者不同尺標時,±5 命中的是「另一個化合物的 RI 恰好等於本峰的 RI」
+  ——錯得穩定而非隨機。由 `library.detect_ri_scale_polarity()` 依 library_data 投票
+  判定;判不出來就退回表頭,不猜。
 - **沒有 RI 時 GC 比對會退到保留時間**,而保留時間不跨儀器/管柱/方法轉移。欄位標題
   必須跟著變成 `GC (RT s)` —— 把秒數掛在 RI 名義下是這裡踩過的坑。
 
@@ -58,7 +62,7 @@
 (PowerShell 與 bash 皆可直接執行):
 
 ```bash
-.venv/Scripts/python.exe -m pytest test/ -q     # 全套測試(現 191 項,約 9 s;冷啟動約 20 s)
+.venv/Scripts/python.exe -m pytest test/ -q     # 全套測試(現 238 項,約 9 s;冷啟動約 20 s)
 .venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 

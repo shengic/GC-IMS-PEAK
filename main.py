@@ -2012,7 +2012,11 @@ class GCIMSApp:
                 # identify.load_libraries(), shared with the CLI. Keeping a second
                 # copy here is how the two drifted apart before: the UI matched
                 # against all .iml while the CLI filtered them by GC column.
-                q.put(("done", identify.load_libraries(data_dir, header)))
+                # 帶上本資料夾的 RI 校正：選庫的極性要跟著**實際在用的尺標**走，
+                # 不是跟著表頭的管柱極性。兩者不一致時，±5 的容許窗會命中「另一個
+                # 化合物的 RI 恰好等於本峰的 RI」——錯得穩定而非隨機。
+                q.put(("done", identify.load_libraries(
+                    data_dir, header, ri_calibration=self.state.ri_calibration)))
             except Exception as e:   # noqa: BLE001 — surface any load failure
                 q.put(("error", str(e)))
 
