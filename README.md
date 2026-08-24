@@ -27,6 +27,13 @@ libraries.
 `.mea` files are the original measurements and are **never modified or deleted**
 by any part of this project.
 
+> **There is a second app in this repo.** `main2.py` / `areas2.py` (version 1.x)
+> analyses a **whole batch at once**, measuring the same set of areas across every
+> `.mea` to produce an **area × file intensity matrix** for comparing sample
+> groups — the model VOCal uses. Everything belonging to it carries a `2` suffix
+> (`test2/`, `README2.md`, `status2.md`, `Area_Matrix2.md`). It calls this app's
+> modules as a library and modifies none of them. Start at **`README2.md`**.
+
 ### The two axes — which is which
 
 **RI belongs to GC.** It is derived from retention time, and retention time is

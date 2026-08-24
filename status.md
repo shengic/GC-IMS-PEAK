@@ -14,6 +14,13 @@ stands, what has been decided, what is testable now, and what to do next. Pair
 with `GC-IMS_Identify_Workflow.md` (the authoritative spec) — this file is the
 progress tracker, not the design.
 
+> **⚠ This file covers the FIRST app only (`main.py`, 3.x).** There is a second,
+> independent app in this repo — `main2.py` / `areas2.py`, version 1.x — which
+> analyses a whole batch at once and produces an area × file intensity matrix.
+> Everything of its own carries a `2` suffix. Its progress tracker is
+> **`status2.md`**; usage in `README2.md`, design in `Area_Matrix2.md`, tests in
+> `test2/`. It calls this app's modules as a library and never modifies them.
+
 ---
 
 ## TL;DR
