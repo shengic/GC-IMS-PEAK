@@ -31,3 +31,6 @@ ui_settings.json
 
 # --- stray screenshots pasted for reference (ShareX-style names) ---
 /python_*.png
+
+# Claude Code 的 session 資訊 dump（含 email 與本機 pipe 位址），不進版控
+session.txt

@@ -2,28 +2,34 @@
 
 讀 G.A.S. FlavourSpec® 的 `.mea`,偵測 2D 熱圖上的峰,再比對化合物。
 
-## ⚠ 這個 repo 裡有**兩支應用**,先確認在講哪一支
+## ⚠ 這個 repo 裡有**三支應用**,先確認在講哪一支
 
-帶 `2` 尾綴的檔案**全部屬於第二支應用**,不是第一支的新版本。兩支各有自己的版本序列。
+帶 `2` 尾綴的檔案**全部屬於第二支應用**,不是第一支的新版本;第三支整包在
+`compound_consensus/` 裡。三支各有自己的版本序列。
 
-| | 第一支 | 第二支 |
-|---|---|---|
-| 進入點 | `main.py` | `main2.py` |
-| 版本 | 3.x | 1.x |
-| 一次處理 | **1 個** `.mea` | **一整批** |
-| 做什麼 | 熱圖 → 找峰 → 逐峰比對化合物 | 在所有檔案上量**同一組區域** → 區域 × 檔案的強度矩陣 |
-| 邏輯模組 | `peaks` / `calibration` / `identify` / `match` … | `areas2.py`(呼叫左邊那些,**不修改**) |
-| 測試 | `test/`(194) | `test2/`(44) |
-| 進度 | `status.md` | `status2.md` |
+| | 第一支 | 第二支 | 第三支 |
+|---|---|---|---|
+| 進入點 | `main.py` | `main2.py` | `python -m compound_consensus.app` |
+| 版本 | 3.x | 1.x | 1.0 |
+| 一次處理 | **1 個** `.mea` | **一整批** | **同一標本的重複測量** |
+| 做什麼 | 熱圖 → 找峰 → 逐峰比對化合物 | 在所有檔案上量**同一組區域** → 區域 × 檔案的強度矩陣 | 跨重複彙整化合物候選,依「幾個重複支持」排序 |
+| 邏輯模組 | `peaks` / `calibration` / `identify` / `match` … | `areas2.py`(呼叫左邊那些,**不修改**) | `compound_consensus/logic.py`(呼叫左邊兩者,**都不修改**) |
+| 測試 | `test/`(194) | `test2/`(44) | `test3/`(101) |
+| 進度 | `status.md` | `status2.md` | `compound_consensus/status.md` |
 
-第二支是**新增**的,不取代第一支;它把既有模組當函式庫用。要動第二支之前先讀
-`status2.md` 的「隔離規則」——它的產物一律帶 `2`,而且刻意不寫任何第一支的檔案。
+第二、三支都是**新增**的,不取代任何前者;它們把既有模組當函式庫用。要動第三支之前
+先讀 `compound_consensus/status.md` 的「隔離規則」——它的產物一律帶 `3` 或放在自己的
+命名空間,而且刻意不寫任何前兩支的檔案。
 
-## 開始新工作前先讀 status.md / status2.md
+⚠ **第三支必須用 `python -m compound_consensus.app` 啟動**,不能 `python
+compound_consensus/app.py`——後者會把子資料夾放進 `sys.path[0]`,根目錄的
+`peaks` / `calibration` 就 import 不到,而錯誤訊息看不出真正原因。
 
-**進度權威**:第一支看 `status.md`,第二支看 `status2.md`。兩份都記錄目前做到哪、
-已決定什麼、還卡在什麼。本檔只放「每次都需要、且查起來昂貴」的少數事實;細節一律
-去那兩份,不要在這裡複製。
+## 開始新工作前先讀對應的 status
+
+**進度權威**:第一支看 `status.md`,第二支看 `status2.md`,第三支看
+`compound_consensus/status.md`。三份都記錄目前做到哪、已決定什麼、還卡在什麼。
+本檔只放「每次都需要、且查起來昂貴」的少數事實;細節一律去那三份,不要在這裡複製。
 
 文件分工:
 
@@ -38,6 +44,8 @@
 | `status2.md` | **第二支的進度與交接** |
 | `README2.md` | 第二支的用法 |
 | `Area_Matrix2.md` | 第二支的設計 + `.gasprj` 格式解析 |
+| `compound_consensus/status.md` | **第三支的進度與交接** |
+| `compound_consensus/README.md` | 第三支的用法、設計,以及 2026-08-31 量到的關鍵數字 |
 
 ## 軸向約定 —— 最常搞混的一件事
 
@@ -83,15 +91,16 @@
 (PowerShell 與 bash 皆可直接執行):
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q           # 全套 238 項(test/ 194 + test2/ 44)
+.venv/Scripts/python.exe -m pytest -q           # 全套 339 項(194 + 44 + 101)
 .venv/Scripts/python.exe -m pytest test/ -q     # 只跑第一支應用
 .venv/Scripts/python.exe -m pytest test2/ -q    # 只跑第二支應用
+.venv/Scripts/python.exe -m pytest test3/ -q    # 只跑第三支應用
 .venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
-**測試分兩個根目錄**：`test/` 是第一支應用、`test2/` 是第二支應用。`pytest.ini` 的
-`testpaths` 讓**光打 `pytest` 就兩邊都收**——這是防呆：舊文件寫的是 `pytest test/`，
-照那個跑會靜靜漏掉 44 項而毫無徵兆。
+**測試分三個根目錄**：`test/` 第一支、`test2/` 第二支、`test3/` 第三支。`pytest.ini`
+的 `testpaths` 讓**光打 `pytest` 就三邊都收**——這是防呆：舊文件寫的是 `pytest test/`，
+照那個跑會靜靜漏掉 145 項而毫無徵兆。
 
 `results/` 已 gitignore。**`GAS/` 底下的 `.mea` 與 `.gasprj` 任何程式都不得修改或
 刪除**(後者存著 RI 校正表,見上)。

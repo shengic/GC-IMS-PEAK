@@ -14,12 +14,69 @@ stands, what has been decided, what is testable now, and what to do next. Pair
 with `GC-IMS_Identify_Workflow.md` (the authoritative spec) — this file is the
 progress tracker, not the design.
 
-> **⚠ This file covers the FIRST app only (`main.py`, 3.x).** There is a second,
-> independent app in this repo — `main2.py` / `areas2.py`, version 1.x — which
-> analyses a whole batch at once and produces an area × file intensity matrix.
-> Everything of its own carries a `2` suffix. Its progress tracker is
-> **`status2.md`**; usage in `README2.md`, design in `Area_Matrix2.md`, tests in
-> `test2/`. It calls this app's modules as a library and never modifies them.
+> **⚠ This file covers the FIRST app only (`main.py`, 3.x).** There are now two
+> other independent apps in this repo, both of which call this app's modules as a
+> library and never modify them:
+>
+> - **Second app** — `main2.py` / `areas2.py`, version 1.x. Analyses a whole batch
+>   at once and produces an area × file intensity matrix. Everything of its own
+>   carries a `2` suffix. Tracker **`status2.md`**, usage `README2.md`, design
+>   `Area_Matrix2.md`, tests `test2/`.
+> - **Third app** — `compound_consensus/`, version 1.0 (2026-08-31). Takes the
+>   repeat measurements of *one specimen* and consolidates their compound
+>   candidates, ranked by how many replicates support each. Launch with
+>   `python -m compound_consensus.app`. Tracker
+>   **`compound_consensus/status.md`**, usage + measured numbers
+>   `compound_consensus/README.md`, tests `test3/` (101).
+
+### 2026-08-31 — three measurements from the third app that bear on decisions here
+
+**None of these changed any code in this app.** They are recorded because they
+answer, or re-frame, questions this file has been carrying.
+
+**1. The RI scale is *not* offset on this batch — decision 3a is narrower than it
+looked.** Taking the 14 compounds the operator annotated in Coffee-bean's
+`.gasprj` and comparing *their* recorded RI against what this project's 6-point
+ketone calibration computes at the same `Rt`: **median difference 0.0, every one
+within ±5**. Two independent calibration paths agree. So whatever is unresolved
+about the supplier table's column polarity, it does **not** show up as a shifted
+RI axis here. Identification failures on this batch have a different cause (2).
+
+**2. The real identification bottleneck is drift-library coverage, not RI.**
+
+| library | rows | distinct compounds |
+|---|---|---|
+| `.ril` (RI) | 154,774 | 9,958 |
+| `.iml` (drift) | 1,000 | 298 |
+| **usable for RIPrel matching** | **201** | **84** |
+
+A 2-D match needs both axes, so **97% of the RI library's compounds can never get
+one**. Measured example: ethyl acetate — which the operator identified by hand —
+has 469 `.ril` entries, 115 of them within ±5 of our measurement, and still cannot
+be matched because it has no usable drift entry.
+
+A further **213 compounds have drift data that is present but carries no
+`DtMode`**, so `match_drift_rel()` skips them. Cross-checking the 55 compounds
+that appear in both dialects: **51/55 (93%) agree within ±0.05, median difference
+0.0028** — the undeclared rows are demonstrably on the same RIP-relative scale.
+Accepting them would take coverage from 84 to 297 compounds (×3.5).
+
+> **The user decided on 2026-08-31 that `library.py` and `library_data/` must
+> never be modified.** That route is therefore closed. Recorded here so it is
+> known to be *considered and declined*, not undiscovered — reopening it should
+> start from these numbers. (An earlier claim in that investigation, that the
+> `.iml` columns were misaligned, was **wrong**: both dialects share an identical
+> 16-column layout and `Dt[a.u.]` parses correctly in all of them. The only
+> difference is whether column 15 says `RIPrel`.)
+
+**3. K0 is deliberately unused by the third app, and the measurement says that is
+correct.** `resolve_calibrations_cached()` yields `k0_mode=standard_based`, but
+attaching it makes matching worse: candidates **401 → 1507**, regions achieving a
+2-D match **46 → 36**. `match_all()` prefers K0 whenever `k0_value` is present, so
+it stops using RIPrel and more regions fall back to the RI-only path. This is a
+second independent piece of evidence for **open decision 4** — the first being the
+measured replicate RI spread (**median 0.29, 95th pct 1.10**) against a `±5`
+window that has never been calibrated.
 
 ---
 
@@ -45,7 +102,7 @@ progress tracker, not the design.
   Batches 7, 8 pending. (Batch 5 = the ▶ compound-match panel: clicking a peak's
   ▶ loads the `.ril`/`.iml` libraries and lists candidate compounds via
   `match.match_all`.)
-- **238** pytest checks passing across `test/` (~9 s warm, ~20 s cold; added `test_calibration.py`,
+- **339** pytest checks passing across `test/` + `test2/` + `test3/` (~9 s warm, ~20 s cold; added `test_calibration.py`,
   `test_rt_axis.py`, `test_baseline.py`).
 - Project uses `.venv` at project root; install with
   `.venv/Scripts/python.exe -m pip install -r requirements.txt` from the project
@@ -886,7 +943,7 @@ CLI) / `UI.md` (Tk spec) / `ketone_RI_provenance.md` (where the RI numbers came
 from). `GC-IMS_Peak_Finding_Workflow.md` is the original image-mode blueprint;
 its founding premise no longer holds and it is kept only as a methodology record.
 
-Total test count: **238 pass in ~9 s** (all under `pytest test/`).
+Total test count: **339 pass in ~26 s** — `test/` 194 + `test2/` 44 + `test3/` 101. `pytest.ini` `testpaths` collects all three, so a bare `pytest` catches everything; running `pytest test/` (as older docs say) silently skips 145.
 
 > **[v3.3] The Tk flakiness is fixed, the data-dependent skips are not.**
 > `tk.Tk()` occasionally raised mid-suite and the reason read "no Tk display

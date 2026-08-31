@@ -7,6 +7,10 @@
 
 > **先讀哪一份**：想知道「這支怎麼用」讀 `README2.md`；想知道「為什麼這樣設計、
 > `.gasprj` 裡有什麼」讀 `Area_Matrix2.md`；想知道「做到哪、還缺什麼」讀本檔。
+>
+> **另有第三支應用**（`compound_consensus/`，1.0，2026-08-31）：把同一標本的重複
+> 測量彙整成帶支持度的化合物清單。它把本應用的 `build_consensus_areas()` /
+> `detect_one()` 當函式庫用，**不修改**。進度見 `compound_consensus/status.md`。
 
 ---
 
