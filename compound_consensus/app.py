@@ -66,20 +66,29 @@ BASE_OFF = "○"
 #: 檔會顯示成就緒，但點下去仍要等 55 秒——「就緒」的意思必須是「點下去就有」。
 #: `.npz` 約 13 秒（畫熱圖用），找峰約 55 秒（選峰、分組、彙整都要）。
 #:
-#: **用文字不用顏色。** 原本是 🟢🟡🔴，實測在 Windows 的 Tk 裡退回單色字形，
-#: 三種狀態長得一模一樣——使用者回報「每個檔看起來都一樣」。ttk 的 Treeview
-#: 也沒辦法只染一格（tag 一律套用整列），所以顏色這條路在這個元件上是走不通的。
-#: 文字在任何字形下都分得出來。
+#: **文字 + 顏色，兩個都給。**
+#:
+#: 先做成 🟢🟡🔴，實測在 Windows 的 Tk 裡退回**單色字形**，三種狀態長得一模一樣
+#: （使用者回報「每個檔看起來都一樣」）。ttk 的 tag 只能整列上色，染不了單一格，
+#: 所以那條路也不通。**但 item 的 `image` 可以**——自己畫一顆彩色圓點當圖，放在
+#: 檔名前面，那是真的顏色而且不依賴任何字形（見 `_dot()`）。
+#:
+#: 文字仍然保留：顏色不該是唯一的資訊來源（色覺差異、螢幕擷圖、黑白列印）。
 READY_GREEN = "就緒"     # .npz 與找峰都在，點下去立刻有反應
 READY_AMBER = "待找峰"   # 只有 .npz，還要找峰（約 55 秒）
 READY_RED = "未處理"     # 兩者都沒有（約 68 秒）
+
+#: 狀態 → 圓點顏色
+READY_COLOUR = {READY_GREEN: "#2e7d32", READY_AMBER: "#f9a825",
+                READY_RED: "#c62828"}
 
 #: 欄位說明放這裡，不放進格子裡。格子裡塞整句話會把欄寬撐開，而且一欄長短不一的
 #: 句子讀起來像錯誤訊息——使用者回報過「按 2 掃描才有」這種寫法不專業。
 LEGEND = ("基準 ◉　點一列的「基準」欄＝以它為比較對象，相似度夠高的檔會自動被選"
           "進這一組。**一次只有一個基準**，換一個就整組重挑。\n"
-          "狀態　就緒 = 點下去立刻有；待找峰 = 有 .npz、還要約 55 秒；"
-          "未處理 = 約 68 秒。點狀態欄可強制重做。\n"
+          "狀態　檔名前的圓點：綠 = 就緒（點下去立刻有）、黃 = 待找峰"
+          "（有 .npz，還要約 55 秒）、紅 = 未處理（約 68 秒）。"
+          "點狀態欄可強制重做。\n"
           "相似度　**選了基準就會自動算**（跨檔比對；峰都備好時約十幾秒，"
           "還有檔沒找峰會先問過）。\n"
           "[自訂規則] = 這個檔有自己的規則（其餘沿用預設）")
@@ -981,11 +990,14 @@ class ConsensusApp:
                 tags.append("ingroup")
             if is_base:
                 tags.append("isbase")
+            state = self._ready_light(f)
             self.tree_files.insert(
                 "", "end", iid=f, text=name,
+                # 彩色圓點放在檔名前面（#0 欄的 image）——這是 ttk 的 Treeview
+                # 唯一給得出「一格顏色」的地方，而且不依賴字形。
+                image=self._ready_dot(state),
                 values=(BASE_ON if is_base else BASE_OFF,
-                        CHECK_ON if ing else CHECK_OFF,
-                        self._ready_light(f), r),
+                        CHECK_ON if ing else CHECK_OFF, state, r),
                 tags=tuple(tags))
         self._sync_mode_buttons()
         self._sync_rules_scope()
@@ -1094,6 +1106,40 @@ class ConsensusApp:
         self.status.config(
             text="基準：%s　→　自動選了 %d 個檔（相似度 ≥ %.2f）。"
                  "不滿意就點「組 ✓」自己增刪。" % (name, len(picked), SUGGEST_R))
+
+    def _dot(self, colour, size=11):
+        """畫一顆實心圓點當圖示。**這是這個元件唯一拿得到的「一格顏色」。**
+
+        emoji 會退回單色字形，tag 只能染整列——但 Treeview 的 item 支援 `image`，
+        而 `PhotoImage` 可以就地畫，不必附任何圖檔。
+
+        **一定要留住參照**（`self._dots`）：Tk 的圖片物件被 Python 回收之後，
+        畫面上那張圖會直接消失，而且不會有任何錯誤——典型的「圖不見了」災情。
+        """
+        img = tk.PhotoImage(width=size, height=size)
+        c = size / 2.0 - 0.5
+        rad = size / 2.0 - 1.0
+        for y in range(size):
+            # 只塗圓內的那一段，圓外**完全不碰**——`PhotoImage` 一開始就是透明的，
+            # 這樣圓點才會浮在該列自己的底色上（選取藍、同組淡藍都行）。
+            # 想用 `{}` 表示「這一格不塗」是行不通的：Tcl 會回 can't parse color ""。
+            dy = abs(y - c)
+            if dy > rad:
+                continue
+            half = (rad * rad - dy * dy) ** 0.5
+            x0, x1 = int(round(c - half)), int(round(c + half))
+            # 一次塗一整段，不要逐點呼叫（逐點是 size² 次 Tcl 往返）
+            img.put("{%s}" % " ".join([colour] * max(1, x1 - x0 + 1)), to=(x0, y))
+        return img
+
+    def _ready_dot(self, state):
+        """狀態對應的圓點圖，建一次之後重用。"""
+        if not hasattr(self, "_dots"):
+            self._dots = {}
+        if state not in self._dots:
+            colour = READY_COLOUR.get(state)
+            self._dots[state] = self._dot(colour) if colour else ""
+        return self._dots[state]
 
     def _ready_light(self, mea):
         """這個檔點下去會不會馬上有反應。綠＝會，黃＝要找峰，紅＝連 `.npz` 都沒有。"""

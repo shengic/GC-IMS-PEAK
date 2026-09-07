@@ -7,8 +7,8 @@
 第一支的測試在 `test/`,第二支在 `test2/`,三份互不覆蓋。
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q            # 全套 474 項
-.venv/Scripts/python.exe -m pytest test3/ -q     # 只跑第三支（236 項）
+.venv/Scripts/python.exe -m pytest -q            # 全套 477 項
+.venv/Scripts/python.exe -m pytest test3/ -q     # 只跑第三支（239 項）
 .venv/Scripts/python.exe -m pytest test3/test_main3.py -q   # 只跑進入點與並存
 ```
 
@@ -132,6 +132,7 @@ python main3.py
 |---|---|---|
 | 1 | 開啟 | 視窗**攤滿整個螢幕**;左中右三個面板都在;工具列**只有**「選資料夾/門檻/Rules/結束」 |
 | 1b | 還沒選基準 | 模式 2、3 是**灰的**,點不下去 |
+| 1c | 看檔名前面的圓點 | **綠/黃/紅三色分得出來**(不是三顆一樣的灰點);狀態欄同時有文字 |
 | 2 | 選資料夾 `GAS/藝妓咖啡` | 列出 13 個樣品;**壞檔 `FREE_GG_..._GG_2.mea` 報成失敗**,不是靜靜跳過 |
 | 3 | 模式 1 點一個檔 | 熱圖出現紅圈與編號;圈與峰對得上 |
 | 4 | 放大到 400% 再看 | **圈仍然貼在峰上**(縮放時對位曾經跑掉) |

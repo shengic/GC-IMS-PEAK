@@ -2247,3 +2247,61 @@ def test_mode_2_is_named_for_what_it_does(monkeypatch):
         assert "同標本這一組" not in app._mode_rb[appmod.MODE_GROUP].cget("text")
     finally:
         _destroy(root)
+
+
+def test_status_has_a_real_colour_dot_not_just_text(monkeypatch):
+    """狀態要**有顏色**——用自己畫的圓點,不是 emoji、也不是 tag。
+
+    走過三種做法:
+      1. 🟢🟡🔴 —— Windows 的 Tk 退回單色字形,三種狀態長得一模一樣(使用者實測)
+      2. tag 的前景/背景 —— 只能染**整列**,染不了單一格
+      3. item 的 `image` —— ✅ 自己畫一顆 PhotoImage 圓點放在檔名前面,
+         真的有顏色而且不依賴任何字形
+    """
+    tk, root, appmod, app = _app(monkeypatch)
+    try:
+        seen = {}
+        for state in (appmod.READY_GREEN, appmod.READY_AMBER, appmod.READY_RED):
+            img = app._ready_dot(state)
+            assert img, state
+            # 圓心是實色、四角透明——透明才能浮在該列自己的底色上
+            mid = img.width() // 2
+            assert img.get(mid, mid)[:3] != (0, 0, 0), state
+            assert img.transparency_get(0, 0) is True, "四角要透明"
+            seen[state] = img.get(mid, mid)[:3]
+        assert len(set(seen.values())) == 3, "三種狀態要是三種顏色: %r" % seen
+    finally:
+        _destroy(root)
+
+
+def test_the_dot_images_are_kept_alive(monkeypatch):
+    """圖片參照一定要留住。
+
+    Tk 的 PhotoImage 被 Python 回收之後,畫面上那張圖會**直接消失而且不報錯**
+    ——典型的「圖不見了」災情。快取在 `self._dots` 裡就是為了這個。
+    """
+    tk, root, appmod, app = _app(monkeypatch)
+    try:
+        app.files = ["/x/a.mea"]
+        app._refresh_files()
+        assert getattr(app, "_dots", None), "圓點要留在 app 上,不能是區域變數"
+        first = app._ready_dot(appmod.READY_GREEN)
+        assert app._ready_dot(appmod.READY_GREEN) is first, "同一顆點要重用"
+    finally:
+        _destroy(root)
+
+
+def test_colour_is_not_the_only_signal(monkeypatch):
+    """顏色**不是**唯一的資訊來源——文字仍然在。
+
+    色覺差異、螢幕擷圖、黑白列印都可能讓顏色消失;而且使用者是靠擷圖回報問題的。
+    """
+    tk, root, appmod, app = _app(monkeypatch)
+    try:
+        app.files = ["/x/a.mea"]
+        app._refresh_files()
+        vals = app.tree_files.item(app.tree_files.get_children()[0], "values")
+        assert vals[2] in (appmod.READY_GREEN, appmod.READY_AMBER,
+                           appmod.READY_RED)
+    finally:
+        _destroy(root)
