@@ -23,7 +23,7 @@
 **唯讀 `GAS/`**：只讀 `.mea`，所有產物都寫在 `results/`（隔離規則 3）。
 以函式呼叫既有模組，不跑任何 subprocess——那在打包成 exe 之後會壞掉。
 
-Version: 1.0 — by Albert Sheng（第三支應用，2026-08-31）
+Version: 1.1 — by Albert Sheng（第三支應用，2026-09-07）
 """
 import argparse
 import concurrent.futures as cf
@@ -192,7 +192,7 @@ def gui():
     root.title("預處理 — 產生 .npz 與找峰結果")
     root.geometry("620x300")
     q = _queue.Queue()
-    state = {"folder": None, "folders": [], "running": False}
+    state = {"folder": None, "folders": [], "running": False, "failed": []}
 
     root.geometry("680x420")
     frm = ttk.Frame(root, padding=12)
@@ -264,7 +264,10 @@ def gui():
             txt.insert("end", "%-30s 樣品 %2d　npz %2d/%-2d　找峰 %2d/%-2d\n"
                        % (os.path.basename(os.path.normpath(folder))[:30],
                           a, b, a, c, a))
+        for name, status in state["failed"]:
+            txt.insert("end", "✗ %s\n    %s\n" % (name, status))
         txt.config(state="disabled")
+        txt.see("end")
         todo_npz, todo_pk = n - n_npz, n - n_pk
         est = todo_npz * SEC_PER_READ + todo_pk * SEC_PER_DETECT
         skipped = ("　排除 " + "、".join(
@@ -309,8 +312,10 @@ def gui():
 
     def go():
         state["running"] = True
+        state["failed"] = []
         btn_go.config(state="disabled")
         btn_pick.config(state="disabled")
+        lbl_now.config(foreground="#333")   # 上一輪可能留著紅字
         bar.config(value=0, maximum=1)
         threading.Thread(target=worker,
                          args=(state["folders"], int(jobs_var.get()),
@@ -327,6 +332,8 @@ def gui():
                 elif kind == "one":
                     i, (name, status) = payload
                     bar.config(value=i)
+                    if status != "OK":
+                        state["failed"].append((name, status))
                     lbl_now.config(text="[%d/%d] %s  %s" % (i, bar["maximum"],
                                                             name, status))
                     refresh()
@@ -338,7 +345,16 @@ def gui():
                 elif kind == "done":
                     state["running"] = False
                     btn_pick.config(state="normal")
-                    lbl_now.config(text="完成。")
+                    # **失敗的檔一定要講**。之前這裡不分青紅皂白寫「完成。」，
+                    # 上面計數還停在 13/14，畫面自相矛盾而使用者無從知道是哪個檔、
+                    # 為什麼。CLI 的 run() 一直有 成功/失敗 統計，圖形介面漏掉了。
+                    bad = state["failed"]
+                    if bad:
+                        lbl_now.config(
+                            text="完成，但有 %d 個檔失敗（詳見上方清單）。" % len(bad),
+                            foreground="#c62828")
+                    else:
+                        lbl_now.config(text="完成。", foreground="#333")
                     refresh()
         except _queue.Empty:
             pass
@@ -347,7 +363,17 @@ def gui():
     btn_pick.config(command=pick)
     btn_go.config(command=go)
     root.after(120, drain)
-    root.mainloop()
+    # Ctrl+C 走到 `mainloop()` 上不會被 Tk 接住，Python 會吐一整段 traceback，
+    # 看起來像當掉了。**已經做完的檔都已經寫出來**，中斷不會白費，所以安靜收掉
+    # 就好——但要說一句，不然使用者不知道是自己中斷的還是程式死了。
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        print("\n已中斷。做完的檔都已寫出，下次再跑會從沒做的地方繼續。")
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
 
 
 def main(argv=None):

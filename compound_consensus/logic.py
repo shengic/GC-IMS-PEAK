@@ -17,7 +17,7 @@
 實測基準（2026-08-31，三個資料夾 45 個檔）：以「最相似鄰居是否同組」為準達 **43/45**。
 96% 仍然落在「可以建議、不可以替使用者決定」——UI 因此是 highlight + 使用者增刪。
 
-Version: 1.0 — by Albert Sheng（第三支應用，2026-08-31）
+Version: 1.1 — by Albert Sheng（第三支應用，2026-09-07）
 """
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ import peaks as peaks_mod
 import rip as rip_mod
 import areas2
 import match as match_mod
+import rules as rules_mod
 
 
 # --------------------------------------------------------------------------- #
@@ -235,9 +236,75 @@ def required_files(n_files, min_fraction=DEFAULT_MIN_FRACTION):
     return max(2, math.ceil(min_fraction * n_files - 1e-9))
 
 
+#: 低於此就多半不是同一個標本。**與彙整前的確認對話框同一個門檻**——兩處各寫一個
+#: 數字的話，畫面說「看起來還行」而按下去卻跳警告，使用者不知道該信哪一個。
+GROUP_WEAK_R = 0.50
+
+#: 建議同組用的門檻。只用來**建議**，不用來決定（實測自動分組 43/45 = 96%，
+#: 剩下的那幾個正是需要人看的）。
+GROUP_GOOD_R = 0.80
+
+
+def group_stats(group, corr, corr_files, min_fraction=DEFAULT_MIN_FRACTION):
+    """這一組的體檢：最弱的一環是誰、平均多像、門檻換算成幾個檔。
+
+    **為什麼要指出「是哪一個檔」**：原本只在按下彙整時跳一個「組內最低相似度只有
+    +0.31，還要繼續嗎」的對話框——那是錯的時機（人已經按下去了），而且沒說是哪個檔，
+    使用者無從修正，只能整組重來。
+
+    離群者的判定用「對組內其他成員的平均相似度」取最小，而不是單看最低的那一對：
+    一對低可能是那兩個檔都正常但彼此剛好不像；真正不同組的檔會**對每一個人都低**。
+
+    純函式，不碰檔案系統——`待找峰` 幾個檔由呼叫端自己數（那要看 `results/`）。
+    """
+    files = sorted(group)
+    n = len(files)
+    out = {"n": n, "required": required_files(n, min_fraction) if n else 0,
+           "min_fraction": min_fraction, "n_with_r": 0, "missing_r": [],
+           "min_r": None, "min_pair": None, "mean_r": None,
+           "outlier": None, "outlier_mean_r": None, "rest_min_r": None,
+           "verdict": "unknown"}
+    if corr is None or not corr_files:
+        return out
+    idx = {f: corr_files.index(f) for f in files if f in corr_files}
+    out["n_with_r"] = len(idx)
+    out["missing_r"] = [f for f in files if f not in idx]
+    known = [f for f in files if f in idx]
+    if len(known) < 2:
+        return out                     # 一個檔談不上「組內」相似度
+
+    pairs = []
+    for a, fa in enumerate(known):
+        for fb in known[a + 1:]:
+            pairs.append((float(corr[idx[fa], idx[fb]]), fa, fb))
+    out["min_r"], lo_a, lo_b = min(pairs, key=lambda t: t[0])
+    out["min_pair"] = (lo_a, lo_b)
+    out["mean_r"] = sum(r for r, _a, _b in pairs) / len(pairs)
+
+    # 對其他成員的平均——真正不同組的檔對每一個人都低
+    means = {f: sum(float(corr[idx[f], idx[g]]) for g in known if g != f)
+                / (len(known) - 1) for f in known}
+    out["outlier"] = min(means, key=means.get)
+    out["outlier_mean_r"] = means[out["outlier"]]
+    rest = [r for r, a, b in pairs
+            if a != out["outlier"] and b != out["outlier"]]
+    out["rest_min_r"] = min(rest) if rest else None
+
+    if out["min_r"] < GROUP_WEAK_R:
+        out["verdict"] = "mixed"       # 明顯混到不同標本
+    elif (out["outlier_mean_r"] < GROUP_GOOD_R
+          and out["rest_min_r"] is not None
+          and out["rest_min_r"] >= GROUP_GOOD_R):
+        out["verdict"] = "outlier"     # 其他人彼此都像，只有一個不像
+    else:
+        out["verdict"] = "ok"
+    return out
+
+
 def consensus_regions(mea_paths, rules_config, min_fraction=DEFAULT_MIN_FRACTION,
                       use_baseline=False, active_only=True, formation_floor=2,
-                      ri_calibration=None, progress=None, verbose=False):
+                      ri_calibration=None, progress=None, verbose=False,
+                      on_peaks=None, rules_for=None):
     """對選定的檔案跑找峰，再跨檔群聚成共用區域。回傳 `(areas, per_file_peaks, report)`。
 
     **這是取代 `.gasprj` 方框的那條路。** `.gasprj` 只用來對照驗證，不參與流程——
@@ -250,20 +317,40 @@ def consensus_regions(mea_paths, rules_config, min_fraction=DEFAULT_MIN_FRACTION
     `active_only=True`：**只用使用者勾選的峰**。區域因此是從使用者的判斷長出來的，
     不是先固定好再要他接受。
 
+    `rules_for(mea_path)`：**逐檔的規則**。不同標本訊號強弱差很多，全域一套參數等於
+    逼使用者在「某些檔漏峰」與「某些檔一堆雜訊」之間二選一。沒給就全部用
+    `rules_config`。
+
+    `on_peaks(mea_path, peaks)`：偵測完、建區域**之前**的鉤子，就地修改那一份峰。
+    使用者的選取（`_peaks_state3.json`）要靠它套進來——**而且套完必須呼叫
+    `apply_effective()`**：`state.load()` 只寫 `user_active`，而
+    `build_consensus_areas(active_only=True)` 讀的是 `active`，中間沒有人接就等於
+    使用者關掉的峰照樣被算進共識（無聲，畫面上完全看不出來）。
+
     貴在找峰（約 55 秒/檔），但 `areas2.detect_one()` 會把結果快取成 `_peaks2.json`，
     第二次近乎即時。`progress` 是 `callable(done, total, path)`，給 UI 更新用。
     """
     per_file = {}
     total = len(mea_paths)
     for i, m in enumerate(mea_paths, 1):
+        # **規則可以逐檔不同。** `rules_for(m)` 回這個檔實際要用的那一份；沒給就
+        # 全部用 `rules_config`。指紋是拿**傳進去的**那一份算的，所以這裡傳錯不會
+        # 報錯，只會讓快取無聲地對應到別人的參數。
+        cfg = rules_for(m) if rules_for else rules_config
         pk, _stats, _meta = detect_cached(
-            m, rules_config, use_baseline=use_baseline, verbose=verbose)
+            m, cfg, use_baseline=use_baseline, verbose=verbose)
         # **RI 必須在比對之前掛上去。** `detect_one()` 只找峰，不做第四階段；沒有
         # `peak["ri"]` 的話 `match.match_all()` 會**靜靜退回保留時間比對**——而保留
         # 時間不跨儀器/管柱/方法轉移，出來的候選是「RT 恰好相近」而不是同一個化合物。
         # 這正是 status.md 記載過的「GC 欄位掛著 RI 名義顯示秒數」那個坑。
         if ri_calibration:
             calibration.attach_ri(pk, ri_calibration)
+        # **使用者的勾選必須在建區域之前套上去。**`detect_cached()` 每次都回**新的**
+        # dict（實測 `a[0] is b[0]` 為 False），所以在外面拿到 `per_file` 之後才套用
+        # 選取、再呼叫一次本函式是沒有用的——第二次會重新偵測，把剛套上的選取整批丟掉。
+        # 呼叫端要改變哪些峰算數，唯一有效的位置就是這裡。
+        if on_peaks:
+            on_peaks(m, pk)
         per_file[m] = pk
         if progress:
             progress(i, total, m)
@@ -326,6 +413,24 @@ def peaks_in_area(area, per_file_peaks, active_only=True):
     return out
 
 
+#: 證據強度由強到弱。`combined` = GC 與 IMS 兩軸都同意，才是真正的鑑定；
+#: `gc_only` = 只有 RI 對上（±5 的窗裡常有上百個化合物）；`ims_only` = 只有漂移
+#: 對上（漂移庫只涵蓋 84 個化合物，能命中就少，但只有一個維度）。
+DIMENSION_RANK = ("combined", "gc_only", "ims_only")
+
+#: 給畫面用的短標籤。**不要在 UI 裡各自寫死**，否則兩個面板遲早不一致。
+DIMENSION_LABEL = {"combined": "GC+IMS", "gc_only": "GC", "ims_only": "IMS",
+                   "mixed": "混合", None: "—"}
+
+
+def best_dimension(dims):
+    """一組維度標籤裡最強的那一個。"""
+    for d in DIMENSION_RANK:
+        if d in dims:
+            return d
+    return None
+
+
 def consolidate_area(area, per_file_peaks, ril_rows, iml_rows,
                      ri_tol=None, drift_tol=None, active_only=True):
     """把一個區域在各檔的候選化合物彙整成一張有支持度的清單。
@@ -366,6 +471,13 @@ def consolidate_area(area, per_file_peaks, ril_rows, iml_rows,
         if not rows:
             rows = res.get("gc_matches") or []
             dim = "gc_only"
+        if not rows:
+            # **最後一層：只有 IMS 對上**。原本兩層都空就回「（無候選）」，
+            # 但漂移對上而 RI 沒對上是一個**有內容的**結果，不是沒有結果——
+            # 使用者要能在共識表上分辨 GC / IMS / 兩者。證據弱（漂移庫只涵蓋
+            # 84 個化合物），所以放在最後、而且一路標明維度到畫面上。
+            rows = res.get("ims_matches") or []
+            dim = "ims_only"
         dims_used.add(dim)
         seen = {}
         for row in rows:
@@ -377,7 +489,10 @@ def consolidate_area(area, per_file_peaks, ril_rows, iml_rows,
             v = votes.setdefault(cas, {"cas": cas,
                                        "name": _field(row, "Name", "NAME", "name"),
                                        "library_ri": _field(row, "RI", "ri"),
-                                       "files": [], "deltas": []})
+                                       "files": [], "deltas": [], "dims": set()})
+            # 每個候選記自己是從哪一層來的。同一個化合物可能在 A 檔兩軸都對上、
+            # 在 B 檔只有 RI 對上——那是**不同強度的證據**，混成一個標籤會蓋掉。
+            v["dims"].add(dim)
             v["files"].append(fname)
             lib_ri, pk_ri = v["library_ri"], peak.get("ri")
             if lib_ri is not None and pk_ri is not None:
@@ -392,6 +507,10 @@ def consolidate_area(area, per_file_peaks, ril_rows, iml_rows,
         n = len(v["files"])
         candidates.append({
             "cas": v["cas"], "name": v["name"], "library_ri": v["library_ri"],
+            # 這個候選的**最強**證據層（combined > gc_only > ims_only），以及
+            # 實際出現過的所有層——兩個都留，畫面顯示前者，稽核看得到後者。
+            "dimension": best_dimension(v["dims"]),
+            "dimensions": sorted(v["dims"]),
             "n_support": n, "n_files_with_peak": n_with_peak,
             # 支持度的分母是「有偵測到峰的檔」，不是全部選取的檔——沒有峰的檔沒有投票權，
             # 把它算進分母會讓每個候選看起來都比實際弱。
@@ -416,7 +535,9 @@ def consolidate_area(area, per_file_peaks, ril_rows, iml_rows,
         "drift_spread": spread(measured_drift),
         "match_dimension": ("combined" if dims_used == {"combined"}
                             else ("gc_only" if dims_used == {"gc_only"}
-                                  else ("mixed" if dims_used else None))),
+                                  else ("ims_only" if dims_used == {"ims_only"}
+                                        else ("mixed" if dims_used else None)))),
+        "dimensions_used": sorted(dims_used),
         "candidates": candidates,
     }
 
@@ -541,11 +662,34 @@ def detect_cached(mea_path, rules_config, use_baseline=False, verbose=False, **k
                                  write=False, **kw)
     out = areas2.detect_one(mea_path, rules_config, use_baseline=use_baseline,
                             reuse_cache=cache_ok, verbose=verbose, **kw)
+    # **快取回來的峰帶的是「當初寫檔時」的規則判定，必須重新標記。**
+    # `areas2.detect_one()` 命中快取時直接 return，根本走不到它自己的
+    # `mark_rules()`；而選配規則（R001/R002/R003/R005）刻意不進指紋——它們只標記、
+    # 不改變偵測，進指紋會害 18 個檔各重跑 55 秒換來一模一樣的峰。兩件事湊在一起
+    # 的後果是：**改了 R002 的 top_n，快取命中的檔永遠不會跟著變**，表格照樣列出
+    # 全部的峰。使用者實際回報過。
+    remark(out[0], rules_config, out[1])
     os.makedirs(areas2.RESULTS_DIR, exist_ok=True)
     with open(fp_path, "w", encoding="utf-8") as f:
         json.dump({"fingerprint": fp, "version": FINGERPRINT_VERSION,
                    "mea": os.path.basename(mea_path)}, f, ensure_ascii=False)
     return out
+
+
+def remark(peaks, rules_config, stats=None):
+    """用**現在這一份**規則重新標記 `rule_active`，並同步 `active`。
+
+    `mark_rules()` 需要 `floor` 與 `rip_index` 當 context（R001 的門檻是相對 floor
+    的、R004/R006 要知道 RIP 在哪）。少了它們規則會用預設值判定，結果與偵測當下
+    不一致——所以 `stats` 拿得到就一定要傳。
+
+    就地修改並回傳同一份清單。
+    """
+    ctx = {}
+    if stats:
+        ctx = {"floor": stats.get("floor"), "rip_index": stats.get("rip_index")}
+    rules_mod.mark_rules(peaks, rules_config, context=ctx)
+    return apply_effective(peaks)
 
 
 def peaks_are_current(mea_path, rules_config, use_baseline=False,

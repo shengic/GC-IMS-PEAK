@@ -20,6 +20,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+import areas2  # noqa: E402
 from compound_consensus import logic as L  # noqa: E402
 
 
@@ -455,3 +456,256 @@ def test_pairing_needs_at_least_three_files():
     """同步與否靠跨檔相關係數，兩個檔時它恆為 ±1——與 similarity_matrix 同理。"""
     with pytest.raises(ValueError, match="至少 3 個檔"):
         L.find_monomer_dimer_pairs(_md_areas(), _md_profiles()[:2])
+
+
+# --------------------------------------------------------------------------- #
+# 候選要帶著自己的維度（GC / IMS / 兩者）
+# --------------------------------------------------------------------------- #
+def _area_at(rt=400.0, dr=1.10):
+    return {"area_id": 1, "name": "A", "rt_center_s": rt, "drift_center": dr,
+            "rt_half_s": 10.0, "drift_half": 0.05}
+
+
+def _pk(rt=400.0, dr=1.10, ri=900.0):
+    return {"rt_index": 10, "dt_index": 20, "retention_s": rt,
+            "drift_relative": dr, "ri": ri, "intensity": 500,
+            "rule_active": True, "active": True}
+
+
+def test_best_dimension_prefers_two_axes_over_one(monkeypatch):
+    """證據強度排序：兩軸都對上 > 只有 GC > 只有 IMS。"""
+    assert L.best_dimension({"gc_only", "combined"}) == "combined"
+    assert L.best_dimension({"ims_only", "gc_only"}) == "gc_only"
+    assert L.best_dimension({"ims_only"}) == "ims_only"
+    assert L.best_dimension(set()) is None
+
+
+def test_ims_only_hits_are_reported_instead_of_no_candidates(monkeypatch):
+    """RI 沒對上但漂移對上時要回報 IMS 候選，不是「（無候選）」。
+
+    漂移對上而 RI 落空是一個**有內容的**結果。原本兩層都空就回空清單，
+    等於把它跟「什麼都沒找到」混為一談。
+    """
+    import match as match_mod
+    monkeypatch.setattr(match_mod, "match_all", lambda p, r, i, **k: {
+        "combined_matches": [], "gc_matches": [],
+        "ims_matches": [{"Name": "Hexanal", "CAS": "66-25-1",
+                         "Dt[a.u.]": 1.10, "delta_drift_rel": 0.002,
+                         "match_dimensions": ["drift_rel"]}]})
+    out = L.consolidate_area(_area_at(), {"a.mea": [_pk()]}, [], [])
+    assert out["match_dimension"] == "ims_only"
+    assert len(out["candidates"]) == 1
+    assert out["candidates"][0]["name"] == "Hexanal"
+    assert out["candidates"][0]["dimension"] == "ims_only"
+
+
+def test_each_candidate_carries_the_dimension_it_came_from(monkeypatch):
+    """兩軸都對上的候選標 combined，同一區域裡只有 RI 的標 gc_only。"""
+    import match as match_mod
+    monkeypatch.setattr(match_mod, "match_all", lambda p, r, i, **k: {
+        "combined_matches": [{"Name": "Acetone", "CAS": "67-64-1", "RI": 842.0}],
+        "gc_matches": [{"Name": "Other", "CAS": "999-99-9", "RI": 841.0}],
+        "ims_matches": []})
+    out = L.consolidate_area(_area_at(), {"a.mea": [_pk()]}, [], [])
+    # combined 有東西時就只用 combined——這是既有行為，不因為新增維度標籤而改變
+    assert out["match_dimension"] == "combined"
+    assert [c["name"] for c in out["candidates"]] == ["Acetone"]
+    assert out["candidates"][0]["dimension"] == "combined"
+
+
+def test_dimension_labels_are_defined_once(monkeypatch):
+    """標籤集中在 `logic.DIMENSION_LABEL`，UI 不各自寫死。"""
+    assert L.DIMENSION_LABEL["combined"] == "GC+IMS"
+    assert L.DIMENSION_LABEL["gc_only"] == "GC"
+    assert L.DIMENSION_LABEL["ims_only"] == "IMS"
+    for key in L.DIMENSION_RANK:
+        assert key in L.DIMENSION_LABEL, "每個維度都要有畫面標籤"
+
+
+# --------------------------------------------------------------------------- #
+# 使用者在熱圖上的勾選必須真的影響共識
+#
+# 使用者的提問（2026-09-07）:「在熱圖上選/不選峰你會記住吧?因為要找共同峰時
+# 應該要拿目前選取的峰去彙整」。答案本來是**不會**——選取存了、但彙整沒用到。
+# --------------------------------------------------------------------------- #
+def _two_peaks():
+    return [{"rt_index": 1, "dt_index": 2, "retention_s": 400.0,
+             "drift_relative": 1.10, "ri": 900.0, "intensity": 900,
+             "prominence": 300, "active": True, "rule_active": True},
+            {"rt_index": 3, "dt_index": 4, "retention_s": 800.0,
+             "drift_relative": 1.30, "ri": 1100.0, "intensity": 800,
+             "prominence": 200, "active": True, "rule_active": True}]
+
+
+def test_on_peaks_hook_runs_before_regions_are_built(monkeypatch, tmp_path):
+    """`on_peaks` 要在建區域**之前**跑,而且改動要算數。"""
+    monkeypatch.setattr(areas2, "RESULTS_DIR", str(tmp_path))
+    monkeypatch.setattr(L, "detect_cached",
+                        lambda m, rc, **k: (_two_peaks(), {}, {}))
+    seen = []
+
+    def hook(mea, pk):
+        seen.append((mea, len(pk)))
+        for p in pk:                     # 全部關掉
+            p["active"] = False
+
+    areas, per_file, _rep = L.consensus_regions(
+        ["a.mea", "b.mea"], {}, on_peaks=hook, verbose=False)
+    assert [n for _m, n in seen] == [2, 2], "每個檔都要經過鉤子"
+    assert all(not p["active"] for pk in per_file.values() for p in pk)
+    assert areas == [], "全部關掉之後不該有任何共識區域"
+
+
+def test_a_peak_the_user_switched_off_is_excluded_from_consensus(
+        monkeypatch, tmp_path):
+    """使用者關掉的峰不可以進共識。
+
+    **回歸測試,兩個原因疊在一起**:
+    1. `state.load()` 只寫 `user_active`,而 `build_consensus_areas(active_only=True)`
+       讀的是 `active`——中間沒有 `apply_effective()` 就完全沒有效果。
+    2. 先跑一次 `consensus_regions()`、對回傳的 `per_file` 套用選取、再跑第二次
+       是**沒有用的**:第二次重新偵測並產生全新的 dict,剛套上的選取整批被丟掉。
+
+    兩個都不會報錯,畫面上也看不出來——關掉的峰照樣被算進共識。
+    """
+    from compound_consensus import state as state_mod
+    monkeypatch.setattr(areas2, "RESULTS_DIR", str(tmp_path))
+    monkeypatch.setattr(L, "detect_cached",
+                        lambda m, rc, **k: (_two_peaks(), {}, {}))
+
+    # 使用者在兩個檔裡都把第一顆峰關掉
+    for mea in ("a.mea", "b.mea"):
+        state_mod.save(mea, [{"rt_index": 1, "dt_index": 2, "user_active": False},
+                             {"rt_index": 3, "dt_index": 4, "user_active": None}])
+
+    def apply_choices(mea, pk):
+        state_mod.load(mea, pk)
+        L.apply_effective(pk)            # ← 少了這一行，整件事無聲失效
+
+    areas, per_file, _rep = L.consensus_regions(
+        ["a.mea", "b.mea"], {}, active_only=True, on_peaks=apply_choices,
+        verbose=False)
+
+    for pk in per_file.values():
+        assert pk[0]["active"] is False, "使用者關掉的峰仍然是 active"
+        assert pk[1]["active"] is True
+    # 只剩第二顆峰的位置能形成區域
+    assert len(areas) == 1, [a.get("drift_center") for a in areas]
+    assert areas[0]["drift_center"] == pytest.approx(1.30, abs=0.02)
+
+
+def test_state_load_alone_does_not_reach_the_active_flag(monkeypatch, tmp_path):
+    """把「為什麼需要 apply_effective」釘成可執行的事實。
+
+    這一條刻意測**壞掉的**用法:只呼叫 `state.load()` 而不 `apply_effective()`,
+    `active` 不會變。哪天 `load()` 自己開始寫 `active` 了,這條會失敗並提醒我們
+    移除呼叫端的那一行。
+    """
+    from compound_consensus import state as state_mod
+    monkeypatch.setattr(areas2, "RESULTS_DIR", str(tmp_path))
+    state_mod.save("a.mea", [{"rt_index": 1, "dt_index": 2, "user_active": False}])
+    pk = _two_peaks()
+    state_mod.load("a.mea", pk)
+    assert pk[0]["user_active"] is False
+    assert pk[0]["active"] is True, "load() 不碰 active——這正是要 apply_effective 的理由"
+    L.apply_effective(pk)
+    assert pk[0]["active"] is False
+
+
+def test_detect_cached_returns_fresh_objects_so_mutation_must_happen_inside(
+        monkeypatch, tmp_path):
+    """兩次 `consensus_regions()` 不共用峰物件——所以選取只能在鉤子裡套。
+
+    這是上面那條「第二次呼叫會丟掉選取」的根因,單獨釘一條。
+    """
+    monkeypatch.setattr(areas2, "RESULTS_DIR", str(tmp_path))
+    monkeypatch.setattr(L, "detect_cached",
+                        lambda m, rc, **k: (_two_peaks(), {}, {}))
+    _a, per_file_1, _r = L.consensus_regions(["a.mea"], {}, verbose=False)
+    for p in per_file_1["a.mea"]:
+        p["active"] = False              # 在外面改
+    _a, per_file_2, _r = L.consensus_regions(["a.mea"], {}, verbose=False)
+    assert per_file_2["a.mea"][0] is not per_file_1["a.mea"][0]
+    assert per_file_2["a.mea"][0]["active"] is True, \
+        "第二次是全新的峰,外面的改動不會帶過來"
+
+
+# --------------------------------------------------------------------------- #
+# 這一組的體檢 —— 是哪一個檔在拖後腿
+# --------------------------------------------------------------------------- #
+def _corr(mat):
+    import numpy as np
+    return np.array(mat)
+
+
+def test_group_stats_names_the_file_dragging_the_group_down():
+    """離群者要**指名道姓**,不能只給一個最低值。
+
+    原本只在按下彙整時跳「組內最低相似度只有 +0.31,還要繼續嗎」——時機錯了
+    (人已經按下去),而且沒說是哪個檔,使用者只能整組重來。
+    """
+    files = ["a.mea", "b.mea", "c.mea", "d.mea"]
+    corr = _corr([[1.00, 0.95, 0.93, 0.31],
+                  [0.95, 1.00, 0.94, 0.33],
+                  [0.93, 0.94, 1.00, 0.30],
+                  [0.31, 0.33, 0.30, 1.00]])
+    st = L.group_stats(set(files), corr, files, min_fraction=0.5)
+    assert st["outlier"] == "d.mea"
+    assert st["outlier_mean_r"] == pytest.approx(0.313, abs=0.01)
+    assert st["rest_min_r"] == pytest.approx(0.93, abs=0.01)
+    assert st["verdict"] == "mixed", "最低 0.30 < 0.50，整組就是混到了"
+
+
+def test_outlier_is_the_one_low_against_everyone_not_one_unlucky_pair():
+    """一對低不算離群——真正不同組的檔對**每一個人**都低。
+
+    只看最低那一對的話,兩個各自正常但彼此剛好不像的檔會被誤指。
+    """
+    files = ["a.mea", "b.mea", "c.mea", "d.mea"]
+    # a↔b 偏低(0.62),但 a、b 對其他人都高;d 才是對誰都低的那個
+    corr = _corr([[1.00, 0.62, 0.95, 0.70],
+                  [0.62, 1.00, 0.96, 0.71],
+                  [0.95, 0.96, 1.00, 0.69],
+                  [0.70, 0.71, 0.69, 1.00]])
+    st = L.group_stats(set(files), corr, files, min_fraction=0.5)
+    assert st["min_pair"] == ("a.mea", "b.mea"), "最低的一對確實是 a↔b"
+    assert st["outlier"] == "d.mea", "但離群的是對誰都低的 d"
+
+
+def test_group_stats_says_unknown_before_the_scan():
+    """還沒掃描就沒有相似度——要講「不知道」,不是假裝一致。"""
+    st = L.group_stats({"a.mea", "b.mea"}, None, [], min_fraction=0.5)
+    assert st["verdict"] == "unknown"
+    assert st["mean_r"] is None
+    assert st["n"] == 2
+
+
+def test_group_stats_reports_members_with_no_similarity_yet():
+    """組裡有沒掃到的檔要點名,不是靜靜不算進去。"""
+    files = ["a.mea", "b.mea"]
+    corr = _corr([[1.0, 0.9], [0.9, 1.0]])
+    st = L.group_stats({"a.mea", "b.mea", "z.mea"}, corr, files, min_fraction=0.5)
+    assert st["missing_r"] == ["z.mea"]
+    assert st["n"] == 3, "分母仍然是整組"
+    assert st["n_with_r"] == 2
+
+
+def test_group_stats_converts_the_threshold_into_a_file_count():
+    """門檻要換算成「幾個檔」——1/2 與 2/3 的差別足以改變要不要多收一個檔。"""
+    files = ["%d.mea" % i for i in range(5)]
+    import numpy as np
+    corr = np.full((5, 5), 0.95)
+    st_half = L.group_stats(set(files), corr, files, min_fraction=0.5)
+    st_two3 = L.group_stats(set(files), corr, files, min_fraction=2 / 3)
+    assert st_half["required"] == 3
+    assert st_two3["required"] == 4
+    assert st_half["verdict"] == "ok"
+
+
+def test_group_weak_threshold_matches_the_confirmation_dialog():
+    """畫面上的判定與彙整前的確認對話框要用**同一個**門檻。
+
+    兩處各寫一個數字的話,畫面說「可以彙整」而按下去卻跳警告。
+    """
+    assert L.GROUP_WEAK_R == 0.50
+    assert L.GROUP_GOOD_R == 0.80

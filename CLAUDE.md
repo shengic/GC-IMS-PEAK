@@ -9,19 +9,19 @@
 
 | | 第一支 | 第二支 | 第三支 |
 |---|---|---|---|
-| 進入點 | `main.py` | `main2.py` | `python -m compound_consensus.app` |
+| 進入點 | `main.py` | `main2.py` | `main3.py` |
 | 版本 | 3.x | 1.x | 1.0 |
 | 一次處理 | **1 個** `.mea` | **一整批** | **同一標本的重複測量** |
 | 做什麼 | 熱圖 → 找峰 → 逐峰比對化合物 | 在所有檔案上量**同一組區域** → 區域 × 檔案的強度矩陣 | 跨重複彙整化合物候選,依「幾個重複支持」排序 |
 | 邏輯模組 | `peaks` / `calibration` / `identify` / `match` … | `areas2.py`(呼叫左邊那些,**不修改**) | `compound_consensus/logic.py`(呼叫左邊兩者,**都不修改**) |
-| 測試 | `test/`(194) | `test2/`(44) | `test3/`(101) |
+| 測試 | `test/`(194) | `test2/`(44) | `test3/`(226) |
 | 進度 | `status.md` | `status2.md` | `compound_consensus/status.md` |
 
 第二、三支都是**新增**的,不取代任何前者;它們把既有模組當函式庫用。要動第三支之前
 先讀 `compound_consensus/status.md` 的「隔離規則」——它的產物一律帶 `3` 或放在自己的
 命名空間,而且刻意不寫任何前兩支的檔案。
 
-⚠ **第三支必須用 `python -m compound_consensus.app` 啟動**,不能 `python
+⚠ **第三支必須用 `python main3.py` 啟動**,不能 `python
 compound_consensus/app.py`——後者會把子資料夾放進 `sys.path[0]`,根目錄的
 `peaks` / `calibration` 就 import 不到,而錯誤訊息看不出真正原因。
 
@@ -46,6 +46,7 @@ compound_consensus/app.py`——後者會把子資料夾放進 `sys.path[0]`,根
 | `Area_Matrix2.md` | 第二支的設計 + `.gasprj` 格式解析 |
 | `compound_consensus/status.md` | **第三支的進度與交接** |
 | `compound_consensus/README.md` | 第三支的用法、設計,以及 2026-08-31 量到的關鍵數字 |
+| `compound_consensus/TEST_PLAN.md` | 第三支的測試計畫,含**自動測試涵蓋不到、必須實跑**的 14 步 |
 
 ## 軸向約定 —— 最常搞混的一件事
 
@@ -91,7 +92,7 @@ compound_consensus/app.py`——後者會把子資料夾放進 `sys.path[0]`,根
 (PowerShell 與 bash 皆可直接執行):
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q           # 全套 339 項(194 + 44 + 101)
+.venv/Scripts/python.exe -m pytest -q           # 全套 464 項(194 + 44 + 226)
 .venv/Scripts/python.exe -m pytest test/ -q     # 只跑第一支應用
 .venv/Scripts/python.exe -m pytest test2/ -q    # 只跑第二支應用
 .venv/Scripts/python.exe -m pytest test3/ -q    # 只跑第三支應用
@@ -100,7 +101,7 @@ compound_consensus/app.py`——後者會把子資料夾放進 `sys.path[0]`,根
 
 **測試分三個根目錄**：`test/` 第一支、`test2/` 第二支、`test3/` 第三支。`pytest.ini`
 的 `testpaths` 讓**光打 `pytest` 就三邊都收**——這是防呆：舊文件寫的是 `pytest test/`，
-照那個跑會靜靜漏掉 145 項而毫無徵兆。
+照那個跑會靜靜漏掉 270 項而毫無徵兆。
 
 `results/` 已 gitignore。**`GAS/` 底下的 `.mea` 與 `.gasprj` 任何程式都不得修改或
 刪除**(後者存著 RI 校正表,見上)。

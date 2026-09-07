@@ -1,6 +1,6 @@
 # 第三支應用 — 跨重複樣品的化合物共識
 
-**Version: 1.0 — by Albert Sheng**
+**Version: 1.1 — by Albert Sheng**
 **最後更新**：2026-08-31
 
 > 本 repo 現在有**三支應用**。前兩支見根目錄 `CLAUDE.md`。三支共用底層模組，

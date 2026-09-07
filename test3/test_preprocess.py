@@ -201,3 +201,43 @@ def test_std_and_blank_are_excluded_from_preprocessing(tmp_path, monkeypatch, rc
     total, _npz, _pk, excluded, _per = P._counts(str(folder), rc)
     assert total == 1, "只有一個是樣品"
     assert any(e["reason"] == "blank" for e in excluded)
+
+
+# --------------------------------------------------------------------------- #
+# 壞掉的 .mea —— 一定要報出來，不能靜靜算成「完成」
+# --------------------------------------------------------------------------- #
+def test_unreadable_mea_is_reported_not_raised(tmp_path, monkeypatch, rc):
+    """讀不動的 `.mea` 要回一個「失敗」字串，而不是把整批炸掉。
+
+    回歸測試：`GAS/藝妓咖啡/FREE_GG_250422_171557_GG_2.mea` 大小正確（77 MB）
+    但內容 97.9% 是 0x00/0xFF，表頭整段不見了——跨磁碟機搬移時的複製殘骸。
+    `_work()` 要把它變成一筆可以顯示的失敗紀錄；圖形介面才有東西可以講。
+    """
+    results = tmp_path / "results"
+    results.mkdir()
+    monkeypatch.setattr(areas2, "RESULTS_DIR", str(results))
+    # 表頭缺 `Chunks count`，正是那個壞檔的症狀
+    bad = _mea(tmp_path / "broken.mea")
+
+    name, status = P._work((bad, True, False, rc))
+
+    assert name == "broken.mea"
+    assert status != "OK"
+    assert status.startswith("失敗"), status
+    assert "ValueError" in status, "要帶著例外型別，不然看不出是哪一類問題"
+
+
+def test_failed_file_stays_pending_next_run(tmp_path, monkeypatch, rc):
+    """失敗的檔不會被記成做過——下一輪還是待處理，計數不會假裝是 14/14。"""
+    results = tmp_path / "results"
+    results.mkdir()
+    monkeypatch.setattr(areas2, "RESULTS_DIR", str(results))
+    folder = tmp_path / "batch"
+    folder.mkdir()
+    bad = _mea(folder / "broken.mea")
+
+    P._work((bad, True, False, rc))
+
+    total, npz, _pk, _ex, _per = P._counts(str(folder), rc)
+    assert total == 1
+    assert npz == 0, "失敗的檔不該留下 .npz，也不該被算成已完成"
