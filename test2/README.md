@@ -3,7 +3,7 @@
 `areas2.py`（邏輯）與 `main2.py`（介面）的測試。第一支應用的測試在 `test/`。
 
 ```bash
-pytest -q            # 全套 238 項（test/ 194 + test2/ 44）
+pytest -q            # 全套 486 項（test/ 194 + test2/ 44 + test3/ 248）
 pytest test2/ -q     # 只跑這裡（44 項）
 pytest test2/test_main2.py -q
 ```

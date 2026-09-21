@@ -58,7 +58,7 @@ compound_consensus/app.py`——後者會把子資料夾放進 `sys.path[0]`,根
 | `Area_Matrix2.md` | 第二支的設計 + `.gasprj` 格式解析 |
 | `compound_consensus/status.md` | **第三支的進度與交接** |
 | `compound_consensus/README.md` | 第三支的用法、設計,以及 2026-08-31 量到的關鍵數字 |
-| `compound_consensus/TEST_PLAN.md` | 第三支的測試計畫,含**自動測試涵蓋不到、必須實跑**的 14 步 |
+| `compound_consensus/TEST_PLAN.md` | 第三支的測試計畫,含**自動測試涵蓋不到、必須實跑**的 33 步 |
 | `docs/manual_src/README.md` | **給使用者的手冊**怎麼重建、交付前要跑哪兩個檢查 |
 
 `docs/` 底下的 `.docx` / `.pdf` 是**產物**,改內容要改 `docs/manual_src/` 的 `.py`
