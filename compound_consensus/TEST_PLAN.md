@@ -7,8 +7,8 @@
 第一支的測試在 `test/`,第二支在 `test2/`,三份互不覆蓋。
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q            # 全套 477 項
-.venv/Scripts/python.exe -m pytest test3/ -q     # 只跑第三支（239 項）
+.venv/Scripts/python.exe -m pytest -q            # 全套 478 項
+.venv/Scripts/python.exe -m pytest test3/ -q     # 只跑第三支（240 項）
 .venv/Scripts/python.exe -m pytest test3/test_main3.py -q   # 只跑進入點與並存
 ```
 
@@ -148,7 +148,7 @@ python main3.py
 | 11 | 看 `維度` 欄 | 出現 `GC+IMS` / `GC` / `IMS` / `混合`,**不是** `2D` / `RI` |
 | 11b | 看 `Drift rel` 與 `RI` 兩欄 | 有值;對得回熱圖上的位置(x = drift、y = RI) |
 | 11c | 看那一欄的標題 | 是**可能數**,不是「候選」;下方說明寫明「越大越不確定」 |
-| 12 | 雙擊任一列 | 明細每一列都有自己的維度欄 |
+| 12 | 雙擊任一列 | 明細每一列都有自己的維度欄;欄名是**資料庫 RI**(不是「庫 RI」),說明講明那是參考值、不是量到的 |
 | 13 | 改門檻重按 | 達門檻的數量跟著變;未達門檻的**保留顯示(灰)不刪除** |
 | 14 | 模式 2/3 點熱圖上的圈 | **不會**改變選取,左上角有「唯讀」標記,狀態列說要切到模式 1 |
 | 15 | 模式 2/3 滾輪縮放 | 照舊可以——唯讀只擋改狀態,不擋瀏覽 |

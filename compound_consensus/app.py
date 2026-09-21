@@ -1892,7 +1892,9 @@ class ConsensusApp:
 
         cols = ("kind", "name", "cas", "formula", "libval", "delta", "src")
         heads = {"kind": "維度", "name": "化合物", "cas": "CAS", "formula": "分子式",
-                 "libval": "庫值", "delta": "Δ", "src": "來源檔"}
+                 # 與共識表用同一套說法：「庫」是縮寫，寫全才不必猜。
+                 # 這裡刻意不寫死 RI——依維度可能是 RI、秒或漂移值。
+                 "libval": "資料庫值", "delta": "Δ", "src": "來源檔"}
         wids = {"kind": 68, "name": 250, "cas": 96, "formula": 84,
                 "libval": 84, "delta": 74, "src": 130}
         body = ttk.Frame(win)
@@ -2271,8 +2273,10 @@ class ConsensusApp:
         # 有些候選是兩軸都對上、有些只有 RI 對上，證據強度差很多。
         for col, txt, wid in (("s", "支持", 62), ("dim", "維度", 76),
                               ("name", "化合物", 300),
-                              ("cas", "CAS", 104), ("ri", "庫 RI", 76),
-                              ("d", "|ΔRI|", 76)):
+                              # 「庫」是縮寫，要先知道有「化合物庫」這回事才讀得懂
+                              # ——使用者問過那是什麼。寫成「資料庫 RI」不必猜。
+                              ("cas", "CAS", 100), ("ri", "資料庫 RI", 86),
+                              ("d", "|ΔRI|", 72)):
             t.heading(col, text=txt)
             t.column(col, width=wid, anchor="w" if col == "name" else "center")
         t.tag_configure("combined", background="#e7f5e7")
@@ -2287,7 +2291,13 @@ class ConsensusApp:
                 self._fmt(c["mean_abs_delta_ri"], 2)),
                 tags=("combined",) if dim == "combined" else ())
         ttk.Label(w, foreground="#777", wraplength=820, justify="left",
-                  text=("支持 = 有幾個重複的候選清單裡出現這個化合物。"
+                  text=("支持 = 有幾個重複在這個位置比中了這個化合物。　"
+                        "資料庫 RI = 化合物庫（.ril / .iml）記載的參考值，"
+                        "**不是你量到的**；你量到的是上一層表格的 RI 欄。　"
+                        "|ΔRI| = 兩者相差多少（跨重複取平均），比對窗是 ±5。\n"
+                        "Δ 小只表示它落在窗的中間，不表示它是唯一解——庫裡相鄰"
+                        "化合物本來就差 80–92 RI，而重複之間只差 0.29（中位）。"
+                        "要看「分不分得出來」請看上一層的可能數。\n"
                         "彙整提高的是可靠度，不是真值——RI 尺標的既有疑慮"
                         "（status.md open decision 3a）照樣成立，三個重複會一致地"
                         "指向同一個答案，對錯都一樣一致。")

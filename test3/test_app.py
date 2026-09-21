@@ -2315,3 +2315,42 @@ def test_colour_is_not_the_only_signal(monkeypatch):
                            appmod.READY_RED)
     finally:
         _destroy(root)
+
+
+def test_the_detail_popup_explains_the_library_value(monkeypatch):
+    """明細視窗要自己說得出「資料庫 RI」是什麼。
+
+    回歸測試(使用者問過「庫 RI 是什麼」):「庫」是縮寫,要先知道有「化合物庫」
+    這回事才讀得懂。欄名寫全,而且說明要講明**那是參考值、不是你量到的**
+    ——兩個 RI 並排而不說哪個是哪個,是這個專案一再防的那種無聲混淆。
+    """
+    from tkinter import ttk
+    tk, root, appmod, app = _app(monkeypatch)
+    try:
+        app.consolidated = _fake_consolidated()
+        _ready_for_mode(app)
+        app.mode.set(appmod.MODE_COMPOUND)
+        app.on_mode_change()
+        app.tree_cmpd.selection_set("0")
+        app.tree_cmpd.focus("0")
+        app.show_candidates()
+        win = [w for w in app.root.winfo_children()
+               if isinstance(w, tk.Toplevel)][-1]
+
+        def walk(w):
+            yield w
+            for kid in w.winfo_children():
+                yield from walk(kid)
+
+        tree = [w for w in walk(win) if isinstance(w, ttk.Treeview)][0]
+        heads = [tree.heading(c)["text"] for c in tree["columns"]]
+        assert "資料庫 RI" in heads
+        assert "庫 RI" not in heads, "「庫」是縮寫，使用者問過那是什麼"
+
+        notes = " ".join(w.cget("text") for w in walk(win)
+                         if isinstance(w, ttk.Label))
+        assert "不是你量到的" in notes, "要講明那是參考值"
+        assert "±5" in notes, "要給得出比對窗，否則 0.31 是大是小無從判斷"
+        win.destroy()
+    finally:
+        _destroy(root)
