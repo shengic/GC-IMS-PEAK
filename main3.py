@@ -11,7 +11,7 @@
 
 與 `main.py`（單檔）、`main2.py`（整批量同一組區域）並存，三支互不取代。
 
-Version: 1.1 — by Albert Sheng
+Version: 1.2 — by Albert Sheng
 """
 import os
 import sys

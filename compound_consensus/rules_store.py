@@ -27,7 +27,7 @@ their own rule will be overwritten」。
 
 隔離規則 2：檔名帶 `3`，不碰前兩支應用的產物。`GAS/` 完全不寫（隔離規則 3）。
 
-Version: 1.1 — by Albert Sheng（第三支應用，2026-09-07）
+Version: 1.2 — by Albert Sheng（第三支應用，2026-09-21）
 """
 import copy
 import glob

@@ -160,3 +160,38 @@ def test_scan_cost_counts_peaks2_not_maxima(tmp_path, monkeypatch):
 
     (results / "x_peaks2.json").write_text("{}", encoding="utf-8")
     assert L.scan_cost([mea])["n_need_detect"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# 群聚容差 —— 明著傳給 areas2，不靠它的預設
+# --------------------------------------------------------------------------- #
+def test_consensus_regions_forwards_the_tolerances(monkeypatch):
+    """`consensus_regions()` 要把兩軸的容差**明著**傳給 `build_consensus_areas()`。
+
+    靠 areas2 的預設是不行的：有人為了第二支應用去調 `DEFAULT_RT_TOL_S`，這一支
+    就會無聲跟著變——而症狀是「票數莫名其妙只有一半」，不是報錯。
+    """
+    import areas2
+    from compound_consensus import logic as L
+    seen = {}
+
+    def fake_build(per_file, **kw):
+        seen.update(kw)
+        return [], {"n_pooled_peaks": 0, "n_clusters": 0}
+
+    monkeypatch.setattr(L.areas2, "build_consensus_areas", fake_build)
+    monkeypatch.setattr(L.areas2, "attach_detection_to_areas",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(L, "detect_cached",
+                        lambda *a, **k: ([], {}, {}))
+
+    L.consensus_regions(["a.mea"], {}, rt_tol_s=33.0, drift_tol=0.07)
+    assert seen["rt_tol_s"] == 33.0
+    assert seen["drift_tol"] == 0.07
+
+    seen.clear()
+    L.consensus_regions(["a.mea"], {})
+    assert seen["rt_tol_s"] == L.RT_TOL_S == 20.0, "預設 20 秒"
+    assert seen["drift_tol"] == L.DRIFT_TOL == 0.03, "IMS 預設 0.03"
+    assert areas2.DEFAULT_RT_TOL_S == 10.0, (
+        "第二支應用的預設不能被順手改掉——隔離規則 1")

@@ -17,7 +17,7 @@
 實測基準（2026-08-31，三個資料夾 45 個檔）：以「最相似鄰居是否同組」為準達 **43/45**。
 96% 仍然落在「可以建議、不可以替使用者決定」——UI 因此是 highlight + 使用者增刪。
 
-Version: 1.1 — by Albert Sheng（第三支應用，2026-09-07）
+Version: 1.2 — by Albert Sheng（第三支應用，2026-09-21）
 """
 from __future__ import annotations
 
@@ -225,6 +225,25 @@ def nearest_neighbour_check(corr, files, group_of):
 #: n=15 要 11 vs 10），而且**不會有任何徵兆**，只會看到候選莫名其妙變少。
 DEFAULT_MIN_FRACTION = 2.0 / 3.0
 
+#: 跨檔群聚的保留時間容差（秒）。**這一支刻意比 `areas2.DEFAULT_RT_TOL_S`（10 秒）寬。**
+#:
+#: 第二支應用量的是**同一批**檔案上的同一組區域，各檔的保留時間漂移很小，10 秒夠用。
+#: 這一支處理的是**重複測量**，而重複之間隔幾小時到幾天都有可能——管柱狀態、室溫、
+#: 載氣流量都會讓同一個化合物的保留時間整體平移。容差不夠寬的時候，同一個化合物會
+#: 被拆成兩個位置、票數各分一半，於是**兩半都過不了門檻**，而畫面上看不出原因
+#: （不是少一列，是那一列的票數莫名其妙只有一半）。
+#:
+#: **不改 `areas2.py` 的預設**：那是第二支應用的模組，改它等於連帶改掉第二支的
+#: 行為（`areas2.run_batch()` 與 CLI 的 `--rt-tol` 都吃同一個預設）。隔離規則 1。
+#: 使用者 2026-09-21 指定 20 秒，並要求**介面上可調**——不同方法、不同管柱狀態
+#: 需要的寬度不一樣，寫死一個數字等於逼使用者在「拆成兩半」與「把兩個化合物併成
+#: 一個」之間二選一。這裡是**預設值**，介面的下拉選單（`app.RT_TOL_CHOICES`）覆寫它。
+RT_TOL_S = 20.0
+
+#: 跨檔群聚的漂移容差。與 `areas2` 的預設相同，列在這裡是為了讓兩軸的容差在同一個
+#: 地方看得到——只寫一個、另一個靠預設，下次調整時很容易只改到一半。
+DRIFT_TOL = 0.03
+
 
 def required_files(n_files, min_fraction=DEFAULT_MIN_FRACTION):
     """`n_files` 個檔案中，至少要幾個出現才算共同峰。
@@ -304,7 +323,8 @@ def group_stats(group, corr, corr_files, min_fraction=DEFAULT_MIN_FRACTION):
 def consensus_regions(mea_paths, rules_config, min_fraction=DEFAULT_MIN_FRACTION,
                       use_baseline=False, active_only=True, formation_floor=2,
                       ri_calibration=None, progress=None, verbose=False,
-                      on_peaks=None, rules_for=None):
+                      on_peaks=None, rules_for=None,
+                      drift_tol=DRIFT_TOL, rt_tol_s=RT_TOL_S):
     """對選定的檔案跑找峰，再跨檔群聚成共用區域。回傳 `(areas, per_file_peaks, report)`。
 
     **這是取代 `.gasprj` 方框的那條路。** `.gasprj` 只用來對照驗證，不參與流程——
@@ -320,6 +340,10 @@ def consensus_regions(mea_paths, rules_config, min_fraction=DEFAULT_MIN_FRACTION
     `rules_for(mea_path)`：**逐檔的規則**。不同標本訊號強弱差很多，全域一套參數等於
     逼使用者在「某些檔漏峰」與「某些檔一堆雜訊」之間二選一。沒給就全部用
     `rules_config`。
+
+    `drift_tol` / `rt_tol_s`：**跨檔群聚的容差**，預設 0.03 與 **20 秒**（見 `RT_TOL_S`：
+    重複測量之間隔幾小時到幾天，保留時間會整體平移，10 秒不夠）。回傳的 `report`
+    帶著實際用到的兩個值——出來的區域數對不上時，第一件要看的就是它們。
 
     `on_peaks(mea_path, peaks)`：偵測完、建區域**之前**的鉤子，就地修改那一份峰。
     使用者的選取（`_peaks_state3.json`）要靠它套進來——**而且套完必須呼叫
@@ -360,8 +384,12 @@ def consensus_regions(mea_paths, rules_config, min_fraction=DEFAULT_MIN_FRACTION
     # 絕對下限 `formation_floor`（預設 2：一個檔case無法「共識」），佔比門檻只在
     # `rank_areas()` 決定灰不灰。
     need = required_files(total, min_fraction)
+    # **容差明著傳，不要靠 areas2 的預設。** 這一支要的是 20 秒（見 `RT_TOL_S`），
+    # 而 areas2 的預設是 10 秒；靠預設的話，有人為了第二支去調那個常數，這一支就會
+    # 無聲地跟著變——而症狀是「票數變一半」，不是報錯。
     areas, report = areas2.build_consensus_areas(
-        per_file, min_files=formation_floor, active_only=active_only)
+        per_file, drift_tol=drift_tol, rt_tol_s=rt_tol_s,
+        min_files=formation_floor, active_only=active_only)
     areas2.attach_detection_to_areas(areas, per_file, active_only=active_only)
     for a in areas:
         n = a.get("n_files_detected") or 0

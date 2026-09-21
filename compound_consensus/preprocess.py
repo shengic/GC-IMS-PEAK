@@ -23,7 +23,7 @@
 **唯讀 `GAS/`**：只讀 `.mea`，所有產物都寫在 `results/`（隔離規則 3）。
 以函式呼叫既有模組，不跑任何 subprocess——那在打包成 exe 之後會壞掉。
 
-Version: 1.1 — by Albert Sheng（第三支應用，2026-09-07）
+Version: 1.2 — by Albert Sheng（第三支應用，2026-09-21）
 """
 import argparse
 import concurrent.futures as cf

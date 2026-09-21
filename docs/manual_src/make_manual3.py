@@ -4,7 +4,7 @@
 與 `make_manual.py` 同一套排版（`docx_kit`），內容完全獨立：這份只講第三支應用，
 不提 main.py / main2.py 的功能，也不提 `.gasprj`。
 
-Version: 1.0 — by Albert Sheng（手冊建置，2026-09-21）
+Version: 1.1 — by Albert Sheng（手冊建置，2026-09-21）
 """
 import os
 
@@ -53,7 +53,7 @@ def cover(doc, brk):
 
     for _ in range(6):
         doc.add_paragraph()
-    for line in ("版本 1.1", "Albert Sheng", "以日常語言撰寫，第一次接觸也讀得懂"):
+    for line in ("版本 1.2", "Albert Sheng", "以日常語言撰寫，第一次接觸也讀得懂"):
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         p.paragraph_format.space_after = Pt(2)

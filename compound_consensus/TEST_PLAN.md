@@ -1,6 +1,6 @@
 # 第三支應用（`main3.py`）測試計畫
 
-**Version: 1.1 — by Albert Sheng**
+**Version: 1.2 — by Albert Sheng**
 **最後更新**：2026-09-07
 
 涵蓋 `main3.py` 進入點、`compound_consensus/` 套件,以及「加了第三支不會弄壞前兩支」。

@@ -7,7 +7,7 @@
 參數一改就重新編號，用它存的選取會靜靜地黏到別顆峰上去。這條是第一支應用踩過的坑，
 原樣沿用。
 
-Version: 1.1 — by Albert Sheng（第三支應用，2026-09-07）
+Version: 1.2 — by Albert Sheng（第三支應用，2026-09-21）
 """
 import json
 import os

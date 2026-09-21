@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """main3.py 手冊內容（第一部：13–19 章，第一部結尾）。
 
-Version: 1.0 — by Albert Sheng（手冊建置，2026-09-21）
+Version: 1.1 — by Albert Sheng（手冊建置，2026-09-21）
 """
 
 

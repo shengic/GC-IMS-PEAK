@@ -2096,7 +2096,8 @@ def test_scan_completing_reselects_from_the_existing_base(monkeypatch):
         app.corr, app.corr_files = None, []
         app.set_base("/x/a.mea")
         assert app.group == {"/x/a.mea"}
-        app.q.put(("corr", (np.array(ONE_ODD), list(files), 12, 12)))
+        # 第五個元素＝算這份相似度當下用的 GC 容差（體檢面板要說得出來）
+        app.q.put(("corr", (np.array(ONE_ODD), list(files), 12, 12, 20.0)))
         app._drain()
         assert app.group == {"/x/a.mea", "/x/b.mea", "/x/c.mea"}
     finally:
@@ -2352,5 +2353,173 @@ def test_the_detail_popup_explains_the_library_value(monkeypatch):
         assert "不是你量到的" in notes, "要講明那是參考值"
         assert "±5" in notes, "要給得出比對窗，否則 0.31 是大是小無從判斷"
         win.destroy()
+    finally:
+        _destroy(root)
+
+
+# --------------------------------------------------------------------------- #
+# GC 群聚容差 —— 預設 20 秒、介面可調
+# --------------------------------------------------------------------------- #
+def test_rt_tol_default_is_20_seconds(monkeypatch):
+    """預設 20 秒，不是 areas2 的 10。
+
+    第二支應用量的是同一批檔案上的同一組區域；這一支比的是**重複測量**，而重複
+    之間隔幾小時到幾天，保留時間會整體平移。10 秒太緊時同一個化合物被拆成兩個
+    位置、票數各分一半，於是兩半都過不了門檻——而畫面上看不出原因。
+    """
+    import areas2
+    from compound_consensus import logic as L
+    _tk_or_skip()
+    tk, root, appmod, app = _app(monkeypatch)
+    try:
+        assert L.RT_TOL_S == 20.0
+        assert app._rt_tol() == 20.0
+        assert app.rt_tol.get() == "20"
+        assert areas2.DEFAULT_RT_TOL_S == 10.0, (
+            "第二支應用的預設不能被順手改掉——隔離規則 1")
+    finally:
+        _destroy(root)
+
+
+def test_rt_tol_is_editable_and_readonly(monkeypatch):
+    """下拉選單，不是輸入框。
+
+    輸入框打錯字最壞會靜靜存成 0，而 0 會讓每顆峰自成一區、票數全變 1/N——
+    看起來像資料壞了而不是設定錯了。
+    """
+    from tkinter import ttk
+    _tk_or_skip()
+    tk, root, appmod, app = _app(monkeypatch)
+    try:
+        def walk(w):
+            yield w
+            for kid in w.winfo_children():
+                yield from walk(kid)
+
+        boxes = [w for w in walk(app.root) if isinstance(w, ttk.Combobox)
+                 and w.cget("textvariable") == str(app.rt_tol)]
+        assert boxes, "工具列上要有 GC 容差的下拉選單"
+        cb = boxes[0]
+        assert str(cb.cget("state")) == "readonly"
+        assert "20" in [str(v) for v in cb.cget("values")]
+        assert "10" in [str(v) for v in cb.cget("values")], "areas2 的尺度要留著"
+    finally:
+        _destroy(root)
+
+
+def test_rt_tol_change_marks_consolidation_dirty(monkeypatch):
+    """換了容差，畫面上那份彙整就過期了。"""
+    _tk_or_skip()
+    tk, root, appmod, app = _app(monkeypatch)
+    try:
+        app._cons_dirty = False
+        app.rt_tol.set("45")
+        app._on_rt_tol_change()
+        assert app._cons_dirty is True
+        assert app._rt_tol() == 45.0
+    finally:
+        _destroy(root)
+
+
+def test_rt_tol_reaches_the_worker(monkeypatch):
+    """使用者選的值要真的離開主執行緒、進到背景工作。
+
+    **在主執行緒讀完再傳**：背景執行緒碰 Tk 變數是未定義行為，而且偶爾才炸。
+    所以這裡檢查的是 `Thread(args=...)`，不是 worker 內部——worker 內部要真的
+    跑起來需要一整個資料夾的檔案，那是 `test_logic` 的層級。
+    """
+    _tk_or_skip()
+    tk, root, appmod, app = _app(monkeypatch)
+    captured = {}
+    try:
+        class FakeThread:
+            def __init__(self, target=None, args=(), daemon=None):
+                captured["args"] = args
+
+            def start(self):
+                pass
+
+        class _ThreadingShim:
+            Thread = FakeThread
+
+        # **換掉 app 命名空間裡的 `threading`，不是全域的 `threading.Thread`。**
+        # 後者會讓 Tk、pytest 和任何在這段期間開執行緒的東西都拿到假的 Thread；
+        # 實測會讓**別的測試檔**整批掛掉，而錯誤訊息完全指不到這裡。
+        monkeypatch.setattr(appmod, "threading", _ThreadingShim)
+        app.rt_tol.set("30")
+        app.drift_tol.set("0.05")
+        app.group = {"a.mea", "b.mea"}
+        app._cons_dirty = True
+        app.consolidate()
+        assert captured["args"][1] == 30.0, "GC 容差要傳進去"
+        assert captured["args"][2] == 0.05, "IMS 容差要傳進去"
+    finally:
+        _destroy(root)
+
+
+def test_group_panel_shows_the_tolerance(monkeypatch):
+    """體檢面板要把容差和門檻並排講。
+
+    只放在工具列的話，使用者看到票數變一半時不會想到是這個值。
+    """
+    _tk_or_skip()
+    tk, root, appmod, app = _app(monkeypatch)
+    try:
+        _ready_for_mode(app)
+        app._fill_group_panel()
+        txt = app.group_txt.get("1.0", "end")
+        assert "群聚容差" in txt
+        assert "20" in txt and "0.03" in txt, "兩軸都要講"
+    finally:
+        _destroy(root)
+
+
+def test_stale_similarity_is_declared(monkeypatch):
+    """相似度不會跟著容差重算——但**必須講出來**。
+
+    無聲地新舊混用才是不能接受的那一種。
+    """
+    _tk_or_skip()
+    tk, root, appmod, app = _app(monkeypatch)
+    try:
+        _ready_for_mode(app)
+        app._corr_rt_tol = 20.0
+        app.rt_tol.set("45")
+        app._fill_group_panel()
+        txt = app.group_txt.get("1.0", "end")
+        assert "20" in txt and "相似度" in txt, (
+            "要說得出這份相似度是用哪個容差算的")
+    finally:
+        _destroy(root)
+
+
+def test_drift_tol_default_and_editable(monkeypatch):
+    """IMS 預設 ±0.03，同樣做成下拉選單。
+
+    這一軸天生比 GC 穩——`drift_relative` 已被各檔自己的 RIP 正規化過，
+    不會隨管柱狀態整體平移——所以預設不跟著 GC 放寬。
+    """
+    from tkinter import ttk
+    from compound_consensus import logic as L
+    _tk_or_skip()
+    tk, root, appmod, app = _app(monkeypatch)
+    try:
+        assert L.DRIFT_TOL == 0.03
+        assert app._drift_tol() == 0.03
+        assert app.drift_tol.get() == "0.03"
+
+        def walk(w):
+            yield w
+            for kid in w.winfo_children():
+                yield from walk(kid)
+
+        boxes = [w for w in walk(app.root) if isinstance(w, ttk.Combobox)
+                 and w.cget("textvariable") == str(app.drift_tol)]
+        assert boxes, "工具列上要有 IMS 容差的下拉選單"
+        assert str(boxes[0].cget("state")) == "readonly"
+        vals = [str(v) for v in boxes[0].cget("values")]
+        assert "0.03" in vals
+        assert all(float(v) < L.MD_MIN_DRIFT_GAP for v in vals), (
+            "容差不能寬到把單體/二聚體併成同一個區域（間距下限 0.10）")
     finally:
         _destroy(root)

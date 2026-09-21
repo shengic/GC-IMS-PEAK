@@ -10,11 +10,11 @@
 | | 第一支 | 第二支 | 第三支 |
 |---|---|---|---|
 | 進入點 | `main.py` | `main2.py` | `main3.py` |
-| 版本 | 3.x | 1.x | 1.1 |
+| 版本 | 3.x | 1.x | 1.2 |
 | 一次處理 | **1 個** `.mea` | **一整批** | **同一標本的重複測量** |
 | 做什麼 | 熱圖 → 找峰 → 逐峰比對化合物 | 在所有檔案上量**同一組區域** → 區域 × 檔案的強度矩陣 | 跨重複彙整化合物候選,依「幾個重複支持」排序 |
 | 邏輯模組 | `peaks` / `calibration` / `identify` / `match` … | `areas2.py`(呼叫左邊那些,**不修改**) | `compound_consensus/logic.py`(呼叫左邊兩者,**都不修改**) |
-| 測試 | `test/`(194) | `test2/`(44) | `test3/`(240) |
+| 測試 | `test/`(194) | `test2/`(44) | `test3/`(248) |
 | 進度 | `status.md` | `status2.md` | `compound_consensus/status.md` |
 
 第二、三支都是**新增**的,不取代任何前者;它們把既有模組當函式庫用。要動第三支之前
@@ -25,9 +25,17 @@
 compound_consensus/app.py`——後者會把子資料夾放進 `sys.path[0]`,根目錄的
 `peaks` / `calibration` 就 import 不到,而錯誤訊息看不出真正原因。
 
-第三支的操作是**模式即步驟**（v1.1）:選資料夾 → 在檔案面板點「基準」欄 ◉
-（相似度立刻開始算）→ 模式 2 調整同組 → 模式 3 自動彙整。工具列**只有**
-「選資料夾」,沒有另一組編號按鈕;沒選基準之前模式 2/3 是灰的。
+第三支的操作是**模式即步驟**（v1.1 起）:選資料夾 → 在檔案面板點「基準」欄 ◉
+（相似度立刻開始算）→ 模式 2 調整同組 → 模式 3 自動彙整。工具列上沒有另一組
+編號按鈕,只有設定:選資料夾、門檻、GC 容差、IMS 容差、Rules;沒選基準之前
+模式 2/3 是灰的。
+
+**跨檔群聚容差:第三支 GC 用 20 秒,不是 `areas2` 的 10 秒**（IMS 兩者同為 0.03）。
+第二支量的是同一批連續進樣,10 秒夠;第三支比的是**重複測量**,隔幾小時到幾天,
+保留時間會整體平移。太窄時同一個化合物被拆成兩個位置、票數各分一半,
+**兩半都過不了門檻而畫面上完全沒有徵兆**。值在 `logic.RT_TOL_S` / `logic.DRIFT_TOL`,
+由 `consensus_regions()` 明著傳給 `areas2.build_consensus_areas()`——
+**不要改 `areas2` 的預設**,那會連帶改掉第二支。兩個值介面上可調。
 
 ## 開始新工作前先讀對應的 status
 
@@ -100,7 +108,7 @@ compound_consensus/app.py`——後者會把子資料夾放進 `sys.path[0]`,根
 (PowerShell 與 bash 皆可直接執行):
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q           # 全套 478 項(194 + 44 + 240)
+.venv/Scripts/python.exe -m pytest -q           # 全套 486 項(194 + 44 + 248)
 .venv/Scripts/python.exe -m pytest test/ -q     # 只跑第一支應用
 .venv/Scripts/python.exe -m pytest test2/ -q    # 只跑第二支應用
 .venv/Scripts/python.exe -m pytest test3/ -q    # 只跑第三支應用
@@ -109,7 +117,7 @@ compound_consensus/app.py`——後者會把子資料夾放進 `sys.path[0]`,根
 
 **測試分三個根目錄**：`test/` 第一支、`test2/` 第二支、`test3/` 第三支。`pytest.ini`
 的 `testpaths` 讓**光打 `pytest` 就三邊都收**——這是防呆：舊文件寫的是 `pytest test/`，
-照那個跑會靜靜漏掉 284 項而毫無徵兆。
+照那個跑會靜靜漏掉 292 項而毫無徵兆。
 
 `results/` 已 gitignore。**`GAS/` 底下的 `.mea` 與 `.gasprj` 任何程式都不得修改或
 刪除**(後者存著 RI 校正表,見上)。

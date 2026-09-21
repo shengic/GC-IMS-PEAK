@@ -14,7 +14,7 @@
 **沒有任何 subprocess。** 第一支應用用 `[sys.executable, "peaks.py", ...]` 起子行程，
 那在打包成 exe 之後會變成用 exe 再開一次 GUI。這裡一律函式呼叫。
 
-Version: 1.1 — by Albert Sheng（第三支應用，2026-09-07）
+Version: 1.2 — by Albert Sheng（第三支應用，2026-09-21）
 """
 import copy
 import json
@@ -56,6 +56,29 @@ TIER_FG = {4: "#1b5e20", 3: "#33691e", 2: "#f57f17", 1: "#e65100", 0: "#9e9e9e"}
 #: 建議同組的門檻。**只用來建議，不用來決定**——實測自動分組 43/45 = 96%，
 #: 剩下的那幾個正是需要人看的，所以使用者一定要能自己增刪。
 SUGGEST_R = L.GROUP_GOOD_R
+
+#: GC（保留時間）跨檔群聚容差的可選值，單位秒；預設見 `logic.RT_TOL_S`（20）。
+#:
+#: **用下拉選單而不是輸入框。** 輸入框打錯字最好的下場是被拒絕，最壞的下場是靜靜
+#: 存成 0——而 0 會讓每一顆峰自成一個區域、票數全部變成 1/N，症狀看起來像資料壞了
+#: 而不是設定錯了。同 `門檻` 的作法（`state="readonly"`）。
+#:
+#: 兩端的值是有意義的邊界，不是隨便湊的：
+#:   * **10** ＝ `areas2` 的預設，同一批連續進樣的尺度；
+#:   * **20** ＝ 預設，吃得下重複之間隔幾小時到幾天的整體平移；
+#:   * **60** ＝ 上限。再寬下去，RI 相差 80–92 的相鄰化合物會開始被併成同一個區域，
+#:     那是把「拆成兩半」的問題換成更難發現的「兩個化合物併成一個」。
+RT_TOL_CHOICES = ("10", "15", "20", "30", "45", "60")
+
+#: IMS（漂移）跨檔群聚容差的可選值；預設見 `logic.DRIFT_TOL`（0.03）。
+#:
+#: 這一軸**天生比 GC 穩**：`drift_relative` 已經被各檔自己的 RIP 正規化過，
+#: 所以不會像保留時間那樣隨管柱狀態整體平移。預設不必跟著 GC 放寬。
+#:
+#: 上限 0.08 是有理由的：單體與二聚體的漂移間距下限是 0.10
+#: （`logic.MD_MIN_DRIFT_GAP`），容差再寬就會開始把那一對併成同一個區域——
+#: 而那是兩個**不同的訊號**，併掉之後強度會被加在一起，看不出發生過什麼事。
+DRIFT_TOL_CHOICES = ("0.01", "0.02", "0.03", "0.05", "0.08")
 
 #: 基準欄的單選標記。用 ◉/○ 而不是核取方塊：形狀本身就在說「這是單選」，
 #: 而「組 ✓」是複選——兩欄並排時形狀不同才不會被當成同一種東西。
@@ -139,6 +162,9 @@ class ConsensusApp:
         self.circles = {}
         self.corr = None
         self.corr_files = []
+        #: 算 `corr` 當下用的 GC 容差。之後使用者改了容差，體檢面板要說得出
+        #: 「這份相似度是用舊的算的」——新舊混用而不講才是真正危險的。
+        self._corr_rt_tol = None
         self.consolidated = []
         self.ri_note = ""
         #: **預設**規則，適用於所有沒有自己主張的 `.mea`。逐檔覆寫在
@@ -201,6 +227,23 @@ class ConsensusApp:
         cb.pack(side="left")
         # 門檻換了，畫面上那份彙整就過期了——標成 dirty，下次進模式 3 會重算。
         cb.bind("<<ComboboxSelected>>", lambda _e: self._mark_dirty())
+        # **GC 容差要看得見而且調得動。** 它決定「各檔的峰算不算同一個位置」，
+        # 而合適的寬度隨 GC 方法與管柱狀態而變——寫死一個數字等於逼使用者在
+        # 「同一個化合物被拆成兩半」與「兩個化合物被併成一個」之間二選一。
+        ttk.Label(bar, text="GC 容差").pack(side="left", padx=(16, 2))
+        self.rt_tol = tk.StringVar(value="%g" % L.RT_TOL_S)
+        cb_rt = ttk.Combobox(bar, textvariable=self.rt_tol, width=4,
+                             state="readonly", values=list(RT_TOL_CHOICES))
+        cb_rt.pack(side="left")
+        ttk.Label(bar, text="秒").pack(side="left", padx=(2, 0))
+        cb_rt.bind("<<ComboboxSelected>>", lambda _e: self._on_rt_tol_change())
+        # IMS 那一軸一起放出來。只開 GC 的話，使用者會以為漂移沒有容差可言。
+        ttk.Label(bar, text="IMS 容差").pack(side="left", padx=(12, 2))
+        self.drift_tol = tk.StringVar(value="%g" % L.DRIFT_TOL)
+        cb_dr = ttk.Combobox(bar, textvariable=self.drift_tol, width=5,
+                             state="readonly", values=list(DRIFT_TOL_CHOICES))
+        cb_dr.pack(side="left")
+        cb_dr.bind("<<ComboboxSelected>>", lambda _e: self._on_rt_tol_change())
         ttk.Button(bar, text="Rules", command=self.open_rules).pack(side="left",
                                                                     padx=(16, 0))
         ttk.Button(bar, text="結束", command=self.quit_app).pack(side="right")
@@ -852,6 +895,46 @@ class ConsensusApp:
             if rb is not None and rb.winfo_exists():
                 rb.config(state="normal" if need else "disabled")
 
+    def _rt_tol(self):
+        """目前的 GC 群聚容差（秒）。
+
+        下拉選單是 `readonly`，所以值一定來自 `RT_TOL_CHOICES`；`float()` 不會炸。
+        但還是保底回 `logic.RT_TOL_S`——測試會直接塞 `self.rt_tol`，而一個壞掉的
+        容差會靜靜改變每一個區域，不是拋例外。
+        """
+        try:
+            v = float(self.rt_tol.get())
+        except (ValueError, AttributeError):
+            return L.RT_TOL_S
+        return v if v > 0 else L.RT_TOL_S
+
+    def _drift_tol(self):
+        """目前的 IMS 群聚容差。保底同 `_rt_tol()`。"""
+        try:
+            v = float(self.drift_tol.get())
+        except (ValueError, AttributeError):
+            return L.DRIFT_TOL
+        return v if v > 0 else L.DRIFT_TOL
+
+    def _on_rt_tol_change(self):
+        """容差換了：彙整過期，而且要講清楚**相似度不會跟著重算**。
+
+        相似度是拿共識區域當量測骨架算出來的，所以嚴格說它也受這個值影響。但重算
+        要十幾秒到好幾分鐘，而它只是「建議同組」的依據——為了一個建議把人卡住不值得。
+        折衷是：不自動重算，但在模式 2 的體檢裡標出它是用哪個容差算的（見
+        `_fill_group_panel()`）。**無聲地新舊混用才是不能接受的那一種。**
+        """
+        self._mark_dirty()
+        self._fill_group_panel()
+        stale = (self.corr is not None
+                 and self._corr_rt_tol is not None
+                 and abs(self._corr_rt_tol - self._rt_tol()) > 1e-9)
+        self.status.config(
+            text="GC 容差 %g 秒。下次進模式 3 會重新彙整。%s"
+                 % (self._rt_tol(),
+                    "相似度仍是用 %g 秒算的——要更新請重新點一次基準。"
+                    % self._corr_rt_tol if stale else ""))
+
     def _mark_dirty(self):
         """畫面上的彙整結果過期了——下次進模式 3 要重算。
 
@@ -1117,8 +1200,14 @@ class ConsensusApp:
 
         **一定要留住參照**（`self._dots`）：Tk 的圖片物件被 Python 回收之後，
         畫面上那張圖會直接消失，而且不會有任何錯誤——典型的「圖不見了」災情。
+
+        **`master` 一定要指名。** 不給的話 `PhotoImage` 會掛到 `tkinter` 的
+        _default_root_ ——也就是**第一個**被建出來的 root，不一定是這個應用的。
+        那個 root 一被銷毀，這裡的圖就變成 `image "pyimageNN" doesn't exist`，
+        而且是在**別的地方**炸開（測試裡實測過：整批不相干的測試一起掛掉）。
+        正式執行時只有一個 root 所以看不出來，但那是巧合，不是設計。
         """
-        img = tk.PhotoImage(width=size, height=size)
+        img = tk.PhotoImage(master=self.root, width=size, height=size)
         c = size / 2.0 - 0.5
         rad = size / 2.0 - 1.0
         for y in range(size):
@@ -1288,6 +1377,16 @@ class ConsensusApp:
         # 彙整完才看得到。
         line("門檻 %s → %d 個檔中要有 %d 個看得到才算數"
              % (self.frac.get(), st["n"], st["required"]), "k")
+        # **容差要跟門檻並排。** 兩者都決定「一列算不算數」，只是一個管票數、
+        # 一個管「這些峰算不算同一個位置」——把它藏在工具列而體檢裡不提，
+        # 使用者看到票數變一半時不會想到是這個值。
+        line("群聚容差　GC %g 秒　IMS %g"
+             % (self._rt_tol(), self._drift_tol()), "k")
+        line("　兩軸都要落在這個範圍內，各檔的峰才算同一個位置。", "dim")
+        if (self._corr_rt_tol is not None
+                and abs(self._corr_rt_tol - self._rt_tol()) > 1e-9):
+            line("　上面的相似度是用 %g 秒算的。要更新請重新點一次基準。"
+                 % self._corr_rt_tol, "dim")
         if st["n_pending"]:
             line("待找峰 %d 個檔（約 %d 秒）" % (st["n_pending"],
                                               st["n_pending"] * 55), "k")
@@ -1498,7 +1597,11 @@ class ConsensusApp:
         # 放大時用 NEAREST：LANCZOS 在大倍率下每次重繪都要重採樣幾百萬像素，
         # 滾輪會變得很鈍。縮小時畫質才重要，用 LANCZOS。
         resample = Image.LANCZOS if eff < 1.0 else Image.NEAREST
-        self.photo = ImageTk.PhotoImage(self.img_orig.resize((w, h), resample))
+        # `master` 同 `_dot()` 的理由：不指名就掛到 tkinter 的 _default_root_，
+        # 那個 root 被銷毀之後這張圖會在 `canvas.create_image()` 炸成
+        # `image "pyimageNN" doesn't exist`。
+        self.photo = ImageTk.PhotoImage(
+            self.img_orig.resize((w, h), resample), master=self.root)
         self.canvas.delete("all")
         self.highlight_id = None
         self.canvas.create_image(self.pan_x, self.pan_y, anchor="nw",
@@ -2048,7 +2151,10 @@ class ConsensusApp:
                             "跨檔比對 %d 個檔…" % len(targets))
         self.status.config(text="%s　→　計算相似度中（%d 個檔）…"
                                 % (reason, len(targets)))
-        threading.Thread(target=self._scan_worker, args=(targets,),
+        # 容差在**主執行緒**讀出來再傳進去。背景執行緒碰 Tk 變數是未定義行為，
+        # 而且偶爾才炸——這種 bug 查起來比直接傳一個 float 貴得多。
+        threading.Thread(target=self._scan_worker,
+                         args=(targets, self._rt_tol(), self._drift_tol()),
                          daemon=True).start()
         return True
 
@@ -2070,10 +2176,11 @@ class ConsensusApp:
             return
         self.busy = "掃描（找峰）"
         self._progress_open("掃描", "找峰並計算相似度（%d 個檔）…" % len(targets))
-        threading.Thread(target=self._scan_worker, args=(targets,),
+        threading.Thread(target=self._scan_worker,
+                         args=(targets, self._rt_tol(), self._drift_tol()),
                          daemon=True).start()
 
-    def _scan_worker(self, targets):
+    def _scan_worker(self, targets, rt_tol=L.RT_TOL_S, drift_tol=L.DRIFT_TOL):
         # `except BaseException`：`SystemExit` 之類不是 Exception，只攔 Exception 的話
         # 背景執行緒會無聲死掉、UI 永遠等不到訊息（第二支應用踩過這個坑）。
         try:
@@ -2093,7 +2200,8 @@ class ConsensusApp:
             self.q.put(("status", "掃描完成（%d 檔），計算相似度中…" % len(targets)))
             areas, _per_file, _rep = L.consensus_regions(
                 targets, self.rules_config, active_only=False, verbose=False,
-                rules_for=self._rules_for)
+                rules_for=self._rules_for, rt_tol_s=rt_tol,
+                drift_tol=drift_tol)
             self.q.put(("status", "量測 %d 個共識區域…" % len(areas)))
             profs = []
             for k, m in enumerate(targets, 1):
@@ -2101,7 +2209,7 @@ class ConsensusApp:
                 self.q.put(("status", "量測 %d/%d：%s"
                             % (k, len(targets), os.path.basename(m))))
             corr, n_used = L.similarity_matrix(profs)
-            self.q.put(("corr", (corr, list(targets), len(areas), n_used)))
+            self.q.put(("corr", (corr, list(targets), len(areas), n_used, rt_tol)))
         except BaseException as exc:
             self.q.put(("error", "%s: %s" % (type(exc).__name__, exc)))
         finally:
@@ -2139,9 +2247,15 @@ class ConsensusApp:
         self.status.config(text="彙整中…")
         self.busy = "彙整"
         self._progress_open("彙整", "比對 %d 個檔的化合物候選…" % len(grp))
-        threading.Thread(target=self._cons_worker, args=(grp,), daemon=True).start()
+        # 同 `_scan_worker`：Tk 變數在主執行緒讀完再傳，不讓背景執行緒碰。
+        # 兩個 worker 的容差都有預設（＝模組預設），所以直接呼叫它們的測試
+        # 不必每次都給；UI 有沒有真的把使用者選的值傳進來，由檢查 Thread(args=)
+        # 的那個測試守著。
+        threading.Thread(target=self._cons_worker,
+                         args=(grp, self._rt_tol(), self._drift_tol()),
+                         daemon=True).start()
 
-    def _cons_worker(self, grp):
+    def _cons_worker(self, grp, rt_tol=L.RT_TOL_S, drift_tol=L.DRIFT_TOL):
         try:
             parts = self.frac.get().split("/")
             frac = float(parts[0]) / float(parts[1])
@@ -2181,7 +2295,8 @@ class ConsensusApp:
             areas, per_file, _rep = L.consensus_regions(
                 grp, self.rules_config, min_fraction=frac, active_only=True,
                 ri_calibration=ri_cal, progress=_prog, verbose=False,
-                on_peaks=_apply_user_choices, rules_for=self._rules_for)
+                on_peaks=_apply_user_choices, rules_for=self._rules_for,
+                rt_tol_s=rt_tol, drift_tol=drift_tol)
             ranked = L.rank_areas(areas, total_files=len(grp), min_fraction=frac)
 
             out = []
@@ -2342,8 +2457,9 @@ class ConsensusApp:
                 elif kind == "corr":
                     self.busy = None
                     self._progress_close()
-                    corr, files, n_areas, n_used = payload
+                    corr, files, n_areas, n_used, rt_tol = payload
                     self.corr, self.corr_files = corr, files
+                    self._corr_rt_tol = rt_tol
                     # 使用者可能在還沒有相似度時就先選了基準——算完要補挑一次，
                     # 否則他得再點一次基準才看得到結果。
                     if self.base:

@@ -4,7 +4,7 @@
 補在第 19 章之後——「候選是怎麼來的」在第一部原本只有結論沒有過程，
 而使用者要判斷一列可不可信，靠的正是這個過程。
 
-Version: 1.0 — by Albert Sheng（手冊建置，2026-09-21）
+Version: 1.1 — by Albert Sheng（手冊建置，2026-09-21）
 """
 from docx_kit import mrun, msub
 
