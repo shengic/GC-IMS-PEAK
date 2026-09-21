@@ -1832,10 +1832,11 @@ def test_compound_panel_survives_a_region_without_ri(monkeypatch):
         _destroy(root)
 
 
-def test_candidate_count_is_explained_in_the_panel_note(monkeypatch):
-    """`候選` 這一欄要有解釋——1 跟 38 的意義天差地遠。
+def test_the_ambiguity_column_is_named_and_explained_for_what_it_is(monkeypatch):
+    """那一欄叫「可能數」，而且說明要寫明**數字越大越不確定**。
 
-    使用者問過「候選是什麼意思」。欄位標題只有兩個字，說明必須在旁邊。
+    回歸測試（使用者指出）：原本叫「候選」，方向與直覺相反——「候選多」會被讀成
+    「證據多」，而它其實是「分不出來」的度量。名字和說明都得把方向講對。
     """
     tk, root, appmod, app = _app(monkeypatch)
     try:
@@ -1843,9 +1844,18 @@ def test_candidate_count_is_explained_in_the_panel_note(monkeypatch):
         _ready_for_mode(app)
         app.mode.set(appmod.MODE_COMPOUND)
         app.on_mode_change()
+
+        heads = [app.tree_cmpd.heading(c)["text"]
+                 for c in app.tree_cmpd["columns"]]
+        assert "可能數" in heads
+        assert "候選" not in heads, "「候選」會被讀成正面訊號"
+
         note = app.right_note.cget("text")
-        assert "候選" in note
-        assert "容差窗" in note, "要說清楚那是「幾個化合物對得上」，不是別的計數"
+        assert "可能數" in note
+        assert "越大越不確定" in note, "方向要講明，否則名字改了一樣會誤讀"
+        # 票數與可能數是兩件事——說明要把它們分開
+        assert "這顆峰是不是真的" in note
+        assert "知不知道它是什麼" in note
     finally:
         _destroy(root)
 

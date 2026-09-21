@@ -750,14 +750,16 @@ class ConsensusApp:
         # **座標要看得見。** 每一列講的是熱圖上的一個位置，而位置就是
         # （x = 相對 RIP 的漂移，y = RI）——少了它們，使用者沒辦法把這一列對回
         # 圖上哪一個圈。只給 RT s 更糟：熱圖的 y 軸畫的是 RI，不是保留時間。
-        # `候選` = 這個位置在容差窗內有幾個化合物對得上；1 跟 38 的意義天差地遠。
+        # `可能數` = 這個位置在容差窗內有幾個化合物對得上。**數字越大越不確定**。
+        # 原本叫「候選」，使用者指出那與直覺相反——「候選多」會被讀成「證據多」，
+        # 而它其實是「分不出來」的度量。1 跟 38 的意義天差地遠。
         self.tree_cmpd = ttk.Treeview(
             self.pane_cmpd, columns=("votes", "dim", "n", "dr", "ri", "rt"),
             show="tree headings")
         for col, txt, wid, anc in (("#0", "化合物", 210, "w"),
                                    ("votes", "票數", 52, "center"),
                                    ("dim", "維度", 64, "center"),
-                                   ("n", "候選", 46, "center"),
+                                   ("n", "可能數", 54, "center"),
                                    # 值一律置中；只有化合物名稱靠左——名稱長度差
                                    # 很多，置中之後每一列的起點都不一樣，掃讀很累。
                                    ("dr", "Drift rel", 68, "center"),
@@ -893,7 +895,7 @@ class ConsensusApp:
             self.pane_cmpd.pack(fill="both", expand=True)
             self.right_title.config(text="共識化合物（票數）")
             self.hint.config(text="檔案面板不變。雙擊右側任一列："
-                                  "該位置的所有候選化合物。\n" + LEGEND)
+                                  "該位置所有可能的化合物。\n" + LEGEND)
             self._fill_compound_panel()
             # 切進來就彙整。**只在真的過期時重算**，否則模式之間切來切去
             # 每次都白跑一輪比對。
@@ -1855,7 +1857,7 @@ class ConsensusApp:
         ims_only = [h for h in ims_hits if h.get("CAS") not in comb_cas]
 
         win = tk.Toplevel(self.root)
-        win.title("第 %d 顆峰 — 候選化合物" % (i + 1))
+        win.title("第 %d 顆峰 — 可能的化合物" % (i + 1))
         win.geometry("860x620")
         self._match_wins[i] = win
         win.bind("<Destroy>",
@@ -2217,7 +2219,7 @@ class ConsensusApp:
             return
         for i, r in enumerate(self.consolidated):
             top = r["candidates"][0] if r["candidates"] else None
-            name = (top["name"] or "?") if top else "（無候選）"
+            name = (top["name"] or "?") if top else "（找不到符合的化合物）"
             self.tree_cmpd.insert(
                 "", "end", iid=str(i), text=name,
                 # 維度標籤走 `logic.DIMENSION_LABEL`，與 ▶ 面板同一份對照表——
@@ -2231,11 +2233,12 @@ class ConsensusApp:
                 tags=("t%d" % r["vote_tier"],))
         self.right_note.config(
             text="每一列＝熱圖上的一個位置（Drift rel = x 軸、RI = y 軸），"
-                 "名稱是那個位置最強的候選。\n"
-                 "票數＝幾個重複在這裡有選取的峰。"
-                 "**候選＝這個位置在容差窗內有幾個化合物對得上**——1 表示只有一個"
-                 "解釋得通，38 表示這個名字只是 38 個之中排最前面的那一個，"
-                 "數字越大越該親自看過（雙擊展開）。\n"
+                 "名稱是那個位置最可能的那一個。\n"
+                 "票數＝幾個重複在這裡有選取的峰，講的是**這顆峰是不是真的**。"
+                 "可能數＝這個位置有幾個化合物對得上，講的是**知不知道它是什麼**"
+                 "——**數字越大越不確定**：1 表示只有一種可能，38 表示這個名字只是"
+                 "38 種可能之中排最前面的那一個（雙擊展開看全部）。兩欄各講一件事，"
+                 "票數再高也不會讓 38 變成答案。\n"
                  "維度 GC+IMS＝兩軸都同意（才算鑑定）；GC＝只有 RI 對上；"
                  "IMS＝只有漂移對上（漂移庫僅涵蓋 84 個化合物）；混合＝各檔不一致。"
                  "底色＝票數佔比，灰＝未達門檻（保留顯示不刪除）。"
@@ -2248,7 +2251,7 @@ class ConsensusApp:
         r = self.consolidated[int(sel)]
         w = tk.Toplevel(self.root)
         # 標題就是這個位置的座標——熱圖的 y 軸是 RI，所以 RI 一定要在
-        w.title("候選化合物 — Drift rel %s / RI %s / RT %s s"
+        w.title("可能的化合物 — Drift rel %s / RI %s / RT %s s"
                 % (self._fmt(r.get("dr"), 3), self._fmt(r.get("ri"), 1),
                    self._fmt(r.get("rt"), 1)))
         w.geometry("860x540")
